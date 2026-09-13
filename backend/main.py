@@ -21,7 +21,7 @@ from backend.inpaint.lama_inpaint import LamaInpaint
 from backend.inpaint.minimax_inpaint import MiniMaxInpaint
 from backend.inpaint.opencv_inpaint import OpenCVInpaint
 from backend.inpaint.propainter_inpaint import PropainterInpaint
-from backend.tools.inpaint_tools import create_mask, batch_generator, expand_frame_ranges
+from backend.tools.inpaint_tools import create_mask, batch_generator, expand_frame_ranges, is_frame_number_in_ab_sections
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
@@ -335,9 +335,71 @@ class SubtitleRemover:
                     self.update_progress(tbar, increment=len(batch))
         reader.stop()
 
+    def video_inpaint_full(self, tbar, model, batch_size=None):
+        """
+        手动框选模式：不进行字幕检测，使用框选区域生成固定掩膜，对所有帧统一修复。
+        与 sttn-auto 流程一致：选区固定、全帧处理，永不漏帧（代价是选区内所有内容都会被重绘）。
+        """
+        self.append_output(tr['Main']['ManualAreaFullFrame'])
+        mask_area_coordinates = []
+        for sub_area in self.sub_areas:
+            ymin, ymax, xmin, xmax = sub_area
+            mask_area_coordinates.append((xmin, xmax, ymin, ymax))
+        mask = create_mask(self.mask_size, mask_area_coordinates)
+        if batch_size is None:
+            batch_size = config.getSttnMaxLoadNum()
+        self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
+        has_ab = self.ab_sections is not None and len(self.ab_sections) > 0
+        # 使用帧预读取，I/O 与推理重叠
+        reader = FramePrefetcher(self.video_cap)
+        batch_frames = list()
+
+        def flush_batch():
+            # 按是否位于AB区间把连续帧分组：区间外直接写原帧，区间内送模型修复
+            if len(batch_frames) == 0:
+                return
+            runs = []  # (in_ab, [frame, ...])
+            for frame_no, frame in batch_frames:
+                in_ab = is_frame_number_in_ab_sections(frame_no, self.ab_sections) if has_ab else True
+                if runs and runs[-1][0] == in_ab:
+                    runs[-1][1].append(frame)
+                else:
+                    runs.append((in_ab, [frame]))
+            batch_frames.clear()
+            for in_ab, frames in runs:
+                if not in_ab:
+                    for frame in frames:
+                        self.video_writer.write(frame)
+                        self.update_preview_with_comp(frame, frame)
+                    self.update_progress(tbar, increment=len(frames))
+                    continue
+                for batch in batch_generator(frames, batch_size):
+                    inpainted_frames = model(batch, mask)
+                    for i, inpainted_frame in enumerate(inpainted_frames):
+                        self.video_writer.write(inpainted_frame)
+                        self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
+                    self.update_progress(tbar, increment=len(batch))
+
+        current_frame_no = 0
+        while True:
+            ret, frame = reader.read()
+            # 如果读取到为，则结束
+            if not ret:
+                break
+            # 帧号用 0 基（与 AB 区间判断约定一致，参见 subtitle_detect.py 中 current_frame_no - 1）
+            batch_frames.append((current_frame_no, frame))
+            current_frame_no += 1
+            if len(batch_frames) >= batch_size:
+                flush_batch()
+        flush_batch()
+        reader.stop()
+
     def run(self):
         # 记录开始时间
         start_time = time.time()
+        # 是否为手动框选：必须在填全屏之前判断。
+        # GUI 未画框时可能自动填入整帧矩形 (0,h,0,w)，视作未手动框选，仍走检测流程
+        manual_area_mode = len(self.sub_areas) > 0 and self.sub_areas != [(0, self.frame_height, 0, self.frame_width)]
         if len(self.sub_areas) == 0:
             self.append_output(tr['Main']['FullScreenProcessingNote'])
             self.sub_areas.append((0, self.frame_height, 0, self.frame_width))
@@ -384,7 +446,11 @@ class SubtitleRemover:
             elif config.inpaintMode.value == InpaintMode.LAMA:
                 self.video_inpaint(tbar, self.lama_inpaint)
             elif config.inpaintMode.value == InpaintMode.MINIMAX:
-                self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
+                if manual_area_mode:
+                    # 手动框选：与 sttn-auto 一致，固定掩膜处理全部帧，跳过 OCR 检测（不漏帧）
+                    self.video_inpaint_full(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
+                else:
+                    self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
             elif config.inpaintMode.value == InpaintMode.OPENCV:
                 self.video_inpaint(tbar, OpenCVInpaint())
             else:
