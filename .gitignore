@@ -407,3 +407,6 @@ inference.onnx
 /design/bg.png
 /design/demo.png
 /design/sponsor.png
+
+# ===== 启动器构建产物（由 .workbuddy/launcher/build.py 生成，不入库） =====
+/*.exe
