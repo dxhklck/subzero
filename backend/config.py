@@ -104,6 +104,10 @@ class Config(QConfig):
     # 实测 16G 显存（RTX 4070 Ti SUPER）：480p/81帧 峰值约 7.4G；720p 建议 41；1080p 建议 25
     # 速度实测：480p 约 1.1 秒/帧（12 步推理）
     minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 81, RangeValidator(5, 201))
+    # 去噪步数：越大质量略升、速度线性变慢；12 为官方推荐平衡点
+    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 12, RangeValidator(1, 30))
+    # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
+    minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 20))
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())

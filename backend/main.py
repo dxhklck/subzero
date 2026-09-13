@@ -479,7 +479,9 @@ class SubtitleRemover:
     def minimax_inpaint(self):
         device = self.hardware_accelerator.device if self.hardware_accelerator.has_cuda() or self.hardware_accelerator.has_mps() else torch.device("cpu")
         return MiniMaxInpaint(device, self.model_config.MINIMAX_MODEL_DIR,
-                              max_load_num=config.minimaxMaxLoadNum.value)
+                              max_load_num=config.minimaxMaxLoadNum.value,
+                              num_inference_steps=config.minimaxNumInferenceSteps.value,
+                              iterations=config.minimaxIterations.value)
 
 
 if __name__ == '__main__':

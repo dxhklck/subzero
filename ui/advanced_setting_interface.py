@@ -59,6 +59,11 @@ class AdvancedSettingInterface(ScrollArea):
         self.propainter_group.addSettingCard(self.propainter_max_load_num)
         self.expandLayout.addWidget(self.propainter_group)
 
+        self.minimax_group.addSettingCard(self.minimax_max_load_num)
+        self.minimax_group.addSettingCard(self.minimax_num_inference_steps)
+        self.minimax_group.addSettingCard(self.minimax_iterations)
+        self.expandLayout.addWidget(self.minimax_group)
+
         self.advanced_group.addSettingCard(self.save_directory)
         self.advanced_group.addSettingCard(self.check_update_on_startup)
         self.expandLayout.addWidget(self.advanced_group)
@@ -79,6 +84,8 @@ class AdvancedSettingInterface(ScrollArea):
         self.sttn_group = SettingCardGroup(tr["Setting"]["SttnSetting"], self.scrollWidget)
         # Propainter设置组
         self.propainter_group = SettingCardGroup(tr["Setting"]["ProPainterSetting"], self.scrollWidget)
+        # MiniMax-Remover设置组
+        self.minimax_group = SettingCardGroup(tr["Setting"]["MiniMaxSetting"], self.scrollWidget)
         # 高级设置组
         self.advanced_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
         # 关于设置组
@@ -170,6 +177,30 @@ class AdvancedSettingInterface(ScrollArea):
             title=tr["Setting"]["PropainterMaxLoadNum"],
             content=tr["Setting"]["PropainterMaxLoadNumDesc"],
             parent=self.propainter_group
+        )
+
+        self.minimax_max_load_num = RangeSettingCard(
+            configItem=config.minimaxMaxLoadNum,
+            icon=FluentIcon.DICTIONARY,
+            title=tr["Setting"]["MiniMaxMaxLoadNum"],
+            content=tr["Setting"]["MiniMaxMaxLoadNumDesc"],
+            parent=self.minimax_group
+        )
+
+        self.minimax_num_inference_steps = RangeSettingCard(
+            configItem=config.minimaxNumInferenceSteps,
+            icon=FluentIcon.SPEED_HIGH,
+            title=tr["Setting"]["MiniMaxNumInferenceSteps"],
+            content=tr["Setting"]["MiniMaxNumInferenceStepsDesc"],
+            parent=self.minimax_group
+        )
+
+        self.minimax_iterations = RangeSettingCard(
+            configItem=config.minimaxIterations,
+            icon=FluentIcon.ZOOM,
+            title=tr["Setting"]["MiniMaxIterations"],
+            content=tr["Setting"]["MiniMaxIterationsDesc"],
+            parent=self.minimax_group
         )
 
         # 视频保存路径
