@@ -1,7 +1,7 @@
 import gc
 import os
 import sys
-from typing import List
+from typing import List, Tuple
 
 import cv2
 import numpy as np
@@ -33,10 +33,13 @@ class MiniMaxInpaint:
                  model_dir: str,
                  max_load_num: int = 81,
                  num_inference_steps: int = 12,
-                 iterations: int = 6):
+                 iterations: int = 6,
+                 process_width: int = 0):
         self.device = device
         self.num_inference_steps = num_inference_steps
         self.iterations = iterations
+        # 处理分辨率上限（宽度像素，0 = 按原分辨率）。视频更宽时先等比降采样推理、输出缩回原分辨率
+        self.process_width = int(process_width) if process_width else 0
         # 块大小向下取整到 4k+1（VAE 时间维压缩因子为 4）
         self.chunk_frames = max(5, ((int(max_load_num) - 1) // 4) * 4 + 1)
 
@@ -49,6 +52,13 @@ class MiniMaxInpaint:
 
     def _align_16(self, value: int) -> int:
         return max(16, int(round(value / 16)) * 16)
+
+    def _proc_size(self, h: int, w: int) -> Tuple[int, int]:
+        """推理分辨率：默认按原分辨率 16 对齐；设置了 process_width 且视频更宽时按宽度等比降采样（对齐 16）"""
+        if self.process_width and w > self.process_width:
+            scale = self.process_width / w
+            return self._align_16(int(round(h * scale))), self._align_16(self.process_width)
+        return self._align_16(h), self._align_16(w)
 
     @torch.no_grad()
     def _inpaint_chunk(self, frames_bgr: List[np.ndarray], mask_gray: np.ndarray,
@@ -97,7 +107,7 @@ class MiniMaxInpaint:
         mask_gray = (mask > 127).astype(np.uint8) * 255
 
         H_ori, W_ori = input_frames[0].shape[:2]
-        proc_h, proc_w = self._align_16(H_ori), self._align_16(W_ori)
+        proc_h, proc_w = self._proc_size(H_ori, W_ori)
 
         inpainted_frames = []
         n = len(input_frames)

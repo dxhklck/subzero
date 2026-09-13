@@ -547,7 +547,8 @@ class SubtitleRemover:
         return MiniMaxInpaint(device, self.model_config.MINIMAX_MODEL_DIR,
                               max_load_num=config.minimaxMaxLoadNum.value,
                               num_inference_steps=config.minimaxNumInferenceSteps.value,
-                              iterations=config.minimaxIterations.value)
+                              iterations=config.minimaxIterations.value,
+                              process_width=config.minimaxProcessWidth.value)
 
 
 if __name__ == '__main__':

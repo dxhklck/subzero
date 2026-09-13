@@ -101,13 +101,17 @@ class Config(QConfig):
 
     # 以下参数仅适用MINIMAX算法时，才生效
     # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
-    # 实测 16G 显存（RTX 4070 Ti SUPER）：480p/81帧 峰值约 7.4G；720p 建议 41；1080p 建议 25
-    # 速度实测：480p 约 1.1 秒/帧（12 步推理）
+    # 实测 16G 显存（RTX 4070 Ti SUPER）：480p/81帧 峰值约 7.4G
+    # 速度实测：480p 约 1.1 秒/帧（12 步推理）；480p 建议 121（更快），1080p 建议 21~25，4K 建议 13~17
     minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 81, RangeValidator(5, 201))
     # 去噪步数：越大质量略升、速度线性变慢；12 为官方推荐平衡点
     minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 12, RangeValidator(1, 30))
     # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
     minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 20))
+    # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
+    # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
+    # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
+    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 4096))
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())

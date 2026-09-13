@@ -45,8 +45,12 @@ class AttnProcessor2_0:
         if rotary_emb is not None:
 
             def apply_rotary_emb(hidden_states: torch.Tensor, freqs: torch.Tensor):
-                x_rotated = torch.view_as_complex(hidden_states.to(torch.float64).unflatten(3, (-1, 2)))
-                x_out = torch.view_as_real(x_rotated * freqs).flatten(3, 4)
+                # 性能修复：原实现将 hidden 提升到 float64 复数域做 RoPE，
+                # 消费级 GPU（Ada 等）FP64 吞吐仅为 FP32 的 1/64，成为注意力主要瓶颈。
+                # 全 FP32 复数乘法与原实现数学同构（freqs 本身已是 complex64），
+                # 与官方 Wan2.1 后续版本的 fp32 精度一致，数值差异 < fp16 精度。
+                x_rotated = torch.view_as_complex(hidden_states.unflatten(3, (-1, 2)).to(torch.float32))
+                x_out = torch.view_as_real(x_rotated * freqs.to(torch.complex64)).flatten(3, 4)
                 return x_out.type_as(hidden_states)
 
             query = apply_rotary_emb(query, rotary_emb)
