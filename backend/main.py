@@ -18,6 +18,7 @@ from backend.tools.common_tools import is_video_or_image, is_image_file, get_rea
 from backend.inpaint.sttn_auto_inpaint import STTNAutoInpaint
 from backend.inpaint.sttn_det_inpaint import STTNDetInpaint
 from backend.inpaint.lama_inpaint import LamaInpaint
+from backend.inpaint.minimax_inpaint import MiniMaxInpaint
 from backend.inpaint.opencv_inpaint import OpenCVInpaint
 from backend.inpaint.propainter_inpaint import PropainterInpaint
 from backend.tools.inpaint_tools import create_mask, batch_generator, expand_frame_ranges
@@ -257,7 +258,7 @@ class SubtitleRemover:
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
-    def video_inpaint(self, tbar, model):
+    def video_inpaint(self, tbar, model, batch_size=None):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         if len(sub_list) == 0:
@@ -320,7 +321,9 @@ class SubtitleRemover:
                 # 1. 获取当前批次使用的mask
                 mask = create_mask(self.mask_size, mask_area_coordinates)
                 # self.append_output(f'inpaint with mask: {mask_area_coordinates}')
-                for batch in batch_generator(frames_need_inpaint, config.getSttnMaxLoadNum()):
+                if batch_size is None:
+                    batch_size = config.getSttnMaxLoadNum()
+                for batch in batch_generator(frames_need_inpaint, batch_size):
                     # 2. 调用批推理
                     if len(batch) >= 1:
                         inpainted_frames = model(batch, mask)
@@ -380,6 +383,8 @@ class SubtitleRemover:
                 self.video_inpaint(tbar, self.sttn_det_inpaint)
             elif config.inpaintMode.value == InpaintMode.LAMA:
                 self.video_inpaint(tbar, self.lama_inpaint)
+            elif config.inpaintMode.value == InpaintMode.MINIMAX:
+                self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
             elif config.inpaintMode.value == InpaintMode.OPENCV:
                 self.video_inpaint(tbar, OpenCVInpaint())
             else:
@@ -469,6 +474,12 @@ class SubtitleRemover:
     @cached_property
     def sttn_det_inpaint(self):
         return STTNDetInpaint(self.hardware_accelerator.device, self.model_config.STTN_DET_MODEL_PATH)
+
+    @cached_property
+    def minimax_inpaint(self):
+        device = self.hardware_accelerator.device if self.hardware_accelerator.has_cuda() or self.hardware_accelerator.has_mps() else torch.device("cpu")
+        return MiniMaxInpaint(device, self.model_config.MINIMAX_MODEL_DIR,
+                              max_load_num=config.minimaxMaxLoadNum.value)
 
 
 if __name__ == '__main__':

@@ -389,6 +389,8 @@ inference.onnx
 /backend/models/**/*.pdiparams
 /backend/models/**/*.pdmodel
 /backend/models/**/*.onnx
+/backend/models/**/*.safetensors
+/backend/models/minimax-remover/
 
 # ===== FFmpeg 二进制（按平台装运行时自取；用户是 Windows，仅保留 win_x64） =====
 /backend/ffmpeg/linux_x64/ffmpeg

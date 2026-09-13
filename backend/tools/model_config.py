@@ -14,6 +14,7 @@ class ModelConfig:
         self.STTN_AUTO_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'sttn-auto', 'infer_model.pth')
         self.STTN_DET_MODEL_PATH = os.path.join(BASE_DIR, 'models', 'sttn-det', 'sttn.pth')
         self.PROPAINTER_MODEL_DIR = os.path.join(BASE_DIR,'models', 'propainter')
+        self.MINIMAX_MODEL_DIR = os.path.join(BASE_DIR, 'models', 'minimax-remover')
         if config.subtitleDetectMode.value == SubtitleDetectMode.PP_OCRv5_MOBILE:
             self.DET_MODEL_DIR = os.path.join(BASE_DIR,'models', 'V5', 'ch_det_fast')
         elif config.subtitleDetectMode.value == SubtitleDetectMode.PP_OCRv5_SERVER:

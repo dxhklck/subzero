@@ -10,6 +10,7 @@ class InpaintMode(Enum):
     LAMA = "lama"
     PROPAINTER = "propainter"
     OPENCV = "opencv"
+    MINIMAX = "minimax"
 
 @unique
 class SubtitleDetectMode(Enum):

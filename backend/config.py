@@ -99,6 +99,12 @@ class Config(QConfig):
     # 720x480p视频设置80需要8G显存，设置50需要7G显存
     propainterMaxLoadNum = RangeConfigItem("ProPainter", "MaxLoadNum", 70, RangeValidator(1, 300))
 
+    # 以下参数仅适用MINIMAX算法时，才生效
+    # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
+    # 实测 16G 显存（RTX 4070 Ti SUPER）：480p/81帧 峰值约 7.4G；720p 建议 41；1080p 建议 25
+    # 速度实测：480p 约 1.1 秒/帧（12 步推理）
+    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 81, RangeValidator(5, 201))
+
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())
     
