@@ -172,7 +172,7 @@ class SubtitleRemover:
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
         index = 0
         # 使用帧预读取，I/O 与推理重叠
-        reader = FramePrefetcher(self.video_cap)        
+        reader = FramePrefetcher(self.video_cap)
         while True:
             ret, frame = reader.read()
             if not ret:

@@ -90,20 +90,13 @@ class Config(QConfig):
     # 参考帧数量
     sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 100))
     # 设置STTN算法最大同时处理的帧数量
-    # 注意：STTN 会把裁剪带统一缩放到固定 640x120 再推理，显存占用与视频分辨率基本无关。
-    # 实测（852x480，522 帧）：50 帧 → 峰值约 2.5G / 25s；80 帧 → 峰值约 2.7G / 30s（分块 11→7）。
-    # 16G 显存余量充足，追求更少分块边界可调到 80；默认保持 50（速度优先）。
     sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 300))
     getSttnMaxLoadNum = lambda self: max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
     
     # 以下参数仅适用PROPAINTER算法时，才生效
-    # 【根据自己的GPU显存大小设置】最大同时处理的图片数量（= ProPainter 的 sub_video_length），
-    # 即单次 inpaint 推理分块处理的帧数；显存主要由 分辨率 × 分块帧数 × (fp16) 决定。
-    # 注意：上游注释“1280x720 设置50需19G显存”与实际不符（实测720p/50帧仅约5G）。
-    # 实测（RTX 4070 Ti SUPER / 16G）：
-    #   720p 全屏遮罩、50 帧/批  峰值约 5G；
-    #   1080p 全屏遮罩、70 帧/批  峰值约 14G（余量约 2G，可稳定运行）。
-    # 默认 70（上游值）：16G 显存不溢出；若处理 4K 视频建议降到 50 以留足余量。
+    # 【根据自己的GPU显存大小设置】最大同时处理的图片数量，设置越大处理效果越好，但是要求显存越高
+    # 1280x720p视频设置80需要25G显存，设置50需要19G显存
+    # 720x480p视频设置80需要8G显存，设置50需要7G显存
     propainterMaxLoadNum = RangeConfigItem("ProPainter", "MaxLoadNum", 70, RangeValidator(1, 300))
 
     # 是否使用硬件加速
