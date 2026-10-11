@@ -117,6 +117,15 @@ class VideoDisplayComponent(QWidget):
             "handle.hollow-radius": 6,
             "handle.margin": 1
         }))
+
+        # A/B 对比滑块：处理时显示，拖动分界线（左=原帧 右=修复帧）
+        self.ab_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.ab_slider.setMinimum(0)
+        self.ab_slider.setMaximum(100)
+        self.ab_slider.setValue(50)
+        self.ab_slider.setFixedHeight(22)
+        self.ab_slider.setVisible(False)
+        self.ab_slider.valueChanged.connect(self.render_ab)
         
         # 视频预览区域
         self.video_display.setObjectName('videoDisplay')
@@ -149,6 +158,7 @@ class VideoDisplayComponent(QWidget):
         control_layout = QVBoxLayout()
         control_layout.setContentsMargins(8, 8, 8, 8)
         control_layout.addWidget(self.video_slider)
+        control_layout.addWidget(self.ab_slider)
         
         control_container.setLayout(control_layout)
         control_container.setStyleSheet("""
@@ -207,6 +217,36 @@ class VideoDisplayComponent(QWidget):
         self.shortcut_shift_left = QShortcut(QtGui.QKeySequence("Shift+Left"), self)
         self.shortcut_shift_left.activated.connect(lambda: self.__adjust_slider_value(-1))
         self.shortcut_shift_left.setContext(Qt.ApplicationShortcut)
+
+    def set_ab_frames(self, frame_ori, frame_comp):
+        """缓存 A/B 帧（原分辨率），显示对比滑块并按当前位置渲染"""
+        self._ab_ori = frame_ori
+        self._ab_comp = frame_comp
+        self.ab_slider.setVisible(True)
+        self.render_ab(self.ab_slider.value())
+
+    def render_ab(self, pos):
+        """wipe 渲染：左半原帧、右半修复帧，分界处画白线"""
+        ori = getattr(self, '_ab_ori', None)
+        comp = getattr(self, '_ab_comp', None)
+        if ori is None or comp is None or pos is None:
+            return
+        h, w = ori.shape[:2]
+        split = int(w * pos / 100)
+        img = comp.copy()
+        img[:, :split] = ori[:, :split]
+        if 0 < split < w:
+            cv2.line(img, (split, 0), (split, h), (255, 255, 255), max(2, h // 360))
+        self.update_video_display(img, draw_selection=False)
+
+    def clear_ab(self):
+        """任务结束：清空 A/B 缓存并隐藏滑块"""
+        self._ab_ori = None
+        self._ab_comp = None
+        self.ab_slider.blockSignals(True)
+        self.ab_slider.setValue(50)
+        self.ab_slider.blockSignals(False)
+        self.ab_slider.setVisible(False)
 
     def update_video_display(self, frame, draw_selection=True):
         """更新视频显示"""

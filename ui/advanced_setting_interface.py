@@ -3,15 +3,53 @@
 """
 
 from PySide6 import QtWidgets, QtCore, QtGui
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout
 from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
                            SettingCardGroup, RangeSettingCard, SwitchSettingCard,
                            HyperlinkCard, PrimaryPushSettingCard, PushSettingCard,
-                           MessageBox, OptionsSettingCard)
+                           MessageBox, OptionsSettingCard, SettingCard, PushButton, InfoBar)
 from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
+from backend.tools.bootstrap import check_all, fix_weights
+
+# MiniMax 性能预设：按素材分辨率一键写入推荐参数（16G 显存基准）
+MINIMAX_PRESETS = {
+    "480p":  dict(maxload=61, steps=4, iterations=8, padding=128, width=0),
+    "720p":  dict(maxload=61, steps=4, iterations=8, padding=128, width=0),
+    "1080p": dict(maxload=41, steps=4, iterations=8, padding=128, width=0),
+    "4K":    dict(maxload=21, steps=4, iterations=8, padding=160, width=0),
+}
+
+
+class MiniMaxPresetCard(SettingCard):
+    """MiniMax 分辨率预设卡：四个按钮一键写入 MaxLoadNum/Steps/Iterations/StripPadding/ProcessWidth"""
+
+    def __init__(self, title, content, parent=None):
+        super().__init__(FluentIcon.SPEED_HIGH, title, content, parent)
+        self._btns = {}
+        for name in ["480p", "720p", "1080p", "4K"]:
+            btn = PushButton(name, self)
+            btn.setFixedWidth(56)
+            btn.clicked.connect(lambda _=False, n=name: self.apply_preset(n))
+            self._btns[name] = btn
+            self.hBoxLayout.addWidget(btn, 0, Qt.AlignRight)
+            self.hBoxLayout.addSpacing(8)
+
+    def apply_preset(self, name):
+        p = MINIMAX_PRESETS[name]
+        self._cards["maxload"].setValue(p["maxload"])
+        self._cards["steps"].setValue(p["steps"])
+        self._cards["iterations"].setValue(p["iterations"])
+        self._cards["padding"].setValue(p["padding"])
+        self._cards["width"].setValue(p["width"])
+        for n, b in self._btns.items():
+            b.setChecked(n == name)
+        InfoBar.success(
+            "预设已应用", f"{name}：MaxLoadNum {p['maxload']} / Steps {p['steps']} / Iterations {p['iterations']} / 外扩 {p['padding']}px",
+            orient=Qt.Horizontal, isClosable=True, position="top", duration=2500, parent=self.window())
 
 class AdvancedSettingInterface(ScrollArea):
     """高级设置页面"""
@@ -67,9 +105,11 @@ class AdvancedSettingInterface(ScrollArea):
         self.minimax_group.addSettingCard(self.minimax_iterations)
         self.minimax_group.addSettingCard(self.minimax_process_width)
         self.minimax_group.addSettingCard(self.minimax_strip_padding)
+        self.minimax_group.addSettingCard(self.minimax_preset_card)
         self.expandLayout.addWidget(self.minimax_group)
 
         self.advanced_group.addSettingCard(self.save_directory)
+        self.advanced_group.addSettingCard(self.env_check_card)
         self.expandLayout.addWidget(self.advanced_group)
 
         self.expandLayout.setSpacing(16)
@@ -227,6 +267,20 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.minimax_group
         )
 
+        # 性能预设卡（引用上面五张卡，一键写入）
+        self.minimax_preset_card = MiniMaxPresetCard(
+            "性能预设",
+            "按素材分辨率一键写入推荐参数（480p~4K），覆盖下方五项设置",
+            parent=self.minimax_group
+        )
+        self.minimax_preset_card._cards = {
+            "maxload": self.minimax_max_load_num,
+            "steps": self.minimax_num_inference_steps,
+            "iterations": self.minimax_iterations,
+            "padding": self.minimax_strip_padding,
+            "width": self.minimax_process_width,
+        }
+
         # 视频保存路径
         self.save_directory = PushSettingCard(
             text=tr["Setting"]["ChooseDirectory"],
@@ -236,6 +290,16 @@ class AdvancedSettingInterface(ScrollArea):
             parent=self.advanced_group
         )
         self.save_directory.clicked.connect(self.choose_save_directory)
+
+        # 环境自检（运行时/GPU/驱动/依赖/权重，缺失权重可一键下载）
+        self.env_check_card = PushSettingCard(
+            text="立即自检",
+            icon=FluentIcon.SYNC,
+            title="环境自检",
+            content="检查 Python / GPU / 驱动 / 依赖 / 模型权重完整性，缺失权重支持自动下载",
+            parent=self.advanced_group
+        )
+        self.env_check_card.clicked.connect(self.run_env_check)
 
     def choose_save_directory(self):
         """选择保存目录"""
@@ -247,3 +311,45 @@ class AdvancedSettingInterface(ScrollArea):
 
         config.set(config.saveDirectory, folder)
         self.save_directory.setContent(tr["Setting"]["SaveDirectoryDefault"] if not config.saveDirectory.value else config.saveDirectory.value)
+
+    # ---------- 环境自检 ----------
+
+    def _env_log(self, text):
+        """把自检/下载日志写进主界面日志窗"""
+        try:
+            self.parent.homeInterface.append_output(text)
+        except Exception:
+            pass
+
+    def run_env_check(self):
+        """后台执行环境自检"""
+        self.env_check_card.setContent("正在自检环境，请稍候...")
+        TaskExecutor.runTask(lambda: check_all()).then(self.on_env_checked)
+
+    def on_env_checked(self, payload):
+        results, missing = payload
+        lines = [f"{'✅' if r['ok'] else '❌'} {r['name']}: {r['detail']}" for r in results]
+        report = '\n'.join(lines)
+        for line in lines:
+            self._env_log(line)
+        self.env_check_card.setContent("全部通过 ✅" if not missing else f"发现 {len(missing)} 项缺失权重，详见日志")
+
+        if missing:
+            n_dl = sum(1 for m in missing if m['url'])
+            msg = report + f"\n\n缺失权重 {len(missing)} 项"
+            if n_dl:
+                msg += f"，其中 {n_dl} 项可自动下载（大文件支持断点续传）"
+            msg += "\n是否立即下载？"
+            w = MessageBox("环境自检", msg, self.window())
+            if w.exec():
+                self.env_check_card.setContent("正在下载缺失权重...")
+                TaskExecutor.runTask(lambda: fix_weights(missing, log=self._env_log)).then(self.on_weights_fixed)
+        else:
+            InfoBar.success("环境自检", "全部通过，可以正常使用", duration=2500, parent=self.window())
+
+    def on_weights_fixed(self, payload):
+        fixed, manual = payload
+        if manual:
+            self._env_log(f"⚠ {len(manual)} 项无自动下载源，请按 README 手动获取: {', '.join(manual)}")
+        self.env_check_card.setContent(f"下载完成 ✅（{len(fixed)} 项自动修复）" if fixed else "请按日志提示手动补齐")
+        InfoBar.success("环境自检", f"权重修复完成：自动下载 {len(fixed)} 项", duration=2500, parent=self.window())

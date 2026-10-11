@@ -521,6 +521,8 @@ class HomeInterface(QWidget):
         self.se = None
         # 重置视频滑块
         self.video_slider.setValue(1)
+        # 清理 A/B 对比状态
+        self.video_display_component.clear_ab()
         # 重置当前处理任务索引
         self.current_processing_task_index = -1
 
@@ -606,12 +608,11 @@ class HomeInterface(QWidget):
                 for rect in subtitle_areas:
                     ymin, ymax, xmin, xmax = rect
                     cv2.rectangle(frame_ori, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-        preview_frame = cv2.hconcat([frame_ori, frame_comp])
-        # 先缩放图像
-        resized_frame = self._img_resize(preview_frame)
-        # 更新视频显示（这会同时保存current_pixmap）
-        self.video_display_component.update_video_display(resized_frame, draw_selection=False)
+        # wipe 对比：左原帧右修复帧，拖动下方 A/B 滑块移动分界线
+        resized_ori = self._img_resize(frame_ori)
+        resized_comp = self._img_resize(frame_comp)
         self.video_display_component.set_dragger_enabled(False)
+        self.video_display_component.set_ab_frames(resized_ori, resized_comp)
 
     @Slot(object)
     def on_task_error(self, e):
