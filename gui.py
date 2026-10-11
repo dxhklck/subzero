@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-@Author  : Fang Yao（原作者） / 改写：Jason Eric
+@Author  : 练崇坤
 @Time    : 2023/4/1 6:07 下午（原始时间）
 @FileName: gui.py
 @desc: 字幕去除器图形化界面（由 PySimpleGUI 改写为 PySide6）
@@ -20,6 +20,12 @@ from qfluentwidgets import (FluentWindow, PushButton, Slider, ProgressBar, Plain
                           OptionsValidator, SubtitleLabel, HollowHandleStyle, qconfig, ConfigItem, QConfig,
                           NavigationWidget, NavigationItemPosition, isDarkTheme, InfoBar)
 
+# pythonw（无控制台）下 stdout/stderr 为 None，接管避免 print 报错
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
 from qframelesswindow.utils import getSystemAccentColor
 from backend.config import config, tr, VERSION
 from backend.tools.theme_listener import SystemThemeListener
@@ -33,9 +39,9 @@ class SubtitleExtractorGUI(FluentWindow):
         super().__init__()
         # 禁用云母效果
         self.setMicaEffectEnabled(False)
-        # 设置深色主题并跟随系统主题色
-        # setTheme(Theme.LIGHT)
-        # setThemeColor(getSystemAccentColor(), save=True)
+        # 固定深色主题 + 青绿主色
+        setTheme(Theme.DARK, save=False)
+        setThemeColor("#1D9E75", save=False)
 
         # 初始化系统主题监听器并连接信号
         # self.themeListener = SystemThemeListener(self)

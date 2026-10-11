@@ -7,7 +7,7 @@ from functools import cached_property
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu, QAbstractItemView, QTableWidgetItem, QHeaderView
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl
 from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition
-from PySide6.QtGui import QAction, QColor, QBrush
+from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent
 from showinfm import show_in_file_manager
 
 from backend.config import config, tr
@@ -25,6 +25,10 @@ class TaskStatus(Enum):
 class TaskOptions(Enum):
     AB_SECTIONS = "ab_sections"
     SUB_AREAS = "sub_areas"
+
+# 允许拖入的媒体扩展名
+_DROP_EXTS = ('.mp4', '.flv', '.wmv', '.avi', '.mkv', '.mov', '.ts', '.webm',
+              '.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff')
 
 @dataclass
 class Task:
@@ -104,8 +108,33 @@ class TaskListComponent(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.clicked.connect(self.on_task_clicked)
-        
+
+        # 支持单/多文件拖放
+        self.setAcceptDrops(True)
+
         layout.addWidget(self.table)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """拖入校验：只接受包含媒体文件的拖放"""
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(_DROP_EXTS):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        """拖放落地：逐个入队，选中最后一个新任务"""
+        added = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(_DROP_EXTS) and os.path.isfile(path):
+                self.add_task(path)
+                added.append(path)
+        if added:
+            index = self.find_task_index_by_path(added[-1])
+            self.select_task(max(0, index))
+        event.acceptProposedAction()
         
     def add_task(self, video_path):
         """添加任务到列表
@@ -191,11 +220,11 @@ class TaskListComponent(QWidget):
                 
                 # 根据状态设置不同颜色
                 if status == TaskStatus.COMPLETED:
-                    status_item.setForeground(QBrush(QColor("#2ecc71")))  # 绿色
+                    status_item.setForeground(QBrush(QColor("#639922")))  # 完成绿
                 elif status == TaskStatus.PROCESSING:
-                    status_item.setForeground(QBrush(QColor("#3498db")))  # 蓝色
+                    status_item.setForeground(QBrush(QColor("#1D9E75")))  # 处理中·主色青
                 elif status == TaskStatus.FAILED:
-                    status_item.setForeground(QBrush(QColor("#e74c3c")))  # 红色
+                    status_item.setForeground(QBrush(QColor("#e74c3c")))  # 失败红
             
             # 如果是当前处理的任务，滚动到可见区域
             if index == self.current_task_index:

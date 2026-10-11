@@ -1,17 +1,19 @@
 import os
 import cv2
+import time
+import torch
 import threading
 import multiprocessing
-import time
 import traceback
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout
 from PySide6.QtCore import Slot, QRect, Signal
 from PySide6 import QtWidgets
 from datetime import datetime
-from qfluentwidgets import (PushButton, CardWidget, TextEdit, FluentIcon)
+from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
 from ui.setting_interface import SettingInterface
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.task_list_component import TaskListComponent, TaskStatus, TaskOptions
+from ui.component.gpu_monitor_bar import GpuMonitorBar
 from ui.icon.my_fluent_icon import MyFluentIcon
 from backend.config import config, tr
 from backend.tools.constant import InpaintMode
@@ -55,6 +57,9 @@ class HomeInterface(QWidget):
 
         # 当前正在处理的任务索引
         self.current_processing_task_index = -1
+        # 处理速度 EMA 计算用
+        self._speed_last = None  # (time, progress_total)
+        self._speed_ema = 0.0
 
         self.__init_widgets()
         self.progress_signal.connect(self.update_progress)
@@ -67,9 +72,12 @@ class HomeInterface(QWidget):
 
     def __init_widgets(self):
         """创建主页面"""
-        main_layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        main_layout = QHBoxLayout()
         main_layout.setSpacing(8)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setContentsMargins(16, 16, 16, 8)
 
         # 左侧视频区域
         left_layout = QVBoxLayout()
@@ -135,13 +143,13 @@ class HomeInterface(QWidget):
         self.file_button.setIcon(FluentIcon.FOLDER)
         self.file_button.clicked.connect(self.open_file)
         button_layout.addWidget(self.file_button)
-        
-        self.run_button = PushButton(tr['SubtitleExtractorGUI']['Run'], self)
+
+        self.run_button = PrimaryPushButton(tr['SubtitleExtractorGUI']['Run'], self)
         self.run_button.setIcon(FluentIcon.PLAY)
         self.run_button.clicked.connect(self.run_button_clicked)
         button_layout.addWidget(self.run_button)
-        
-        self.stop_button = PushButton(tr['SubtitleExtractorGUI']['Stop'], self)
+
+        self.stop_button = PrimaryPushButton(tr['SubtitleExtractorGUI']['Stop'], self)
         self.stop_button.setIcon(MyFluentIcon.Stop)
         self.stop_button.setVisible(False)
         self.stop_button.clicked.connect(self.stop_button_clicked)
@@ -152,6 +160,12 @@ class HomeInterface(QWidget):
         right_layout.addWidget(button_container)
 
         main_layout.addLayout(right_layout, 1)
+
+        outer_layout.addLayout(main_layout, 1)
+
+        # 底部 GPU 状态栏监控（显存+峰值 / GPU / 内存 / 速度）
+        self.gpu_monitor_bar = GpuMonitorBar(self)
+        outer_layout.addWidget(self.gpu_monitor_bar)
     
     def on_scroll_change(self, value):
         """监控滚动条位置变化"""
@@ -322,6 +336,12 @@ class HomeInterface(QWidget):
 
             self._stop_event.clear()
             self.toggle_buttons_signal.emit(False)
+            # 重置监控：速度 EMA 与显存峰值
+            self._speed_last = None
+            self._speed_ema = 0.0
+            self.gpu_monitor_bar.reset_peak()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             # 开启后台线程处理视频
             def task():
                 try:
@@ -496,9 +516,24 @@ class HomeInterface(QWidget):
             # 更新任务进度
             if self.current_processing_task_index >= 0:
                 self.task_list_component.update_task_progress(
-                    self.current_processing_task_index, 
+                    self.current_processing_task_index,
                     progress_total,
                 )
+
+            # 处理速度（帧/s，EMA 平滑），喂给底部监控栏
+            now = time.time()
+            if self._speed_last is not None and self.frame_count:
+                last_t, last_p = self._speed_last
+                dt = now - last_t
+                if dt > 0.2:
+                    df = (progress_total - last_p) / 100 * self.frame_count
+                    if df >= 0:
+                        inst = df / dt
+                        self._speed_ema = inst if self._speed_ema == 0 else (self._speed_ema * 0.7 + inst * 0.3)
+                        self.gpu_monitor_bar.update_speed(self._speed_ema)
+                    self._speed_last = (now, progress_total)
+            else:
+                self._speed_last = (now, progress_total)
             
             # 检查是否完成
             if isFinished:
@@ -662,6 +697,9 @@ class HomeInterface(QWidget):
         try:
             # 通知 worker 线程停止
             self._stop_event.set()
+            # 停止 GPU 监控采样线程
+            if hasattr(self, 'gpu_monitor_bar'):
+                self.gpu_monitor_bar.stop()
             # 终止子进程
             ProcessManager.instance().terminate_all()
             # 等待 worker 线程结束（最多5秒）
