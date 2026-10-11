@@ -1,7 +1,7 @@
 [简体中文](README.md) | English
 
 <div align="center">
-  <img src="design/vsr.ico" alt="SubZero" width="128" height="128">
+  <img src="design/subzero.ico" alt="SubZero" width="128" height="128">
 
 # SubZero (净影)
 

@@ -52,7 +52,7 @@ class SubtitleExtractorGUI(FluentWindow):
         # self.themeListener.start()
  
         # 设置窗口图标
-        self.setWindowIcon(QtGui.QIcon("design/vsr.ico"))
+        self.setWindowIcon(QtGui.QIcon("design/subzero.ico"))
         self.setWindowTitle(tr['SubtitleExtractorGUI']['Title'] + " v" + VERSION)
         # 创建界面布局
         self._create_layout()
