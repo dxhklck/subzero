@@ -13,18 +13,7 @@ class SettingInterface(QtWidgets.QVBoxLayout):
     def __init__(self, parent):
         super().__init__()
         self.setContentsMargins(16, 16, 16, 16)
-        
-        # 界面语言设置
-        self.interface_combo = ComboBoxSettingCard(
-            configItem=config.interface,
-            icon=FluentIcon.LANGUAGE,
-            title=tr["SubtitleExtractorGUI"]["InterfaceLanguage"],
-            content="",
-            parent=parent,
-            texts=config.intefaceTexts.keys(),
-        )
-        self.addWidget(self.interface_combo)
-        
+
         # 处理模式设置
         self.inpaint_mode_combo = ComboBoxSettingCard(
             configItem=config.inpaintMode,

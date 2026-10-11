@@ -20,18 +20,6 @@ PROJECT_UPDATE_URLS = [
 HARDWARD_ACCELERATION_OPTION = True
 
 class Config(QConfig):
-    # 界面语言设置
-    intefaceTexts = {
-        '简体中文': 'ch',
-        '繁體中文': 'chinese_cht',
-        'English': 'en',
-        '한국어': 'ko',
-        '日本語': 'japan',
-        'Tiếng Việt': 'vi',
-        'Español': 'es'
-    }
-    interface = OptionsConfigItem("Window", "Interface", "ChineseSimplified", OptionsValidator(intefaceTexts.values()), restart = True)
-    
     # 窗口位置和大小
     windowX = ConfigItem("Window", "X", None)
     windowY = ConfigItem("Window", "Y", None)
@@ -136,10 +124,10 @@ if isinstance(_detect_mode_value, str) and _detect_mode_value in ("快速", "Fas
 elif isinstance(_detect_mode_value, str) and _detect_mode_value in ("精准", "Precise"):
     config.set(config.subtitleDetectMode, SubtitleDetectMode.PP_OCRv5_SERVER)
 
-# 读取界面语言配置
+# 界面文案（仅简体中文，多语言已移除）
 tr = configparser.ConfigParser()
 
-TRANSLATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'interface', f"{config.interface.value}.ini")
+TRANSLATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'interface', "ch.ini")
 tr.read(TRANSLATION_FILE, encoding='utf-8')
 
 # 项目的base目录
