@@ -112,6 +112,9 @@ class Config(QConfig):
     # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
     # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
     minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 4096))
+    # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
+    # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
+    minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())

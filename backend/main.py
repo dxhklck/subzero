@@ -22,6 +22,7 @@ from backend.inpaint.minimax_inpaint import MiniMaxInpaint
 from backend.inpaint.opencv_inpaint import OpenCVInpaint
 from backend.inpaint.propainter_inpaint import PropainterInpaint
 from backend.tools.inpaint_tools import create_mask, batch_generator, expand_frame_ranges
+from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
@@ -487,11 +488,13 @@ class SubtitleRemover:
     @cached_property
     def minimax_inpaint(self):
         device = self.hardware_accelerator.device if self.hardware_accelerator.has_cuda() or self.hardware_accelerator.has_mps() else torch.device("cpu")
-        return MiniMaxInpaint(device, self.model_config.MINIMAX_MODEL_DIR,
-                              max_load_num=config.minimaxMaxLoadNum.value,
-                              num_inference_steps=config.minimaxNumInferenceSteps.value,
-                              iterations=config.minimaxIterations.value,
-                              process_width=config.minimaxProcessWidth.value)
+        model = MiniMaxInpaint(device, self.model_config.MINIMAX_MODEL_DIR,
+                               max_load_num=config.minimaxMaxLoadNum.value,
+                               num_inference_steps=config.minimaxNumInferenceSteps.value,
+                               iterations=config.minimaxIterations.value,
+                               process_width=config.minimaxProcessWidth.value)
+        # 条带裁剪修复：只把 mask 外扩 padding 的条带送入模型，窗口外像素原样保留
+        return StripCropInpaint(model, config.minimaxStripPadding.value)
 
 
 if __name__ == '__main__':
