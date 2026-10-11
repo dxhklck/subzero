@@ -7,7 +7,7 @@ from functools import cached_property
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
                                QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl
-from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition
+from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig
 from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent
 from showinfm import show_in_file_manager
 
@@ -63,11 +63,21 @@ class TaskProgressCell(QWidget):
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(5)
-        self.bar.setStyleSheet("""
-            QProgressBar { background: rgba(255,255,255,0.10); border: none; border-radius: 2px; }
-            QProgressBar::chunk { background: #1D9E75; border-radius: 2px; }
+        self._status_color = "#A9A8A0"
+        self._status_text = ""
+        self._apply_theme()
+        qconfig.themeChanged.connect(self._apply_theme)
+
+    def _apply_theme(self):
+        track = "rgba(255,255,255,0.10)" if isDarkTheme() else "rgba(0,0,0,0.10)"
+        self.bar.setStyleSheet(f"""
+            QProgressBar {{ background: {track}; border: none; border-radius: 2px; }}
+            QProgressBar::chunk {{ background: #1D9E75; border-radius: 2px; }}
         """)
-        lay.addWidget(self.bar)
+        self._render_status()
+
+    def _render_status(self):
+        self.status_label.setStyleSheet(f"font-size:12px; color:{self._status_color};")
 
     def set_progress(self, value):
         self.bar.setValue(max(0, min(100, int(value))))
@@ -75,8 +85,8 @@ class TaskProgressCell(QWidget):
 
     def set_status(self, status: TaskStatus):
         self.status_label.setText(status.value)
-        color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
-        self.status_label.setStyleSheet(f"font-size:12px; color:{color};")
+        self._status_color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
+        self._render_status()
 
 @dataclass
 class Task:

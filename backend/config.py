@@ -7,19 +7,20 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
 # 项目版本号
-VERSION = "1.4.0"
-PROJECT_HOME_URL = "https://github.com/YaoFANGUK/video-subtitle-remover"
-PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
-PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
-PROJECT_UPDATE_URLS = [
-    "https://api.github.com/repos/YaoFANGUK/video-subtitle-remover/releases/latest",
-    "https://accelerate.xdow.net/api/repos/YaoFANGUK/video-subtitle-remover/releases/latest",
-] 
+VERSION = "1.0.0"
+# 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
+PROJECT_HOME_URL = ""
+PROJECT_ISSUES_URL = ""
+PROJECT_RELEASES_URL = ""
+PROJECT_UPDATE_URLS = [] 
 
 # 硬件加速选项开关
 HARDWARD_ACCELERATION_OPTION = True
 
 class Config(QConfig):
+    # 应用主题：light / dark / auto（跟随系统），主色固定青绿
+    appTheme = OptionsConfigItem("Window", "AppTheme", "auto", OptionsValidator(["light", "dark", "auto"]), restart=False)
+
     # 窗口位置和大小
     windowX = ConfigItem("Window", "X", None)
     windowY = ConfigItem("Window", "Y", None)

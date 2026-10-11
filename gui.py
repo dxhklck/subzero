@@ -31,6 +31,7 @@ from backend.config import config, tr, VERSION
 from backend.tools.theme_listener import SystemThemeListener
 from backend.tools.process_manager import ProcessManager
 from ui.advanced_setting_interface import AdvancedSettingInterface
+from ui.about_interface import AboutInterface
 from ui.home_interface import HomeInterface
 
 
@@ -39,9 +40,12 @@ class SubtitleExtractorGUI(FluentWindow):
         super().__init__()
         # 禁用云母效果
         self.setMicaEffectEnabled(False)
-        # 固定深色主题 + 青绿主色
-        setTheme(Theme.DARK, save=False)
+        # 主色固定青绿；明暗主题由设置页选择（默认跟随系统）
         setThemeColor("#1D9E75", save=False)
+        self._apply_theme()
+        config.appTheme.valueChanged.connect(self._apply_theme)
+        # 最小窗口尺寸，避免内容被挤压不可用
+        self.setMinimumSize(960, 640)
 
         # 初始化系统主题监听器并连接信号
         # self.themeListener = SystemThemeListener(self)
@@ -55,13 +59,23 @@ class SubtitleExtractorGUI(FluentWindow):
         self._connectSignalToSlot()
         self._lazy_check_update()
 
+    def _apply_theme(self, value=None):
+        """应用明暗主题：light / dark / auto（跟随系统）"""
+        v = value if value is not None else config.appTheme.value
+        if v == 'dark':
+            setTheme(Theme.DARK, save=False)
+        elif v == 'light':
+            setTheme(Theme.LIGHT, save=False)
+        else:
+            setTheme(Theme.AUTO, save=False)
+
     def _lazy_check_update(self):
         """ 延迟检查更新 """
         if not config.checkUpdateOnStartup.value:
             return
         self.check_update_timer = QtCore.QTimer(self)
         self.check_update_timer.setSingleShot(True)
-        self.check_update_timer.timeout.connect(lambda: self.advancedSettingInterface.check_update(ignore=True))
+        self.check_update_timer.timeout.connect(lambda: self.aboutInterface.check_update(ignore=True))
         self.check_update_timer.start(2000)
 
     def _connectSignalToSlot(self):
@@ -77,15 +91,18 @@ class SubtitleExtractorGUI(FluentWindow):
         )
 
     def _create_layout(self):
-        # 创建主页面和高级设置页面
+        # 创建主页面和设置、关于页面
         self.homeInterface = HomeInterface(self)
         self.homeInterface.setObjectName("HomeInterface")
-        self.advancedSettingInterface = AdvancedSettingInterface(self)
-        self.advancedSettingInterface.setObjectName("AdvancedSettingInterface")
-        
-        # 添加到主窗口作为子界面
-        self.addSubInterface(self.homeInterface,FluentIcon.HOME, tr['SubtitleExtractorGUI']['Title'])
-        self.addSubInterface(self.advancedSettingInterface, FluentIcon.SETTING, tr['Setting']['AdvancedSetting'], NavigationItemPosition.BOTTOM)
+        self.settingsInterface = AdvancedSettingInterface(self)
+        self.settingsInterface.setObjectName("SettingsInterface")
+        self.aboutInterface = AboutInterface(self)
+        self.aboutInterface.setObjectName("AboutInterface")
+
+        # 三个页面：首页 / 设置 / 关于
+        self.addSubInterface(self.homeInterface, FluentIcon.HOME, "首页")
+        self.addSubInterface(self.settingsInterface, FluentIcon.SETTING, "设置")
+        self.addSubInterface(self.aboutInterface, FluentIcon.INFO, "关于", NavigationItemPosition.BOTTOM)
 
     def on_navigation_item_changed(self, key):
         """导航项变更时的处理函数"""
