@@ -5,6 +5,7 @@ import re
 import torch
 
 from backend.config import tr
+from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
 
 class HardwareAccelerator:
 
@@ -182,7 +183,8 @@ class HardwareAccelerator:
         """
         try:
             import subprocess
-            result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10,
+                                    creationflags=SUBPROCESS_CREATION_FLAGS)
             out = result.stdout
             drv = re.search(r'Driver Version:\s*([\d.]+)', out) or re.search(r'NVIDIA-SMI\s+([\d.]+)', out)
             cud = re.search(r'(?:CUDA UMD\s+|CUDA\s+)Version:\s*([\d.]+)', out)

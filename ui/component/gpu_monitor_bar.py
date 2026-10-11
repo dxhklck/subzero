@@ -9,6 +9,8 @@ from PySide6.QtGui import QColor
 
 from qfluentwidgets import ProgressRing
 
+from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
+
 MUTED = "#A9A8A0"
 ACCENT = "#1D9E75"
 
@@ -38,7 +40,8 @@ class GpuSamplerThread(QThread):
             result = subprocess.run(
                 ['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu',
                  '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=5)
+                capture_output=True, text=True, timeout=5,
+                creationflags=SUBPROCESS_CREATION_FLAGS)
             parts = [p.strip() for p in result.stdout.strip().split(',')]
             if len(parts) < 3:
                 return None

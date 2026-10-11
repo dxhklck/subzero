@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.config import *
 from backend.tools.hardware_accelerator import HardwareAccelerator
-from backend.tools.common_tools import is_video_or_image, is_image_file, get_readable_path, read_image
+from backend.tools.common_tools import is_video_or_image, is_image_file, get_readable_path, read_image, SUBPROCESS_CREATION_FLAGS
 from backend.inpaint.sttn_auto_inpaint import STTNAutoInpaint
 from backend.inpaint.sttn_det_inpaint import STTNDetInpaint
 from backend.inpaint.lama_inpaint import LamaInpaint
@@ -440,7 +440,8 @@ class SubtitleRemover:
                                  "-vn", "-loglevel", "error", temp.name]
         use_shell = True if os.name == "nt" else False
         try:
-            subprocess.check_output(audio_extract_command, stdin=open(os.devnull), shell=use_shell, timeout=600)
+            subprocess.check_output(audio_extract_command, stdin=open(os.devnull), shell=use_shell, timeout=600,
+                                    creationflags=SUBPROCESS_CREATION_FLAGS)
         except Exception as e:
             traceback.print_exc()
             self.append_output(tr['Main']['FailToExtractAudio'].format(str(e)))
@@ -454,7 +455,8 @@ class SubtitleRemover:
                                        "-acodec", "copy",
                                        "-loglevel", "error", self.video_out_path]
                 try:
-                    subprocess.check_output(audio_merge_command, stdin=open(os.devnull), shell=use_shell, timeout=600)
+                    subprocess.check_output(audio_merge_command, stdin=open(os.devnull), shell=use_shell, timeout=600,
+                                            creationflags=SUBPROCESS_CREATION_FLAGS)
                 except Exception as e:
                     traceback.print_exc()
                     self.append_output(tr['Main']['FailToMergeAudio'].format(str(e)))

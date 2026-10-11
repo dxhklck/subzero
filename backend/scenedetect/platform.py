@@ -29,6 +29,12 @@ from typing import AnyStr, Dict, List, Optional, Union
 
 import cv2
 
+# GUI 无黑窗：Windows 下隐藏子进程控制台
+try:
+    from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
+except ImportError:
+    SUBPROCESS_CREATION_FLAGS = 0
+
 ##
 ## tqdm Library
 ##
@@ -246,7 +252,7 @@ def get_ffmpeg_path() -> Optional[str]:
     one is available from the `imageio_ffmpeg` package. Returns None if ffmpeg couldn't be found.
     """
     try:
-        subprocess.call(['ffmpeg', '-v', 'quiet'])
+        subprocess.call(['ffmpeg', '-v', 'quiet'], creationflags=SUBPROCESS_CREATION_FLAGS)
         return 'ffmpeg'
     except OSError:
         pass
@@ -255,7 +261,7 @@ def get_ffmpeg_path() -> Optional[str]:
         # pylint: disable=import-outside-toplevel
         from imageio_ffmpeg import get_ffmpeg_exe
         # pylint: enable=import-outside-toplevel
-        subprocess.call([get_ffmpeg_exe(), '-v', 'quiet'])
+        subprocess.call([get_ffmpeg_exe(), '-v', 'quiet'], creationflags=SUBPROCESS_CREATION_FLAGS)
         return get_ffmpeg_exe()
     # Gracefully handle case where imageio_ffmpeg is not available.
     except ModuleNotFoundError:
@@ -275,7 +281,8 @@ def get_ffmpeg_version() -> Optional[str]:
     if ffmpeg_path is None:
         return None
     # If get_ffmpeg_path() returns a value, the path it returns should be invocable.
-    output = subprocess.check_output(args=[ffmpeg_path, '-version'], text=True)
+    output = subprocess.check_output(args=[ffmpeg_path, '-version'], text=True,
+                                     creationflags=SUBPROCESS_CREATION_FLAGS)
     output_split = output.split()
     if len(output_split) >= 3 and output_split[1] == 'version':
         return output_split[2]
@@ -287,7 +294,8 @@ def get_mkvmerge_version() -> Optional[str]:
     """Get mkvmerge version identifier, or None if mkvmerge is not found in PATH."""
     tool_name = 'mkvmerge'
     try:
-        output = subprocess.check_output(args=[tool_name, '--version'], text=True)
+        output = subprocess.check_output(args=[tool_name, '--version'], text=True,
+                                         creationflags=SUBPROCESS_CREATION_FLAGS)
     except FileNotFoundError:
         return None
     output_split = output.split()

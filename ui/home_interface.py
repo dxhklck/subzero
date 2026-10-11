@@ -5,7 +5,7 @@ import torch
 import threading
 import multiprocessing
 import traceback
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
 from PySide6.QtCore import Slot, QRect, Signal
 from PySide6 import QtWidgets
 from datetime import datetime
@@ -105,6 +105,26 @@ class HomeInterface(QWidget):
         output_container = CardWidget(self)
         output_layout = QVBoxLayout()
         output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(0)
+        # 日志面板头部：标题 + 自动滚动 + 清空
+        log_header = QHBoxLayout()
+        log_header.setContentsMargins(10, 6, 10, 4)
+        log_title = QLabel("输出日志")
+        log_title.setStyleSheet("font-size:12px; font-weight:500;")
+        log_header.addWidget(log_title)
+        log_header.addStretch(1)
+        self.auto_scroll_button = PushButton("自动滚动", self)
+        self.auto_scroll_button.setCheckable(True)
+        self.auto_scroll_button.setChecked(True)
+        self.auto_scroll_button.clicked.connect(
+            lambda checked: setattr(self, 'auto_scroll', checked))
+        self.auto_scroll_button.setFixedHeight(24)
+        log_header.addWidget(self.auto_scroll_button)
+        self.clear_log_button = PushButton("清空", self)
+        self.clear_log_button.setFixedHeight(24)
+        self.clear_log_button.clicked.connect(lambda: self.output_text.clear())
+        log_header.addWidget(self.clear_log_button)
+        output_layout.addLayout(log_header)
         output_layout.addWidget(self.output_text)
         output_container.setLayout(output_layout)
         left_layout.addWidget(output_container)

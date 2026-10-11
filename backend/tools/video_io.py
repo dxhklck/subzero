@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .ffmpeg_cli import FFmpegCLI
+from .common_tools import SUBPROCESS_CREATION_FLAGS
 
 
 class FramePrefetcher:
@@ -80,6 +81,7 @@ class FFmpegVideoWriter:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=SUBPROCESS_CREATION_FLAGS,
         )
 
     def write(self, frame):

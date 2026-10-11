@@ -4,7 +4,8 @@ from enum import Enum, unique
 from dataclasses import dataclass
 from functools import cached_property
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu, QAbstractItemView, QTableWidgetItem, QHeaderView
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
+                               QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl
 from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition
 from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent
@@ -29,6 +30,53 @@ class TaskOptions(Enum):
 # 允许拖入的媒体扩展名
 _DROP_EXTS = ('.mp4', '.flv', '.wmv', '.avi', '.mkv', '.mov', '.ts', '.webm',
               '.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff')
+
+# 状态文字颜色（对齐青绿主题语义）
+_STATUS_COLORS = {
+    'completed': "#639922",
+    'processing': "#1D9E75",
+    'failed': "#e74c3c",
+}
+
+
+class TaskProgressCell(QWidget):
+    """进度·状态 单元格：上行「百分比 + 状态」，下行进度条（方案1 卡片样式）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(3)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        self.pct_label = QLabel("0%")
+        self.pct_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("font-size:12px;")
+        top.addWidget(self.pct_label)
+        top.addStretch(1)
+        top.addWidget(self.status_label)
+        lay.addLayout(top)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(5)
+        self.bar.setStyleSheet("""
+            QProgressBar { background: rgba(255,255,255,0.10); border: none; border-radius: 2px; }
+            QProgressBar::chunk { background: #1D9E75; border-radius: 2px; }
+        """)
+        lay.addWidget(self.bar)
+
+    def set_progress(self, value):
+        self.bar.setValue(max(0, min(100, int(value))))
+        self.pct_label.setText(f"{int(value)}%")
+
+    def set_status(self, status: TaskStatus):
+        self.status_label.setText(status.value)
+        color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
+        self.status_label.setStyleSheet(f"font-size:12px; color:{color};")
 
 @dataclass
 class Task:
@@ -84,26 +132,40 @@ class TaskListComponent(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
-        # 创建表格
+
+        # 面板标题：任务列表 · 支持多文件拖入
+        header = QHBoxLayout()
+        header.setContentsMargins(10, 8, 10, 4)
+        title = QLabel(tr['TaskList']['Name'])
+        title.setStyleSheet("font-size:12px; font-weight:500;")
+        badge = QLabel("任务列表 · 支持多文件拖入")
+        badge.setStyleSheet("color:#5DCAA5; font-size:11px; background:rgba(29,158,117,0.12);"
+                            "border-radius:8px; padding:1px 8px;")
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(badge)
+        layout.addLayout(header)
+
+        # 创建表格：名称 | 进度·状态（卡片式单元格）
         self.table = TableWidget(self)
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels([tr['TaskList']['Name'], tr['TaskList']['Progress'], tr['TaskList']['Status']])
-        
-        # 设置表格样式
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels([tr['TaskList']['Name'],
+                                              f"{tr['TaskList']['Progress']} · {tr['TaskList']['Status']}"])
+
+        # 卡片式样式：无网格、无隔行底色
         self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
-        
+        self.table.setAlternatingRowColors(False)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerItem)
+
         # 设置列宽模式
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)           # 名称列拉伸填充
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 进度列自适应内容宽度
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 状态列自适应内容宽度
-        
+        header_view = self.table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.Stretch)           # 名称列拉伸填充
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 进度·状态列自适应
+
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        
+
         # 连接信号
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
@@ -112,7 +174,14 @@ class TaskListComponent(QWidget):
         # 支持单/多文件拖放
         self.setAcceptDrops(True)
 
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
+
+        # 底部拖入提示
+        hint = QLabel("拖入单个或多个视频文件")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet("color:#A9A8A0; font-size:11px; border:1px dashed #5F5E5A;"
+                           "border-radius:6px; margin:6px 10px 8px 10px; padding:5px;")
+        layout.addWidget(hint)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         """拖入校验：只接受包含媒体文件的拖放"""
@@ -164,73 +233,57 @@ class TaskListComponent(QWidget):
         # 更新表格
         row = len(self.tasks) - 1
         self.table.setRowCount(len(self.tasks))
-        
+
         item0 = QTableWidgetItem(file_name)
-        item1 = QTableWidgetItem("0%")
-        item2 = QTableWidgetItem(TaskStatus.PENDING.value)
-        
-        # 设置文件名单元格的省略模式为中间省略
         item0.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         item0.setToolTip(video_path)  # 设置完整路径为工具提示
         # 设置表格的文本省略模式
         self.table.setTextElideMode(Qt.ElideMiddle)
-        
-        item1.setTextAlignment(Qt.AlignCenter)
-        item2.setTextAlignment(Qt.AlignCenter)
-        
+
         self.table.setItem(row, 0, item0)
-        self.table.setItem(row, 1, item1)
-        self.table.setItem(row, 2, item2)
-        
+        # 进度·状态卡片单元格
+        self.table.setRowHeight(row, 46)
+        self.table.setCellWidget(row, 1, TaskProgressCell())
+        cell = self.table.cellWidget(row, 1)
+        cell.set_progress(0)
+        cell.set_status(TaskStatus.PENDING)
+
         # 滚动到最新添加的行
         self.table.scrollToBottom()
         return True
-        
+
     def update_task_progress(self, index, progress):
         """更新任务进度
-        
+
         Args:
             index: 任务索引
             progress: 进度值(0-100)
         """
         if 0 <= index < len(self.tasks):
             self.tasks[index].progress = progress
-            
+
             # 更新进度单元格
-            progress_item = self.table.item(index, 1)
-            if progress_item:
-                progress_item.setText(f"{progress}%")
-            
+            cell = self.table.cellWidget(index, 1)
+            if cell:
+                cell.set_progress(progress)
+
             # 如果是当前处理的任务，滚动到可见区域
             if index == self.current_task_index:
                 self.table.scrollTo(self.table.model().index(index, 0))
-                
+
     def update_task_status(self, index, status):
         """更新任务状态
-        
+
         Args:
             index: 任务索引
             status: 任务状态
         """
         if 0 <= index < len(self.tasks):
             self.tasks[index].status = status
-            status_item = self.table.item(index, 2)
-            if status_item:
-                status_item.setText(status.value)
-                
-                # 根据状态设置不同颜色
-                if status == TaskStatus.COMPLETED:
-                    status_item.setForeground(QBrush(QColor("#639922")))  # 完成绿
-                elif status == TaskStatus.PROCESSING:
-                    status_item.setForeground(QBrush(QColor("#1D9E75")))  # 处理中·主色青
-                elif status == TaskStatus.FAILED:
-                    status_item.setForeground(QBrush(QColor("#e74c3c")))  # 失败红
-            
-            # 如果是当前处理的任务，滚动到可见区域
-            if index == self.current_task_index:
-                self.table.scrollTo(self.table.model().index(index, 0))
-                
-            # 选中当前行
+            cell = self.table.cellWidget(index, 1)
+            if cell:
+                cell.set_status(status)
+            # 选中当前行（保持原有行为）
             self.table.selectRow(index)
     
     def get_pending_tasks(self):

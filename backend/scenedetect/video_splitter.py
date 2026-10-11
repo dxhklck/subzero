@@ -39,6 +39,11 @@ import math
 import time
 from typing import Iterable, Optional, Tuple
 
+try:
+    from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
+except ImportError:
+    SUBPROCESS_CREATION_FLAGS = 0
+
 from scenedetect.platform import (tqdm, invoke_command, CommandTooLong, get_file_name,
                                   get_ffmpeg_path, Template)
 from scenedetect.frame_timecode import FrameTimecode
@@ -76,7 +81,7 @@ def is_mkvmerge_available() -> bool:
     """
     ret_val = None
     try:
-        ret_val = subprocess.call(['mkvmerge', '--quiet'])
+        ret_val = subprocess.call(['mkvmerge', '--quiet'], creationflags=SUBPROCESS_CREATION_FLAGS)
     except OSError:
         return False
     if ret_val is not None and ret_val != 2:

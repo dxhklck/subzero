@@ -1,10 +1,14 @@
 import os
 import sys
 import ctypes
+import subprocess
 
 import cv2
 import numpy as np
 from fsplit.filesplit import Filesplit
+
+# GUI 子系统（pythonw）下调起控制台程序会弹黑窗，Windows 下一律加此标志
+SUBPROCESS_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
 video_extensions = {
     '.mp4', '.m4a', '.m4v', '.f4v', '.f4a', '.m4b', '.m4r', '.f4b', '.mov',
