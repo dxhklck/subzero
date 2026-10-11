@@ -9,10 +9,12 @@ import configparser
 # 项目版本号
 VERSION = "1.0.0"
 # 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
-PROJECT_HOME_URL = ""
-PROJECT_ISSUES_URL = ""
-PROJECT_RELEASES_URL = ""
-PROJECT_UPDATE_URLS = [] 
+PROJECT_HOME_URL = "https://github.com/dxhklck/subzero"
+PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
+PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
+PROJECT_UPDATE_URLS = [
+    "https://api.github.com/repos/dxhklck/subzero/releases/latest",
+]
 
 # 硬件加速选项开关
 HARDWARD_ACCELERATION_OPTION = True
