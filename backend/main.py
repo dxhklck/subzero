@@ -420,6 +420,15 @@ class SubtitleRemover:
         providers = ", ".join(self.hardware_accelerator.onnx_providers)
         providers_str = f", {providers}" if providers else ""
         self.append_output(tr['Main']['SubtitleDetectionModel'].format(f"{detect_mode_name} ({detect_device}{providers_str})"))
+        # 有 N 卡但 Paddle GPU 走不了（驱动过旧 / 显卡架构不被当前 paddle 覆盖 / CUDA DLL 异常）时，
+        # 在日志窗口给出原因与建议，避免用户误以为字幕检测坏了
+        fallback_reason = self.hardware_accelerator.paddle_cuda_fallback_reason
+        if fallback_reason:
+            self.append_output(tr['Main']['PaddleGpuFallbackHint'].format(fallback_reason))
+            driver_ver, driver_cuda = self.hardware_accelerator.get_nvidia_driver_info()
+            paddle_cuda = self.hardware_accelerator.get_paddle_compile_cuda()
+            self.append_output('NVIDIA driver: {} (supports CUDA {}), paddle compiled CUDA: {}'.format(
+                driver_ver or 'unknown', driver_cuda or 'unknown', paddle_cuda or 'n/a'))
 
     def merge_audio_to_video(self):
         # 创建音频临时对象，windows下delete=True会有permission denied的报错
