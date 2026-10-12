@@ -15,12 +15,14 @@ from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all, fix_weights
 
-# MiniMax 性能预设：按素材分辨率一键写入推荐参数（16G 显存基准）
+# MiniMax 性能预设：按素材分辨率一键写入推荐参数（16G 显存 + 条带裁剪实测）
+# 注：条带裁剪下典型字幕条带显存约为全帧的 1/5~1/3，原生分辨率可跑；
+#     MaxLoadNum 是宽 mask（多行/居中大字）时的显存保险，超宽 mask 需手动调小
 MINIMAX_PRESETS = {
     "480p":  dict(maxload=61, steps=4, iterations=8, padding=128, width=0),
-    "720p":  dict(maxload=61, steps=4, iterations=8, padding=128, width=0),
-    "1080p": dict(maxload=41, steps=4, iterations=8, padding=128, width=0),
-    "4K":    dict(maxload=21, steps=4, iterations=8, padding=160, width=0),
+    "720p":  dict(maxload=41, steps=8, iterations=8, padding=128, width=0),
+    "1080p": dict(maxload=41, steps=8, iterations=8, padding=128, width=0),
+    "4K":    dict(maxload=21, steps=8, iterations=8, padding=160, width=0),
 }
 
 
@@ -130,6 +132,7 @@ class AdvancedSettingInterface(ScrollArea):
         self.minimax_group.addSettingCard(self.minimax_strip_padding)
         self.minimax_group.addSettingCard(self.minimax_block_overlap)
         self.minimax_group.addSettingCard(self.minimax_vae_decode_fp32)
+        self.minimax_group.addSettingCard(self.minimax_torch_compile)
         self.minimax_group.addSettingCard(self.minimax_preset_card)
         self.expandLayout.addWidget(self.minimax_group)
 
@@ -318,6 +321,13 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.ZOOM,
             title=tr["Setting"]["MiniMaxVaeDecodeFp32"],
             content=tr["Setting"]["MiniMaxVaeDecodeFp32Desc"],
+            parent=self.minimax_group
+        )
+        self.minimax_torch_compile = SwitchSettingCard(
+            configItem=config.minimaxTorchCompile,
+            icon=FluentIcon.SPEED_HIGH,
+            title=tr["Setting"]["MiniMaxTorchCompile"],
+            content=tr["Setting"]["MiniMaxTorchCompileDesc"],
             parent=self.minimax_group
         )
 

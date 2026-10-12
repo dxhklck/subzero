@@ -84,7 +84,12 @@ class Config(QConfig):
     效果：设置越大速度越慢，但效果越好
     注意：要保证STTN_MAX_LOAD_NUM大于STTN_NEIGHBOR_STRIDE和STTN_REFERENCE_LENGTH
     """
-    # 参考帧步长
+    # STTN 三参数推荐组合（默认值即为推荐值，1080p 长视频性价比最优）：
+    #   NeighborStride=5  邻居帧窗口半宽，每次推理处理 2×5+1=11 帧；调大提速但时序变粗
+    #   ReferenceLength=10 参考帧采样间隔（每隔10帧取1帧做长程参考）；调大质量略升、速度略降。
+    #     ⚠ 实际批大小 = max(MaxLoadNum, NeighborStride×ReferenceLength)——ReferenceLength=100
+    #     会把批量顶到 3000 帧，被 VRAM 自动钳制前先撑爆内存，建议 10~30
+    #   MaxLoadNum=50    每个处理块的帧数；sttn_auto_inpaint 已有 VRAM 自适应钳制，OOM 风险低
     sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(1, 100))
     # 参考帧数量
     sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 100))
@@ -100,11 +105,13 @@ class Config(QConfig):
 
     # 以下参数仅适用MINIMAX算法时，才生效
     # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
-    # 实测 16G 显存（RTX 4070 Ti SUPER）：480p/81帧 峰值约 7.4G
-    # 速度实测：480p 约 1.1 秒/帧（12 步推理）；480p 建议 121（更快），1080p 建议 21~25，4K 建议 13~17
-    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 81, RangeValidator(5, 201))
-    # 去噪步数：越大质量略升、速度线性变慢；12 为官方推荐平衡点
-    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 12, RangeValidator(1, 30))
+    # 实测 16G 显存（RTX 4070 Ti SUPER）+ 条带裁剪：1080p 典型字幕条带/41帧 峰值约 7-10G；
+    # ⚠ 全帧处理（无条带裁剪）时 720p 原生/25帧 峰值已达 21.6G（超出物理显存走共享内存，严重降速），
+    # 宽 mask（多行/居中大字）必须调小本值。480p/81帧 全帧峰值约 7.4G
+    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 201))
+    # 去噪步数：A/B 实测（720p全帧）12→8 步仅慢 13% 时省 13%、与12步画质肉眼无差异（最大像素差18/255）；
+    # 480p 等小分辨率下步数近似线性影响速度。8 为画质/速度平衡点，追求极限画质可设 12
+    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 30))
     # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
     minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 20))
     # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
@@ -121,6 +128,10 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
+    # torch.compile 编译 transformer：融合算子、减少 12 步去噪的 kernel launch 开销，长视频净赚 10-30%；
+    # ⚠ 依赖 Triton 生成 GPU kernel，Triton 不支持 Windows——本机 2026-10-13 实测：静默回退 eager、
+    #   零增益且冷启动多花 63% 时间，故默认关闭；Linux 环境（有 Triton）下开启生效，首次每种块大小编译 1-3 分钟
+    minimaxTorchCompile = ConfigItem("MiniMax", "TorchCompile", False, BoolValidator())
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())
