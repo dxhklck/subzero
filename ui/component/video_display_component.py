@@ -223,8 +223,9 @@ class VideoDisplayComponent(QWidget):
             self._resize_timer.start()
 
     def update_preview_size(self, width):
-        """按窗口宽度更新预览尺寸；尺寸有实质变化返回 True"""
-        width = max(320, min(width, 1600))
+        """按窗口宽度更新预览尺寸；尺寸有实质变化返回 True。
+        下限 960 对齐原版观感（小窗口下预览不缩水，由窗口最小尺寸兜底）。"""
+        width = max(960, min(width, 1600))
         height = width * 9 // 16
         if abs(width - self.video_preview_width) < 40:
             return False

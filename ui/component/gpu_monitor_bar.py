@@ -90,6 +90,7 @@ class GpuMonitorBar(QWidget):
         # 普通 QWidget 默认不画样式表背景，必须开启才能呈现整块卡片底色/边框
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(36)
+        self.setMinimumWidth(260)  # 允许窄窗口下收缩（文本省略），不与预览争宽度
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 4, 14, 4)

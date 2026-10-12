@@ -26,8 +26,8 @@ class Config(QConfig):
     # 窗口位置和大小
     windowX = ConfigItem("Window", "X", None)
     windowY = ConfigItem("Window", "Y", None)
-    windowW = ConfigItem("Window", "Width", 1200)
-    windowH = ConfigItem("Window", "Height", 1200)
+    windowW = ConfigItem("Window", "Width", 1688)
+    windowH = ConfigItem("Window", "Height", 896)
 
     # 使用一个配置项存储所有选区
     # 默认值为一个选区，格式为："ymin,ymax,xmin,xmax;ymin,ymax,xmin,xmax;..."，分号分隔不同选区

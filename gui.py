@@ -62,7 +62,7 @@ class SubtitleExtractorGUI(FluentWindow):
         self._apply_theme()
         config.appTheme.valueChanged.connect(self._apply_theme)
         # 最小窗口尺寸，避免内容被挤压不可用
-        self.setMinimumSize(960, 640)
+        self.setMinimumSize(1400, 760)  # 预览960+右栏422+间距：低于此宽度两栏会被压扁
 
         # 初始化系统主题监听器并连接信号
         # self.themeListener = SystemThemeListener(self)
@@ -167,17 +167,16 @@ class SubtitleExtractorGUI(FluentWindow):
             width = config.windowW.value
             height = config.windowH.value
 
-            if not x or not y:
-                self.center_window()
-                return
+            # 尺寸超出屏幕则收进屏幕（不低于最小尺寸），确保预览不缩水
+            avail = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            width = max(self.minimumWidth(), min(width, avail.width()))
+            height = max(self.minimumHeight(), min(height, avail.height()))
 
-            # 确保窗口在屏幕内
-            screen_rect = QtWidgets.QApplication.primaryScreen().availableGeometry()
-            if (x >= 0 and y >= 0 and 
-                x + width <= screen_rect.width() and 
-                y + height <= screen_rect.height()):
+            if x and y and avail.contains(QtCore.QRect(x, y, width, height)):
                 self.setGeometry(x, y, width, height)
             else:
+                # 位置非法：按配置尺寸居中（旧版此处不调尺寸，导致窗口/预览缩水）
+                self.resize(width, height)
                 self.center_window()
         except Exception as e:
             print(e)
