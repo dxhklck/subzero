@@ -1,11 +1,12 @@
 import os
+import sys
 import cv2
 import time
 import torch
 import threading
 import multiprocessing
 import traceback
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
 from PySide6.QtCore import Slot, QRect, Signal
 from PySide6 import QtWidgets
 from datetime import datetime
@@ -24,6 +25,7 @@ from backend.tools.common_tools import get_readable_path, is_image_file, read_im
 class HomeInterface(QWidget):
     progress_signal = Signal(int, bool)
     append_log_signal = Signal(list)
+    console_signal = Signal(object)
     update_preview_with_comp_signal = Signal(list)
     task_error_signal = Signal(object)
     toggle_buttons_signal = Signal(bool)  # True=显示运行按钮, False=显示停止按钮
@@ -48,7 +50,7 @@ class HomeInterface(QWidget):
         self.ymax = None
 
         # 添加自动滚动控制标志
-        self.auto_scroll = True
+
         self._stop_event = threading.Event()  # 线程安全的停止信号
         self._worker_thread = None
         self.running_process = None
@@ -64,6 +66,7 @@ class HomeInterface(QWidget):
         self.__init_widgets()
         self.progress_signal.connect(self.update_progress)
         self.append_log_signal.connect(self.append_log)
+        self.console_signal.connect(self.append_console)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
@@ -87,6 +90,8 @@ class HomeInterface(QWidget):
         self.video_display_component = VideoDisplayComponent(self)
         self.video_display_component.ab_sections_changed.connect(self.ab_sections_changed)
         self.video_display_component.selections_changed.connect(self.selections_changed)
+        self.video_display_component.size_changed.connect(self._on_preview_resized)
+        self._last_frame = None
         left_layout.addWidget(self.video_display_component)
         
         # 获取视频显示和滑块的引用
@@ -106,26 +111,19 @@ class HomeInterface(QWidget):
         output_layout = QVBoxLayout()
         output_layout.setContentsMargins(0, 0, 0, 0)
         output_layout.setSpacing(0)
-        # 日志面板头部：标题 + 自动滚动 + 清空
-        log_header = QHBoxLayout()
-        log_header.setContentsMargins(10, 6, 10, 4)
-        log_title = QLabel("输出日志")
-        log_title.setStyleSheet("font-size:12px; font-weight:500;")
-        log_header.addWidget(log_title)
-        log_header.addStretch(1)
-        self.auto_scroll_button = PushButton("自动滚动", self)
-        self.auto_scroll_button.setCheckable(True)
-        self.auto_scroll_button.setChecked(True)
-        self.auto_scroll_button.clicked.connect(
-            lambda checked: setattr(self, 'auto_scroll', checked))
-        self.auto_scroll_button.setFixedHeight(24)
-        log_header.addWidget(self.auto_scroll_button)
-        self.clear_log_button = PushButton("清空", self)
-        self.clear_log_button.setFixedHeight(24)
-        self.clear_log_button.clicked.connect(lambda: self.output_text.clear())
-        log_header.addWidget(self.clear_log_button)
-        output_layout.addLayout(log_header)
-        output_layout.addWidget(self.output_text)
+        # 双标签：日志（格式化输出）/ 监控（原控制台原始输出，含 tqdm 进度）
+        self.log_tabs = QTabWidget(output_container)
+        self.log_tabs.setDocumentMode(True)
+        self.log_tabs.addTab(self.output_text, "日志")
+
+        self.console_text = QPlainTextEdit()
+        self.console_text.setReadOnly(True)
+        self.console_text.setMaximumBlockCount(5000)
+        self.console_text.setStyleSheet(
+            "QPlainTextEdit { background:#101010; color:#C8C8C8;"
+            "font-family:'Consolas'; font-size:11px; border:none; }")
+        self.log_tabs.addTab(self.console_text, "监控")
+        output_layout.addWidget(self.log_tabs)
         output_container.setLayout(output_layout)
         left_layout.addWidget(output_container)
 
@@ -134,6 +132,10 @@ class HomeInterface(QWidget):
         # 右侧设置区域
         right_layout = QVBoxLayout()
         right_layout.setSpacing(10)
+
+        # GPU 监控卡片（SeedVR2 风格）：处理模型上方
+        self.gpu_monitor_bar = GpuMonitorBar(self)
+        right_layout.addWidget(self.gpu_monitor_bar)
 
         # 设置容器
         settings_container = CardWidget(self)
@@ -182,20 +184,19 @@ class HomeInterface(QWidget):
         main_layout.addLayout(right_layout, 1)
 
         outer_layout.addLayout(main_layout, 1)
-
-        # 底部 GPU 状态栏监控（显存+峰值 / GPU / 内存 / 速度）
-        self.gpu_monitor_bar = GpuMonitorBar(self)
-        outer_layout.addWidget(self.gpu_monitor_bar)
     
+    def append_console(self, lines):
+        """原控制台输出 → 监控标签（分发器传单条 str，兼容 list）"""
+        if isinstance(lines, str):
+            lines = [lines]
+        for line in lines:
+            self.console_text.appendPlainText(line)
+        sb = self.console_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def on_scroll_change(self, value):
-        """监控滚动条位置变化"""
-        scrollbar = self.output_text.verticalScrollBar()
-        # 如果滚动到底部，启用自动滚动
-        if value == scrollbar.maximum():
-            self.auto_scroll = True
-        # 如果用户向上滚动，禁用自动滚动
-        elif self.auto_scroll and value < scrollbar.maximum():
-            self.auto_scroll = False
+        """监控滚动条位置变化（日志自动滚动常开，无需额外处理）"""
+        pass
 
     
     def slider_changed(self, value):
@@ -256,21 +257,27 @@ class HomeInterface(QWidget):
             self.task_list_component.select_task(0)
 
     def update_preview(self, frame):
+        self._last_frame = frame  # 缓存原始帧，供窗口缩放后自适应重渲染
         # 先缩放图像
         resized_frame = self._img_resize(frame)
 
         # 设置视频参数
         self.video_display_component.set_video_parameters(
-            self.frame_width, self.frame_height, 
+            self.frame_width, self.frame_height,
             self.scaled_width if hasattr(self, 'scaled_width') else None,
             self.scaled_height if hasattr(self, 'scaled_height') else None,
             self.border_left if hasattr(self, 'border_left') else 0,
             self.border_top if hasattr(self, 'border_top') else 0,
             self.fps if self.fps is not None else 30,
         )
-        
+
         # 更新视频显示（这会同时保存current_pixmap）
         self.video_display_component.update_video_display(resized_frame)
+
+    def _on_preview_resized(self, width):
+        """窗口缩放：更新预览尺寸并重渲染当前帧，使画面铺满可用区域"""
+        if self.video_display_component.update_preview_size(width) and self._last_frame is not None:
+            self.update_preview(self._last_frame)
 
     def _img_resize(self, image):
         height, width = image.shape[:2]
@@ -459,6 +466,25 @@ class HomeInterface(QWidget):
         sr = None
         try:
             from backend.main import SubtitleRemover
+            # 无控制台（pythonw）时把子进程 stdout/stderr 重定向进队列 → GUI「监控」标签
+            if sys.__stdout__ is None:
+                class _QueueConsoleWriter:
+                    def __init__(self, q):
+                        self._q = q
+                        self._buf = ''
+                    def write(self, s):
+                        self._buf += s
+                        # \n 与 \r 都作为行界（tqdm 进度条用 \r 刷新）
+                        for sep in ('\n', '\r'):
+                            while sep in self._buf:
+                                line, self._buf = self._buf.split(sep, 1)
+                                if line.strip():
+                                    SubtitleRemoverRemoteCall.remote_call_console(self._q, line.strip())
+                    def flush(self):
+                        # tqdm 每次 write 后都调 flush——半行直接丢弃，只在 \n/\r 边界出整行
+                        self._buf = ''
+                sys.stdout = _QueueConsoleWriter(queue)
+                sys.stderr = _QueueConsoleWriter(queue)
             sr = SubtitleRemover(video_path, True)
             sr.video_out_path = output_path
             for key in options:
@@ -491,6 +517,7 @@ class HomeInterface(QWidget):
         subtitle_remover_remote_caller = SubtitleRemoverRemoteCall()
         subtitle_remover_remote_caller.register_update_progress_callback(self.progress_signal.emit)
         subtitle_remover_remote_caller.register_log_callback(self.append_log_signal.emit)
+        subtitle_remover_remote_caller.register_console_callback(self.console_signal.emit)
         subtitle_remover_remote_caller.register_update_preview_with_comp_callback(self.update_preview_with_comp_signal.emit)
         subtitle_remover_remote_caller.register_error_callback(self.task_error_signal.emit)
         process = multiprocessing.Process(
@@ -521,8 +548,6 @@ class HomeInterface(QWidget):
         self.se = None
         # 重置视频滑块
         self.video_slider.setValue(1)
-        # 清理 A/B 对比状态
-        self.video_display_component.clear_ab()
         # 重置当前处理任务索引
         self.current_processing_task_index = -1
 
@@ -542,16 +567,16 @@ class HomeInterface(QWidget):
                     progress_total,
                 )
 
-            # 处理速度（帧/s，EMA 平滑），喂给底部监控栏
+            # 处理速度（帧/s，EMA 平滑），喂给监控栏
             now = time.time()
             if self._speed_last is not None and self.frame_count:
                 last_t, last_p = self._speed_last
                 dt = now - last_t
-                if dt > 0.2:
+                if dt > 0.05:
                     df = (progress_total - last_p) / 100 * self.frame_count
-                    if df >= 0:
+                    if df > 0:
                         inst = df / dt
-                        self._speed_ema = inst if self._speed_ema == 0 else (self._speed_ema * 0.7 + inst * 0.3)
+                        self._speed_ema = inst if self._speed_ema == 0 else (self._speed_ema * 0.4 + inst * 0.6)
                         self.gpu_monitor_bar.update_speed(self._speed_ema)
                     self._speed_last = (now, progress_total)
             else:
@@ -590,10 +615,9 @@ class HomeInterface(QWidget):
         html = f'<span style="color:#888;">[{timestamp}]</span> <span style="color:{color};">{escaped}</span><br>'
         self.output_text.append(html)
         print(*args)  # 保持原始的 print 行为
-        # 如果启用了自动滚动，则滚动到底部
-        if self.auto_scroll:
-            scrollbar = self.output_text.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+        # 始终滚动到底部
+        scrollbar = self.output_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     @Slot(list)
     def update_preview_with_comp(self, args):
@@ -608,11 +632,12 @@ class HomeInterface(QWidget):
                 for rect in subtitle_areas:
                     ymin, ymax, xmin, xmax = rect
                     cv2.rectangle(frame_ori, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-        # wipe 对比：左原帧右修复帧，拖动下方 A/B 滑块移动分界线
-        resized_ori = self._img_resize(frame_ori)
-        resized_comp = self._img_resize(frame_comp)
+        preview_frame = cv2.hconcat([frame_ori, frame_comp])
+        # 先缩放图像
+        resized_frame = self._img_resize(preview_frame)
+        # 更新视频显示（这会同时保存current_pixmap）
+        self.video_display_component.update_video_display(resized_frame, draw_selection=False)
         self.video_display_component.set_dragger_enabled(False)
-        self.video_display_component.set_ab_frames(resized_ori, resized_comp)
 
     @Slot(object)
     def on_task_error(self, e):
@@ -719,8 +744,7 @@ class HomeInterface(QWidget):
             # 通知 worker 线程停止
             self._stop_event.set()
             # 停止 GPU 监控采样线程
-            if hasattr(self, 'gpu_monitor_bar'):
-                self.gpu_monitor_bar.stop()
+            pass
             # 终止子进程
             ProcessManager.instance().terminate_all()
             # 等待 worker 线程结束（最多5秒）

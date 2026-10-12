@@ -1,6 +1,6 @@
 import cv2
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu
-from PySide6.QtCore import Qt, Signal, QRect, QRectF, QObject, QEvent
+from PySide6.QtCore import Qt, Signal, QRect, QRectF, QObject, QEvent, QTimer
 from PySide6.QtGui import QAction, QShortcut, QCursor
 from PySide6 import QtCore, QtWidgets, QtGui 
 from qfluentwidgets import qconfig, CardWidget, HollowHandleStyle
@@ -8,6 +8,7 @@ from qfluentwidgets import qconfig, CardWidget, HollowHandleStyle
 from backend.config import config, tr
 
 class VideoDisplayComponent(QWidget):
+    size_changed = Signal(int)  # 预览区需按窗口宽度重设尺寸
     """视频显示组件，包含视频预览和选择框功能"""
     
     # 定义信号
@@ -43,6 +44,12 @@ class VideoDisplayComponent(QWidget):
         # 设置视频预览区域大小（根据屏幕宽度动态调整）
         self.video_preview_width = 960
         self.video_preview_height = self.video_preview_width * 9 // 16
+        # 预览区自适应窗口：尺寸变化防抖后通知外层重渲染
+        self._pending_width = self.video_preview_width
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(150)
+        self._resize_timer.timeout.connect(lambda: self.size_changed.emit(self._pending_width))
         if self.screen_width // 2 < 960:
             self.video_preview_width = 640
             self.video_preview_height = self.video_preview_width * 9 // 16
@@ -117,21 +124,12 @@ class VideoDisplayComponent(QWidget):
             "handle.hollow-radius": 6,
             "handle.margin": 1
         }))
-
-        # A/B 对比滑块：处理时显示，拖动分界线（左=原帧 右=修复帧）
-        self.ab_slider = QtWidgets.QSlider(Qt.Horizontal)
-        self.ab_slider.setMinimum(0)
-        self.ab_slider.setMaximum(100)
-        self.ab_slider.setValue(50)
-        self.ab_slider.setFixedHeight(22)
-        self.ab_slider.setVisible(False)
-        self.ab_slider.valueChanged.connect(self.render_ab)
         
         # 视频预览区域
         self.video_display.setObjectName('videoDisplay')
         # black_layout.addWidget(self.video_display, 0, Qt.AlignCenter)
         # 创建一个容器来保持比例
-        ratio_container = QWidget()
+        self.ratio_container = ratio_container = QWidget()
         ratio_layout = QVBoxLayout(ratio_container)
         ratio_layout.setContentsMargins(0, 0, 0, 0)
         ratio_layout.addWidget(self.video_display)
@@ -158,7 +156,6 @@ class VideoDisplayComponent(QWidget):
         control_layout = QVBoxLayout()
         control_layout.setContentsMargins(8, 8, 8, 8)
         control_layout.addWidget(self.video_slider)
-        control_layout.addWidget(self.ab_slider)
         
         control_container.setLayout(control_layout)
         control_container.setStyleSheet("""
@@ -218,35 +215,24 @@ class VideoDisplayComponent(QWidget):
         self.shortcut_shift_left.activated.connect(lambda: self.__adjust_slider_value(-1))
         self.shortcut_shift_left.setContext(Qt.ApplicationShortcut)
 
-    def set_ab_frames(self, frame_ori, frame_comp):
-        """缓存 A/B 帧（原分辨率），显示对比滑块并按当前位置渲染"""
-        self._ab_ori = frame_ori
-        self._ab_comp = frame_comp
-        self.ab_slider.setVisible(True)
-        self.render_ab(self.ab_slider.value())
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width() - 24  # 去除布局边距
+        if w > 320 and abs(w - self.video_preview_width) >= 40:
+            self._pending_width = w
+            self._resize_timer.start()
 
-    def render_ab(self, pos):
-        """wipe 渲染：左半原帧、右半修复帧，分界处画白线"""
-        ori = getattr(self, '_ab_ori', None)
-        comp = getattr(self, '_ab_comp', None)
-        if ori is None or comp is None or pos is None:
-            return
-        h, w = ori.shape[:2]
-        split = int(w * pos / 100)
-        img = comp.copy()
-        img[:, :split] = ori[:, :split]
-        if 0 < split < w:
-            cv2.line(img, (split, 0), (split, h), (255, 255, 255), max(2, h // 360))
-        self.update_video_display(img, draw_selection=False)
-
-    def clear_ab(self):
-        """任务结束：清空 A/B 缓存并隐藏滑块"""
-        self._ab_ori = None
-        self._ab_comp = None
-        self.ab_slider.blockSignals(True)
-        self.ab_slider.setValue(50)
-        self.ab_slider.blockSignals(False)
-        self.ab_slider.setVisible(False)
+    def update_preview_size(self, width):
+        """按窗口宽度更新预览尺寸；尺寸有实质变化返回 True"""
+        width = max(320, min(width, 1600))
+        height = width * 9 // 16
+        if abs(width - self.video_preview_width) < 40:
+            return False
+        self.video_preview_width = width
+        self.video_preview_height = height
+        self.video_display.setMinimumSize(width, height)
+        self.ratio_container.setFixedHeight(height)
+        return True
 
     def update_video_display(self, frame, draw_selection=True):
         """更新视频显示"""

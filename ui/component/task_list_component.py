@@ -143,17 +143,13 @@ class TaskListComponent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 面板标题：任务列表 · 支持多文件拖入
+        # 面板标题行
         header = QHBoxLayout()
         header.setContentsMargins(10, 8, 10, 4)
         title = QLabel(tr['TaskList']['Name'])
         title.setStyleSheet("font-size:12px; font-weight:500;")
-        badge = QLabel("任务列表 · 支持多文件拖入")
-        badge.setStyleSheet("color:#5DCAA5; font-size:11px; background:rgba(29,158,117,0.12);"
-                            "border-radius:8px; padding:1px 8px;")
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(badge)
         layout.addLayout(header)
 
         # 创建表格：名称 | 进度·状态（卡片式单元格）

@@ -1,29 +1,30 @@
 # -*- coding: utf-8 -*-
-"""GPU 状态栏监控：窗口底部一行，显示 显存(+峰值)/GPU利用率/内存/处理速度"""
+"""GPU 监控（单行卡片式）：显存+内存 同行静态色块 + 数字/占比/温度，置于右栏处理模型上方"""
 import subprocess
 
 import psutil
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QFrame, QSizePolicy
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QColor
-
-from qfluentwidgets import ProgressRing, isDarkTheme, qconfig
+from qfluentwidgets import isDarkTheme, qconfig
 
 from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
 
-ACCENT = "#1D9E75"
+VRAM_C = "#9B7BF7"
+RAM_C = "#2ECC71"
+CHIP_W, CHIP_H = 14, 14
 
 
 def _theme_colors():
-    """明暗两套中性色，主题切换时由 _apply_theme 刷新"""
     if isDarkTheme():
-        return {"muted": "#A9A8A0", "track": "#444441", "bg": "rgba(255,255,255,0.05)"}
-    return {"muted": "#888780", "track": "#D3D1C7", "bg": "rgba(0,0,0,0.05)"}
+        return {"muted": "#9A9992", "card": "rgba(255,255,255,0.05)",
+                "border": "rgba(255,255,255,0.10)"}
+    return {"muted": "#77766E", "card": "rgba(0,0,0,0.03)",
+            "border": "rgba(0,0,0,0.10)"}
 
 
 class GpuSamplerThread(QThread):
     """1 秒轮询 nvidia-smi + psutil，发监控数据"""
-    stats_ready = Signal(dict)  # {vram_used, vram_total, gpu_util, ram_used, ram_total}
+    stats_ready = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,66 +45,74 @@ class GpuSamplerThread(QThread):
     def _sample():
         try:
             result = subprocess.run(
-                ['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu',
+                ['nvidia-smi', '--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu',
                  '--format=csv,noheader,nounits'],
                 capture_output=True, text=True, timeout=5,
                 creationflags=SUBPROCESS_CREATION_FLAGS)
-            parts = [p.strip() for p in result.stdout.strip().split(',')]
-            if len(parts) < 3:
+            parts = [p.strip() for p in result.stdout.strip().split(',') if p.strip()]
+            # 防御式解析：取前 4 个数字为 used/total/util/temp（nvidia-smi 偶发省略 name 也不怕）
+            nums = [p for p in parts if p.replace('.', '').isdigit()]
+            if len(nums) < 4:
                 return None
-            vram_used, vram_total, gpu_util = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
+            used, total, util, temp = (int(float(n)) for n in nums[:4])
+            name = next((p for p in parts if p not in nums), '')
             mem = psutil.virtual_memory()
             return {
-                'vram_used': vram_used, 'vram_total': vram_total,
-                'gpu_util': gpu_util,
+                'gpu_name': name.replace('NVIDIA ', ''),
+                'vram_used': used, 'vram_total': total,
+                'gpu_util': util, 'gpu_temp': temp,
                 'ram_used': mem.used // (1024 ** 2), 'ram_total': mem.total // (1024 ** 2),
+                'cpu_util': int(psutil.cpu_percent(interval=None)),
             }
         except Exception:
             return None
 
 
+def _chip(color):
+    """静态小色块（不随用量变化）"""
+    chip = QFrame()
+    chip.setFixedSize(CHIP_W, CHIP_H)
+    chip.setStyleSheet(f"background:{color}; border-radius:4px;")
+    return chip
+
+
+def _value_label():
+    lab = QLabel("—")
+    lab.setStyleSheet("font-size:12px; font-family:'Consolas';")
+    return lab
+
+
 class GpuMonitorBar(QWidget):
-    """底部一行监控栏：显存(含本次峰值)/GPU/内存/速度"""
+    """GPU 监控单行卡：显存+内存 同行（静态色块 + 数字/占比/温度）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._peak_vram = 0  # 本次会话采样到的显存峰值 MB
-        self.setFixedHeight(28)
+        # 普通 QWidget 默认不画样式表背景，必须开启才能呈现整块卡片底色/边框
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(36)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 2, 12, 2)
-        lay.setSpacing(16)
+        lay.setContentsMargins(14, 4, 14, 4)
+        lay.setSpacing(8)
 
-        # 显存 chip：数值 + 迷你进度条
-        self.vram_chip = QLabel()
-        vlay = QHBoxLayout(self.vram_chip)
-        vlay.setContentsMargins(0, 0, 0, 0)
-        vlay.setSpacing(5)
+        # 显存段
         self.vram_tag = QLabel("显存")
-        self.vram_value = QLabel("—")
-        self.vram_value.setStyleSheet("font-size:12px; font-family:'Consolas';")
-        self.vram_bar = QLabel()
-        self.vram_bar.setFixedSize(56, 5)
-        self.vram_fill = QLabel(self.vram_bar)
-        self.vram_fill.setStyleSheet(f"background:{ACCENT}; border-radius:2px;")
-        self.peak_label = QLabel("峰 —")
-        self.peak_label.setStyleSheet(f"color:{ACCENT}; font-size:11px; font-family:'Consolas';")
-        vlay.addWidget(self.vram_tag)
-        vlay.addWidget(self.vram_value)
-        vlay.addWidget(self.vram_bar)
-        vlay.addWidget(self.peak_label)
+        self.vram_chip = _chip(VRAM_C)
+        self.vram_label = _value_label()
+        # 内存段
+        self.ram_tag = QLabel("内存")
+        self.ram_chip = _chip(RAM_C)
+        self.ram_label = _value_label()
+
+        lay.addWidget(self.vram_tag)
         lay.addWidget(self.vram_chip)
-
-        self.gpu_chip = self._make_chip("GPU")
-        self.ram_chip = self._make_chip("内存")
-        self.fps_chip = self._make_chip("速度")
-        lay.addWidget(self.gpu_chip)
+        lay.addWidget(self.vram_label)
+        lay.addSpacing(16)
+        lay.addWidget(self.ram_tag)
         lay.addWidget(self.ram_chip)
-        lay.addWidget(self.fps_chip)
-
+        lay.addWidget(self.ram_label)
         lay.addStretch(1)
-        self.device_label = QLabel("")
-        lay.addWidget(self.device_label)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
 
         self._apply_theme()
         qconfig.themeChanged.connect(self._apply_theme)
@@ -112,62 +121,33 @@ class GpuMonitorBar(QWidget):
         self._thread.stats_ready.connect(self.update_stats)
         self._thread.start()
 
-    def _make_chip(self, label):
-        wrap = QLabel()
-        lay = QHBoxLayout(wrap)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        tag = QLabel(label)
-        value = QLabel("—")
-        value.setStyleSheet("font-size:12px; font-family:'Consolas';")
-        lay.addWidget(tag)
-        lay.addWidget(value)
-        wrap.value_label = value
-        wrap.tag_label = tag
-        return wrap
-
     def _apply_theme(self):
         c = _theme_colors()
-        self.setStyleSheet(f"background: {c['bg']}; border-radius: 6px;")
+        # 用 ID 选择器只给卡片本体画底色/边框，子控件（标签/数字）不带任何框
+        self.setObjectName("gpuMonitorBar")
+        self.setStyleSheet(
+            f"QWidget#gpuMonitorBar {{ background:{c['card']}; border:1px solid {c['border']}; border-radius:8px; }}")
         self.vram_tag.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
-        self.vram_bar.setStyleSheet(f"background:{c['track']}; border-radius:2px;")
-        for chip in (self.gpu_chip, self.ram_chip, self.fps_chip):
-            chip.tag_label.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
-            if chip is self.gpu_chip and self.gpu_chip.value_label.text() not in ("—", ""):
-                util = self.gpu_chip.value_label.text().rstrip('%')
-                try:
-                    active = int(util) > 5
-                except ValueError:
-                    active = False
-                color = ACCENT if active else c['muted']
-            else:
-                color = c['muted']
-            chip.value_label.setStyleSheet(f"font-size:12px; font-family:'Consolas'; color:{color};")
-        self.device_label.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
-
-    def set_device_name(self, name):
-        self.device_label.setText(name)
+        self.ram_tag.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
+        self.vram_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
+        self.ram_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
 
     def update_stats(self, s):
-        used, total = s['vram_used'], s['vram_total']
-        if used > self._peak_vram:
-            self._peak_vram = used
-        self.vram_value.setText(f"{used / 1024:.1f} / {total / 1024:.1f} GB")
-        ratio = max(0, min(1, used / max(total, 1)))
-        self.vram_fill.setFixedSize(max(2, int(56 * ratio)), 5)
-        self.peak_label.setText(f"峰 {self._peak_vram / 1024:.1f}G")
-        self.gpu_chip.value_label.setText(f"{s['gpu_util']}%")
-        self.ram_chip.value_label.setText(f"{s['ram_used'] / 1024:.1f} / {s['ram_total'] / 1024:.1f} GB")
-        # 触发主题色重算（GPU 活跃时用主色高亮）
-        self._apply_theme()
+        vram_ratio = s['vram_used'] / max(s['vram_total'], 1)
+        ram_ratio = s['ram_used'] / max(s['ram_total'], 1)
+        self.vram_label.setText(
+            f"{s['vram_used'] / 1024:.1f} / {s['vram_total'] / 1024:.1f} GB"
+            f" · {vram_ratio * 100:.0f}% {s['gpu_temp']}°C")
+        self.ram_label.setText(
+            f"{s['ram_used'] / 1024:.1f} / {s['ram_total'] / 1024:.1f} GB"
+            f" · {ram_ratio * 100:.0f}%")
 
     def update_speed(self, fps):
-        """由进度回调喂入处理速度（帧/s），EMA 平滑在外部做"""
-        self.fps_chip.value_label.setText(f"{fps:.1f} 帧/s" if fps else "—")
+        """已移除速度显示，保留接口兼容（no-op）"""
+        pass
 
     def reset_peak(self):
-        self._peak_vram = 0
-        self.peak_label.setText("峰 —")
+        pass  # 精简版无峰值显示，保留接口兼容
 
     def stop(self):
         self._thread.stop()

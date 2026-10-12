@@ -9,6 +9,7 @@ class Command(Enum):
     MANAGE_PROCESS = 3,
     ERROR = 4,
     UPDATE_PREVIEW_WITH_COMP = 5,
+    CONSOLE = 6,
 
 class SubtitleRemoverRemoteCall:
     """
@@ -47,6 +48,9 @@ class SubtitleRemoverRemoteCall:
     def register_update_preview_with_comp_callback(self, callback):
         self.callbacks[Command.UPDATE_PREVIEW_WITH_COMP] = callback
 
+    def register_console_callback(self, callback):
+        self.callbacks[Command.CONSOLE] = callback
+
     def register_error_callback(self, callback):
         self.callbacks[Command.ERROR] = callback
 
@@ -73,3 +77,7 @@ class SubtitleRemoverRemoteCall:
     @staticmethod
     def remote_call_update_preview_with_comp(queue, *args):
         queue.put((Command.UPDATE_PREVIEW_WITH_COMP, (*args,)))
+
+    @staticmethod
+    def remote_call_console(queue, *args):
+        queue.put((Command.CONSOLE, (*args,)))

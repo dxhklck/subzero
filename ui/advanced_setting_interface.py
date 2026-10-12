@@ -9,7 +9,7 @@ from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
                            SettingCardGroup, RangeSettingCard, SwitchSettingCard,
                            HyperlinkCard, PrimaryPushSettingCard, PushSettingCard,
-                           MessageBox, OptionsSettingCard, SettingCard, PushButton, InfoBar)
+                           MessageBox, SettingCard, PushButton, InfoBar, RadioButton)
 from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
@@ -50,6 +50,27 @@ class MiniMaxPresetCard(SettingCard):
         InfoBar.success(
             "预设已应用", f"{name}：MaxLoadNum {p['maxload']} / Steps {p['steps']} / Iterations {p['iterations']} / 外扩 {p['padding']}px",
             orient=Qt.Horizontal, isClosable=True, position="top", duration=2500, parent=self.window())
+
+class ThemeCard(SettingCard):
+    """应用主题卡：三个单选按钮直接在卡片内选择（浅色/深色/跟随系统），无下拉"""
+
+    def __init__(self, title, content, parent=None):
+        super().__init__(FluentIcon.BRUSH, title, content, parent)
+        self._btns = {}
+        for key, text in [("light", "浅色"), ("dark", "深色"), ("auto", "跟随系统")]:
+            rb = RadioButton(text, self)
+            rb.setChecked(config.appTheme.value == key)
+            # clicked 仅用户点击时触发（程序 setChecked 不触发），避免初始化回写
+            rb.clicked.connect(lambda _=False, k=key: config.set(config.appTheme, k))
+            self._btns[key] = rb
+            self.hBoxLayout.addWidget(rb, 0, Qt.AlignRight)
+        self.hBoxLayout.addSpacing(16)
+
+    def sync_selection(self):
+        """外部改主题后同步选中态"""
+        for key, rb in self._btns.items():
+            rb.setChecked(config.appTheme.value == key)
+
 
 class AdvancedSettingInterface(ScrollArea):
     """高级设置页面"""
@@ -130,12 +151,9 @@ class AdvancedSettingInterface(ScrollArea):
         # 外观设置组
         self.appearance_group = SettingCardGroup("外观", self.scrollWidget)
 
-        self.theme_card = OptionsSettingCard(
-            configItem=config.appTheme,
-            icon=FluentIcon.BRUSH,
-            title="应用主题",
-            content="浅色 / 深色 / 跟随系统（主色固定为青绿）",
-            texts=["浅色", "深色", "跟随系统"],
+        self.theme_card = ThemeCard(
+            "应用主题",
+            "浅色 / 深色 / 跟随系统（主色固定为青绿），点击即刻生效",
             parent=self.appearance_group
         )
         

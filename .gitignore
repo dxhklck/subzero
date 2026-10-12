@@ -419,3 +419,6 @@ inference.onnx
 
 # AI 生成图原始稿（工作产物不入库）
 generated-images/
+
+# 测试素材仅留本地，不上传 GitHub
+test/
