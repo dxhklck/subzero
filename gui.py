@@ -6,6 +6,14 @@
 @desc: 字幕去除器图形化界面（由 PySimpleGUI 改写为 PySide6）
 """
 
+# ── 首启自举钩子：必须在 cv2/torch 等重导入之前 ──────────────────────
+import os as _os
+import sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'backend', 'tools'))
+from first_run import ensure_environment as _ensure_env
+_ensure_env()  # 环境齐备→返回；不齐备→跑完自举并 execv 重启（不返回）
+# ─────────────────────────────────────────────────────────────────────
+
 import sys
 import os
 import configparser

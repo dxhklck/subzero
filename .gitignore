@@ -422,3 +422,7 @@ generated-images/
 
 # 测试素材仅留本地，不上传 GitHub
 test/
+
+# 打包构建产物（可由 build_runtime.py + ISCC 重建，不入库）
+packaging/runtime/
+packaging/output/
