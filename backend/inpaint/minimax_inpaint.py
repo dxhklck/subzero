@@ -34,21 +34,32 @@ class MiniMaxInpaint:
                  max_load_num: int = 81,
                  num_inference_steps: int = 12,
                  iterations: int = 6,
-                 process_width: int = 0):
+                 process_width: int = 0,
+                 block_overlap: int = 8,
+                 vae_decode_fp32: bool = True):
         self.device = device
         self.num_inference_steps = num_inference_steps
         self.iterations = iterations
+        # 块间重叠帧数（0=关闭）：见 __call__ 中的接缝混合逻辑
+        self.block_overlap = max(0, int(block_overlap))
         # 处理分辨率上限（宽度像素，0 = 按原分辨率）。视频更宽时先等比降采样推理、输出缩回原分辨率
         self.process_width = int(process_width) if process_width else 0
         # 块大小向下取整到 4k+1（VAE 时间维压缩因子为 4）
         self.chunk_frames = max(5, ((int(max_load_num) - 1) // 4) * 4 + 1)
 
         vae = AutoencoderKLWan.from_pretrained(os.path.join(model_dir, 'vae'), torch_dtype=torch.float16)
+        # fp32 解码 VAE（可选）：编码仍走 fp16 省显存，解码升 fp32 消除平坦背景色带
+        vae_decode = None
+        if vae_decode_fp32:
+            vae_decode = AutoencoderKLWan.from_pretrained(os.path.join(model_dir, 'vae'), torch_dtype=torch.float32)
         transformer = Transformer3DModel.from_pretrained(os.path.join(model_dir, 'transformer'),
                                                          torch_dtype=torch.float16)
         scheduler = UniPCMultistepScheduler.from_pretrained(os.path.join(model_dir, 'scheduler'))
-        self.pipe = Minimax_Remover_Pipeline(transformer=transformer, vae=vae, scheduler=scheduler)
+        self.pipe = Minimax_Remover_Pipeline(transformer=transformer, vae=vae, scheduler=scheduler,
+                                             vae_decode=vae_decode)
         self.pipe.to(device)
+        if vae_decode is not None:
+            vae_decode.to(device)
 
     def _align_16(self, value: int) -> int:
         return max(16, int(round(value / 16)) * 16)
@@ -105,25 +116,46 @@ class MiniMaxInpaint:
         if mask.ndim == 3:
             mask = mask[:, :, 0]
         mask_gray = (mask > 127).astype(np.uint8) * 255
+        # 闭运算（先膨胀后腐蚀，不扩大mask）：填充相邻字幕框之间≤2px的细小缝隙。
+        # 缝隙若漏掩膜，DiT 不会修复那里的原图像素，残留为可见细线
+        if mask_gray.any():
+            mask_gray = cv2.morphologyEx(mask_gray, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
         H_ori, W_ori = input_frames[0].shape[:2]
         proc_h, proc_w = self._proc_size(H_ori, W_ori)
 
-        inpainted_frames = []
         n = len(input_frames)
         chunk = self.chunk_frames
-        for start in range(0, n, chunk):
-            part = input_frames[start:min(start + chunk, n)]
+        # 块间重叠：视频按 chunk 帧一块独立推理，块边界处潜空间不连续（VAE 时间压缩4，
+        # 接缝约4帧）可能出现闪烁。相邻块重叠 overlap 帧，重叠区用线性加权交叉混合消除接缝。
+        # overlap 上限取 chunk//4，保证推理开销不超过约1.3倍；0 = 关闭
+        overlap = min(self.block_overlap, chunk // 4)
+        step = chunk - overlap
+
+        results = [None] * n
+        start = 0
+        while start < n:
+            end = min(start + chunk, n)
+            part = input_frames[start:end]
             # 尾块补帧到 4k+1（复制末帧），推理后丢弃补帧
             need = ((len(part) - 1) // 4 + 1) * 4 + 1
             if need > len(part):
                 part = part + [part[-1]] * (need - len(part))
-            out = self._inpaint_chunk(part, mask_gray, proc_h, proc_w)[:min(n - start, chunk)]
-            inpainted_frames.extend(out)
+            out = self._inpaint_chunk(part, mask_gray, proc_h, proc_w)
+            for j in range(end - start):
+                gidx = start + j
+                if results[gidx] is None:
+                    results[gidx] = out[j]
+                else:
+                    # 重叠区：上一块尾帧与本块头帧按位置线性交叉混合（权重从1/(O+1)到O/(O+1)）
+                    w = (j + 1) / (overlap + 1)
+                    results[gidx] = (results[gidx].astype(np.float32) * (1 - w)
+                                     + out[j].astype(np.float32) * w).astype(np.uint8)
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            start += step
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        return inpainted_frames
+        return results

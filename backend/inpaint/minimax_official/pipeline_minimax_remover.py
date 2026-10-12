@@ -32,7 +32,8 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
         self,
         transformer: Transformer3DModel,
         vae: AutoencoderKLWan,
-        scheduler: FlowMatchEulerDiscreteScheduler
+        scheduler: FlowMatchEulerDiscreteScheduler,
+        vae_decode: Optional[AutoencoderKLWan] = None,
     ):
         super().__init__()
 
@@ -41,6 +42,11 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
             transformer=transformer,
             scheduler=scheduler,
         )
+
+        # 可选的 fp32 解码 VAE：编码仍走 self.vae(fp16) 省显存，解码走 vae_decode(fp32)
+        # 消除 fp16 VAE 在平坦背景（天空/墙面）的色带与条带；未提供时退化为 self.vae。
+        # 注意：调用方需负责把 vae_decode 移到同一设备（不随 register_modules 管理）。
+        self.vae_decode = vae_decode if vae_decode is not None else self.vae
 
         self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample) if getattr(self, "vae", None) else 4
         self.vae_scale_factor_spatial = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
@@ -190,8 +196,13 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
                 
                 progress_bar.update()
 
-        latents = latents.half() / latents_std + latents_mean
-        video = self.vae.decode(latents, return_dict=False)[0]
+        decode_vae = self.vae_decode
+        if decode_vae.dtype == torch.float32:
+            # fp32 解码：latents 与归一化参数一并升精度，消除 fp16 VAE 平坦背景色带
+            latents = latents.float() / latents_std.float() + latents_mean.float()
+        else:
+            latents = latents.half() / latents_std + latents_mean
+        video = decode_vae.decode(latents, return_dict=False)[0]
         video = self.video_processor.postprocess_video(video, output_type=output_type)
 
         return WanPipelineOutput(frames=video)

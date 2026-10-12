@@ -9,7 +9,7 @@ from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
                            SettingCardGroup, RangeSettingCard, SwitchSettingCard,
                            HyperlinkCard, PrimaryPushSettingCard, PushSettingCard,
-                           MessageBox, SettingCard, PushButton, InfoBar, RadioButton)
+                           MessageBox, SettingCard, PushButton, InfoBar, InfoBarPosition, RadioButton)
 from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
@@ -49,7 +49,7 @@ class MiniMaxPresetCard(SettingCard):
             b.setChecked(n == name)
         InfoBar.success(
             "预设已应用", f"{name}：MaxLoadNum {p['maxload']} / Steps {p['steps']} / Iterations {p['iterations']} / 外扩 {p['padding']}px",
-            orient=Qt.Horizontal, isClosable=True, position="top", duration=2500, parent=self.window())
+            orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2500, parent=self.window())
 
 class ThemeCard(SettingCard):
     """应用主题卡：三个单选按钮直接在卡片内选择（浅色/深色/跟随系统），无下拉"""
@@ -128,6 +128,8 @@ class AdvancedSettingInterface(ScrollArea):
         self.minimax_group.addSettingCard(self.minimax_iterations)
         self.minimax_group.addSettingCard(self.minimax_process_width)
         self.minimax_group.addSettingCard(self.minimax_strip_padding)
+        self.minimax_group.addSettingCard(self.minimax_block_overlap)
+        self.minimax_group.addSettingCard(self.minimax_vae_decode_fp32)
         self.minimax_group.addSettingCard(self.minimax_preset_card)
         self.expandLayout.addWidget(self.minimax_group)
 
@@ -300,6 +302,22 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.ZOOM,
             title=tr["Setting"]["MiniMaxStripPadding"],
             content=tr["Setting"]["MiniMaxStripPaddingDesc"],
+            parent=self.minimax_group
+        )
+
+        self.minimax_block_overlap = RangeSettingCard(
+            configItem=config.minimaxBlockOverlap,
+            icon=FluentIcon.UNIT,
+            title=tr["Setting"]["MiniMaxBlockOverlap"],
+            content=tr["Setting"]["MiniMaxBlockOverlapDesc"],
+            parent=self.minimax_group
+        )
+
+        self.minimax_vae_decode_fp32 = SwitchSettingCard(
+            configItem=config.minimaxVaeDecodeFp32,
+            icon=FluentIcon.ZOOM,
+            title=tr["Setting"]["MiniMaxVaeDecodeFp32"],
+            content=tr["Setting"]["MiniMaxVaeDecodeFp32Desc"],
             parent=self.minimax_group
         )
 

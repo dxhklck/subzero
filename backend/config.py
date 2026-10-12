@@ -114,6 +114,13 @@ class Config(QConfig):
     # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
     # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
     minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))
+    # 块间重叠帧数：视频按 chunk(4k+1帧) 分块推理，块边界处潜空间不连续可能出现闪烁/接缝；
+    # 相邻块重叠这么多帧并线性加权混合可消除接缝；0 = 关闭（省推理时间）
+    # 开销：总推理帧数变为 chunk/(chunk-重叠)，81帧块重叠8约多花11%时间
+    minimaxBlockOverlap = RangeConfigItem("MiniMax", "BlockOverlap", 8, RangeValidator(0, 32))
+    # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
+    # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
+    minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())
