@@ -60,6 +60,8 @@ class FFmpegVideoWriter:
 
     def __init__(self, output_path, fps, size):
         w, h = size
+        # veryfast + crf 20：相较 fast + crf 18 编码快约一倍、文件小约25%，
+        # 对字幕擦除输出（非母版）画质损失可忽略；极限画质可改回 fast/18
         cmd = [
             FFmpegCLI.instance().ffmpeg_path,
             '-y',
@@ -71,8 +73,8 @@ class FFmpegVideoWriter:
             '-i', '-',
             '-c:v', 'libx264',
             '-pix_fmt', 'yuv420p',
-            '-crf', '18',
-            '-preset', 'fast',
+            '-crf', '20',
+            '-preset', 'veryfast',
             '-loglevel', 'error',
             output_path
         ]

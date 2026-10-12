@@ -111,6 +111,8 @@ class AdvancedSettingInterface(ScrollArea):
         self.subtitle_detection_group.addSettingCard(self.subtitle_area_pixel_tolerance_x_pixel)
         self.subtitle_detection_group.addSettingCard(self.subtitle_timeline_backward_frame_count)
         self.subtitle_detection_group.addSettingCard(self.subtitle_timeline_forward_frame_count)
+        self.subtitle_detection_group.addSettingCard(self.subtitle_detect_sample_step)
+        self.subtitle_detection_group.addSettingCard(self.subtitle_detect_process_width)
         self.expandLayout.addWidget(self.subtitle_detection_group)
 
         self.sttn_group.addSettingCard(self.sttn_neighbor_stride)
@@ -210,6 +212,22 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.PAGE_RIGHT,
             title=tr["Setting"]["subtitleTimelineForwardFrameCount"],
             content=tr["Setting"]["subtitleTimelineForwardFrameCountDesc"],
+            parent=self.subtitle_detection_group
+        )
+
+        self.subtitle_detect_sample_step = RangeSettingCard(
+            configItem=config.subtitleDetectSampleStep,
+            icon=FluentIcon.UNIT,
+            title=tr["Setting"]["SubtitleDetectSampleStep"],
+            content=tr["Setting"]["SubtitleDetectSampleStepDesc"],
+            parent=self.subtitle_detection_group
+        )
+
+        self.subtitle_detect_process_width = RangeSettingCard(
+            configItem=config.subtitleDetectProcessSize,
+            icon=FluentIcon.FIT_PAGE,
+            title=tr["Setting"]["SubtitleDetectProcessSize"],
+            content=tr["Setting"]["SubtitleDetectProcessSizeDesc"],
             parent=self.subtitle_detection_group
         )
 

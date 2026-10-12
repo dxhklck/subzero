@@ -27,7 +27,11 @@ class SubtitleDetect:
         self._init_sample_step()
 
     def _init_sample_step(self):
-        """根据视频帧率自适应设置采样间隔，保持每秒至少采样8帧"""
+        """设置采样间隔：配置了固定步长则用之，否则根据视频帧率自适应（每秒至少采样8帧）"""
+        configured_step = config.subtitleDetectSampleStep.value
+        if configured_step and configured_step > 0:
+            self.SAMPLE_STEP = int(configured_step)
+            return
         cap = cv2.VideoCapture(get_readable_path(self.video_path))
         fps = cap.get(cv2.CAP_PROP_FPS)
         cap.release()
@@ -58,9 +62,29 @@ class SubtitleDetect:
             enable_hpi=len(onnx_providers) > 0,
         )
 
+    def _prepare_for_detection(self, img):
+        """按配置的长边上限等比缩小待检测帧，返回 (缩小后的帧, 坐标还原倍数)。
+        倍数为1表示未缩小；检测框坐标需乘该倍数映射回原分辨率。
+        注意：检测模型内部本就把长边钳制到960，因此上限>=960时等于无操作；
+        设为720可让模型跳过内部缩放从而提速（竖屏视频按长边缩放才有效）。"""
+        limit = config.subtitleDetectProcessSize.value
+        if not limit or limit <= 0:
+            return img, 1.0
+        h, w = img.shape[:2]
+        long_side = max(h, w)
+        if long_side <= limit:
+            return img, 1.0
+        scale = long_side / float(limit)
+        if w >= h:
+            proc_w, proc_h = limit, max(1, int(round(h / scale)))
+        else:
+            proc_h, proc_w = limit, max(1, int(round(w / scale)))
+        return cv2.resize(img, (proc_w, proc_h), interpolation=cv2.INTER_AREA), scale
+
     def detect_subtitle(self, img):
         temp_list = []
-        results = self.text_detector.predict(img)
+        proc_img, coord_scale = self._prepare_for_detection(img)
+        results = self.text_detector.predict(proc_img)
         sub_areas = self.sub_areas
         has_areas = sub_areas is not None and len(sub_areas) > 0
         for res in results:
@@ -68,6 +92,11 @@ class SubtitleDetect:
             if dt_polys is None or len(dt_polys) == 0:
                 continue
             coordinate_list = get_coordinates(dt_polys.tolist())
+            if coord_scale != 1.0:
+                # 降采样检测的框映射回原分辨率坐标
+                coordinate_list = [(int(round(xmin * coord_scale)), int(round(xmax * coord_scale)),
+                                    int(round(ymin * coord_scale)), int(round(ymax * coord_scale)))
+                                   for xmin, xmax, ymin, ymax in coordinate_list]
             if not coordinate_list:
                 continue
             if not has_areas:
@@ -91,27 +120,30 @@ class SubtitleDetect:
         frame_count = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
         tbar = tqdm(total=int(frame_count), unit='frame', position=0, file=sys.__stdout__, desc='Subtitle Finding')
         current_frame_no = 0
-        # 阶段1：采样检测，仅对每隔 sample_step 帧执行 OCR
+        # 阶段1：采样检测，仅对每隔 sample_step 帧执行 OCR；
+        # 非采样帧与AB区间外帧只用 grab() 跳过（不解码为BGR，实测比 read() 快约8倍）
         sampled_results = {}  # frame_no -> temp_list
         if sub_remover:
             sub_remover.append_output(tr['Main']['ProcessingStartFindingSubtitles'])
         while video_cap.isOpened():
-            ret, frame = video_cap.read()
-            # 如果读取视频帧失败（视频读到最后一帧）
-            if not ret:
-                break
-            # 读取视频帧成功
-            current_frame_no += 1
-            if not is_frame_number_in_ab_sections(current_frame_no - 1, sub_remover.ab_sections):
-                tbar.update(1)
-                continue
-            # 仅对采样帧执行 OCR 推理
-            if (current_frame_no - 1) % self.SAMPLE_STEP == 0 or self.SAMPLE_STEP <= 1:
+            # current_frame_no 即下一帧的0-based序号；采样条件与原逻辑 (1-based序号-1)%step==0 等价
+            in_ab_section = is_frame_number_in_ab_sections(current_frame_no, sub_remover.ab_sections) if sub_remover else True
+            need_ocr = in_ab_section and (self.SAMPLE_STEP <= 1 or current_frame_no % self.SAMPLE_STEP == 0)
+            if need_ocr:
+                ret, frame = video_cap.read()
+                # 如果读取视频帧失败（视频读到最后一帧）
+                if not ret:
+                    break
+                current_frame_no += 1
                 temp_list = self.detect_subtitle(frame)
                 if len(temp_list) > 0:
                     sampled_results[current_frame_no] = temp_list
+            else:
+                if not video_cap.grab():
+                    break
+                current_frame_no += 1
             tbar.update(1)
-            if sub_remover:
+            if sub_remover and frame_count > 0:
                 sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
         video_cap.release()
         # 阶段2：插值填充 — 两个采样帧之间都有字幕时，中间帧也标记为有字幕
