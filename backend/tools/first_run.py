@@ -42,17 +42,65 @@ def is_environment_ready():
 def weights_ready():
     try:
         sys.path.insert(0, PROJECT_ROOT)
-        from backend.tools import bootstrap
-        _, missing = bootstrap.check_all()
-        return not missing, missing
+        try:
+            from backend.tools import bootstrap
+            _, missing = bootstrap.check_all()
+            return not missing, missing
+        finally:
+            try:
+                sys.path.remove(PROJECT_ROOT)
+            except ValueError:
+                pass
     except Exception:
         return False, []
+
+
+def _pip_ready():
+    try:
+        return subprocess.run([sys.executable, '-m', 'pip', '--version'],
+                              capture_output=True, timeout=60).returncode == 0
+    except Exception:
+        return False
+
+
+def _get_pip_path():
+    """返回可用的 get-pip.py 路径（优先捆绑在 runtime 目录），失败返回 None"""
+    bundled = os.path.join(sys.prefix, 'get-pip.py')
+    if os.path.isfile(bundled) and os.path.getsize(bundled) > 100000:
+        return bundled
+    import urllib.request
+    bundled = os.path.join(os.environ.get('TEMP', '.'), 'get-pip.py')
+    for url in ('https://bootstrap.pypa.io/get-pip.py',
+                'https://cdn.jsdelivr.net/gh/pypa/get-pip@main/get-pip.py'):
+        try:
+            urllib.request.urlretrieve(url, bundled)
+            if os.path.getsize(bundled) > 100000:
+                return bundled
+        except Exception:
+            continue
+    return None
 
 
 def run_install(log_cb, progress_cb):
     """执行安装步骤。log_cb(str) 输出行；progress_cb(int 0-100) 总进度。"""
     sys.path.insert(0, PROJECT_ROOT)
-    from backend.tools import bootstrap
+    try:
+        from backend.tools import bootstrap
+    finally:
+        try:
+            sys.path.remove(PROJECT_ROOT)
+        except ValueError:
+            pass
+
+    steps = []
+    # embeddable 无 pip：先引导
+    if not _pip_ready():
+        gp = _get_pip_path()
+        if not gp:
+            raise RuntimeError('get-pip.py 不可用（捆绑缺失且在线下载失败），请检查网络')
+        steps.append((f'pip 引导 ({os.path.basename(gp)})',
+                      [gp, '--no-warn-script-location', '-i', TSINGHUA]))
+    steps.extend(INSTALL_STEPS)
 
     steps = list(INSTALL_STEPS)
     res, missing = weights_ready()

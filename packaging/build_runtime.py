@@ -21,11 +21,14 @@ LIGHT = [
 ]
 
 def main():
-    # 1) 解包
+    # 1) 解包（清旧目录失败不致命——extractall 会覆盖同名文件）
     if os.path.isdir(RT):
-        import shutil
-        shutil.rmtree(RT)
-    os.makedirs(RT)
+        try:
+            import shutil
+            shutil.rmtree(RT)
+        except Exception as e:
+            print('rmtree skipped:', e)
+    os.makedirs(RT, exist_ok=True)
     with zipfile.ZipFile(RUNTIME_SRC) as z:
         z.extractall(RT)
     print('extracted embeddable')
@@ -35,6 +38,29 @@ def main():
     with open(pth, 'w', encoding='utf-8') as f:
         f.write('python313.zip\n.\nLib/site-packages\nimport site\n')
     print('patched python313._pth')
+
+    # 2.5) 烘焙 pip（embeddable 无 ensurepip，用 get-pip.py）
+    rt_py = os.path.join(RT, 'python.exe')
+    getpip = os.path.join(RT, 'get-pip.py')
+    import urllib.request
+    if not os.path.isfile(getpip) or os.path.getsize(getpip) < 100000:
+        for url in ('https://bootstrap.pypa.io/get-pip.py',
+                    'https://cdn.jsdelivr.net/gh/pypa/get-pip@main/get-pip.py'):
+            try:
+                urllib.request.urlretrieve(url, getpip)
+                break
+            except Exception as e:
+                print('get-pip download fail:', url, e)
+    if not os.path.isfile(getpip) or os.path.getsize(getpip) < 100000:
+        print('FATAL: get-pip.py 下载失败')
+        sys.exit(1)
+    print('bootstrapping pip ...')
+    r = subprocess.run([rt_py, getpip, '--no-warn-script-location', '-i', 'https://mirrors.aliyun.com/pypi/simple/'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stdout[-1500:]); print(r.stderr[-1500:]); sys.exit(1)
+    r = subprocess.run([rt_py, '-m', 'pip', '--version'], capture_output=True, text=True)
+    print('pip ready:', r.stdout.strip() or r.stderr.strip())
 
     # 3) 预烘焙轻量依赖（--target 直装进 runtime 的 site-packages）
     import subprocess
