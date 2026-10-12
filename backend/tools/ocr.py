@@ -12,9 +12,11 @@ def get_coordinates(dt_box):
             (x2, y2) = int(i[1][0]), int(i[1][1])
             (x3, y3) = int(i[2][0]), int(i[2][1])
             (x4, y4) = int(i[3][0]), int(i[3][1])
-            xmin = max(x1, x4)
-            xmax = min(x2, x3)
-            ymin = max(y1, y2)
-            ymax = min(y3, y4)
+            # 取四边形外接矩形（包围盒）：倾斜/旋转文本框若取内接矩形会小于实际文字，
+            # 导致 inpaint 掩膜欠覆盖、擦除后残留文字边缘
+            xmin = min(x1, x2, x3, x4)
+            xmax = max(x1, x2, x3, x4)
+            ymin = min(y1, y2, y3, y4)
+            ymax = max(y1, y2, y3, y4)
             coordinate_list.append((xmin, xmax, ymin, ymax))
     return coordinate_list

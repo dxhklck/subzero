@@ -102,7 +102,6 @@ def run_install(log_cb, progress_cb):
                       [gp, '--no-warn-script-location', '-i', TSINGHUA]))
     steps.extend(INSTALL_STEPS)
 
-    steps = list(INSTALL_STEPS)
     res, missing = weights_ready()
     if not res:
         steps.append((f'模型权重下载 ({len(missing)} 项, ~3.2GB)', 'WEIGHTS'))

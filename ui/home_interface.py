@@ -744,7 +744,7 @@ class HomeInterface(QWidget):
             # 通知 worker 线程停止
             self._stop_event.set()
             # 停止 GPU 监控采样线程
-            pass
+            self.gpu_monitor_bar.stop()
             # 终止子进程
             ProcessManager.instance().terminate_all()
             # 等待 worker 线程结束（最多5秒）

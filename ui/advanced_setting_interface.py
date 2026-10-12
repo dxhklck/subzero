@@ -353,7 +353,7 @@ class AdvancedSettingInterface(ScrollArea):
         self.env_check_card.setContent("全部通过 ✅" if not missing else f"发现 {len(missing)} 项缺失权重，详见日志")
 
         if missing:
-            n_dl = sum(1 for m in missing if m['url'])
+            n_dl = sum(1 for m in missing if m.get('sources'))
             msg = report + f"\n\n缺失权重 {len(missing)} 项"
             if n_dl:
                 msg += f"，其中 {n_dl} 项可自动下载（大文件支持断点续传）"

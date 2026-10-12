@@ -232,11 +232,10 @@ class SubtitleRemover:
                                 # 2. 调用批推理
                                 if len(batch) == 1:
                                     single_mask = create_mask(self.mask_size, sub_list[start_frame_no])
-                                    inpainted_frame = self.lama_inpaint.inpaint(frame, single_mask)
+                                    inpainted_frame = self.lama_inpaint.inpaint(batch[0], single_mask)
                                     self.video_writer.write(inpainted_frame)
                                     # self.append_output(f'write frame: {start_frame_no + inner_index} with mask {sub_list[start_frame_no]}')
                                     inner_index += 1
-                                    self.update_progress(tbar, increment=1)
                                 elif len(batch) > 1:
                                     inpainted_frames = propainter_inpaint(batch, mask)
                                     for i, inpainted_frame in enumerate(inpainted_frames):
@@ -310,7 +309,7 @@ class SubtitleRemover:
                     frames_need_inpaint.append(frame)
                 mask_area_coordinates = []
                 # 1. 获取当前批次的mask坐标全集
-                for mask_index in range(start_frame_index, end_frame_index):
+                for mask_index in range(start_frame_index, end_frame_index + 1):
                     if mask_index in sub_list.keys():
                         for area in sub_list[mask_index]:
                             xmin, xmax, ymin, ymax = area
@@ -503,10 +502,10 @@ if __name__ == '__main__':
     multiprocessing.set_start_method("spawn")
     from backend.tools.args_handler import parse_args
     args = parse_args()
-    sr = SubtitleRemover(args.input)
     if not is_video_or_image(args.input):
-        sr.append_output(f'Error: {video_path} is not supported not corrupted.')
+        print(f'Error: {args.input} is not a supported video or image file.')
         exit(-1)
+    sr = SubtitleRemover(args.input)
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output
     config.inpaintMode.value = args.inpaint_mode

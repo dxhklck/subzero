@@ -137,3 +137,5 @@ tr.read(TRANSLATION_FILE, encoding='utf-8')
 BASE_DIR = str(Path(os.path.abspath(__file__)).parent)
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+# 模型权重均为本地文件，跳过 Paddle 每次启动的联网连通性探测（每次省约30秒）
+os.environ['PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK'] = 'True'

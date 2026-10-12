@@ -17,6 +17,7 @@ from backend.inpaint.video.model.propainter import InpaintGenerator
 from backend.inpaint.video.core.utils import to_tensors
 from backend.inpaint.video.model.misc import get_device
 from backend.tools.inpaint_tools import get_inpaint_area_by_mask
+from backend.tools.model_config import ModelConfig
 
 import warnings
 
