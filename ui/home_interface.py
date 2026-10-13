@@ -274,77 +274,19 @@ class HomeInterface(QWidget):
 
     def update_preview(self, frame):
         self._last_frame = frame  # 缓存原始帧，供窗口缩放后自适应重渲染
-        # 先缩放图像
-        resized_frame = self._img_resize(frame)
-
-        # 设置视频参数
+        # 记录原图尺寸与帧率；letterbox 适配（contain 等比缩放 + 黑边）由显示组件完成
         self.video_display_component.set_video_parameters(
             self.frame_width, self.frame_height,
-            self.scaled_width if hasattr(self, 'scaled_width') else None,
-            self.scaled_height if hasattr(self, 'scaled_height') else None,
-            self.border_left if hasattr(self, 'border_left') else 0,
-            self.border_top if hasattr(self, 'border_top') else 0,
             self.fps if self.fps is not None else 30,
         )
 
-        # 更新视频显示（这会同时保存current_pixmap）
-        self.video_display_component.update_video_display(resized_frame)
+        # 更新视频显示（组件内按控件实际尺寸 contain 适配，并记录映射几何）
+        self.video_display_component.update_video_display(frame)
 
     def _on_preview_resized(self, width):
         """窗口缩放：更新预览尺寸并重渲染当前帧，使画面铺满可用区域"""
         if self.video_display_component.update_preview_size(width) and self._last_frame is not None:
             self.update_preview(self._last_frame)
-
-    def _img_resize(self, image):
-        height, width = image.shape[:2]
-        
-        video_preview_width = self.video_display_component.video_preview_width
-        video_preview_height = self.video_display_component.video_preview_height
-        # 计算等比缩放后的尺寸
-        target_ratio = video_preview_width / video_preview_height
-        image_ratio = width / height
-        
-        if image_ratio > target_ratio:
-            # 宽度适配，高度按比例缩放
-            new_width = video_preview_width
-            new_height = int(new_width / image_ratio)
-            top_border = (video_preview_height - new_height) // 2
-            bottom_border = video_preview_height - new_height - top_border
-            left_border = 0
-            right_border = 0
-        else:
-            # 高度适配，宽度按比例缩放
-            new_height = video_preview_height
-            new_width = int(new_height * image_ratio)
-            left_border = (video_preview_width - new_width) // 2
-            right_border = video_preview_width - new_width - left_border
-            top_border = 0
-            bottom_border = 0
-        
-        # 先缩放图像
-        resized = cv2.resize(image, (new_width, new_height))
-        
-        # 添加黑边以填充到目标尺寸
-        padded = cv2.copyMakeBorder(
-            resized, 
-            top_border, bottom_border, 
-            left_border, right_border, 
-            cv2.BORDER_CONSTANT, 
-            value=[0, 0, 0]
-        )
-        
-        # 保存边框信息，用于坐标转换
-        self.border_left = left_border / video_preview_width
-        self.border_right = right_border / video_preview_width
-        self.border_top = top_border / video_preview_height
-        self.border_bottom = bottom_border / video_preview_height
-        self.original_width = width
-        self.original_height = height
-        self.is_vertical = width < height
-        self.scaled_width = new_width / video_preview_width
-        self.scaled_height = new_height / video_preview_height
-        
-        return padded
 
     def stop_button_clicked(self):
         try:
@@ -421,12 +363,8 @@ class HomeInterface(QWidget):
                                     self.video_cap = None
 
                             self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.PROCESSING)
-                            options = {}
-                            for key in task_item.options:
-                                value = task_item.options[key]
-                                if key == TaskOptions.SUB_AREAS.value:
-                                    value = self.video_display_component.preview_coordinates_to_video_coordinates(value)
-                                options[key] = value
+                            # SUB_AREAS 在组件内即按原图像素坐标存储，无需二次转换，直接下发
+                            options = dict(task_item.options)
                             # 清理缓存, 使用动态路径
                             task_item.output_path = None
                             output_path = task_item.output_path
@@ -742,17 +680,15 @@ class HomeInterface(QWidget):
         if self.current_processing_task_index >= 0:
             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
             if len(subtitle_areas) > 0:
-                subtitle_areas = self.video_display_component.preview_coordinates_to_video_coordinates(subtitle_areas)
                 if frame_ori is frame_comp:
                     frame_ori = frame_ori.copy()
+                # SUB_AREAS 为原图像素坐标，直接在原图上绘制
                 for rect in subtitle_areas:
                     ymin, ymax, xmin, xmax = rect
                     cv2.rectangle(frame_ori, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
         preview_frame = cv2.hconcat([frame_ori, frame_comp])
-        # 先缩放图像
-        resized_frame = self._img_resize(preview_frame)
-        # 更新视频显示（这会同时保存current_pixmap）
-        self.video_display_component.update_video_display(resized_frame, draw_selection=False)
+        # contain 适配 + 黑边由显示组件完成
+        self.video_display_component.update_video_display(preview_frame, draw_selection=False)
         self.video_display_component.set_dragger_enabled(False)
 
     @Slot(object)
