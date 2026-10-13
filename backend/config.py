@@ -47,6 +47,9 @@ class Config(QConfig):
     # 默认值为一个选区，格式为："ymin,ymax,xmin,xmax;ymin,ymax,xmin,xmax;..."，分号分隔不同选区
     subtitleSelectionAreas = ConfigItem("Main", "SubtitleSelectionAreas", "0.88,0.99,0.15,0.85")
 
+    # 专业模式：高级设置页是否显示专家参数（容差像素/STTN细节/MiniMax次要项）
+    expertMode = ConfigItem("Window", "ExpertMode", False, BoolValidator())
+
     """
     MODE可选算法类型
     - InpaintMode.STTN_AUTO 智能擦除版
@@ -63,14 +66,14 @@ class Config(QConfig):
     # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)
     subtitleYXAxisDifferencePixel = RangeConfigItem("Main", "SubtitleYXAxisDifferencePixel", 10, RangeValidator(0, 100))
     # 用于放大mask大小，防止自动检测的文本框过小，inpaint阶段出现文字边，有残留
-    subtitleAreaDeviationPixel = RangeConfigItem("Main", "SubtitleAreaDeviationPixel", 10, RangeValidator(1, 80))
+    subtitleAreaDeviationPixel = RangeConfigItem("Main", "SubtitleAreaDeviationPixel", 20, RangeValidator(1, 80))
     # 同于判断两个文本框是否为同一行字幕，高度差距指定像素点以内认为是同一行
     subtitleAreaYAxisDifferencePixel = RangeConfigItem("Main", "SubtitleAreaYAxisDifferencePixel", 20, RangeValidator(0, 100))
     # 用于判断两个字幕文本的矩形框是否相似，如果X轴和Y轴偏差都在指定阈值内，则认为时同一个文本框
     subtitleAreaPixelToleranceYPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceYPixel", 20, RangeValidator(0, 100))
     subtitleAreaPixelToleranceXPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceXPixel", 20, RangeValidator(0, 100))
-    subtitleTimelineBackwardFrameCount = RangeConfigItem("Main", "SubtitleTimelineBackwardFrameCount", 3, RangeValidator(0, 30))
-    subtitleTimelineForwardFrameCount = RangeConfigItem("Main", "subtitleTimelineForwardFrameCount", 3, RangeValidator(0, 30))
+    subtitleTimelineBackwardFrameCount = RangeConfigItem("Main", "SubtitleTimelineBackwardFrameCount", 5, RangeValidator(0, 30))
+    subtitleTimelineForwardFrameCount = RangeConfigItem("Main", "subtitleTimelineForwardFrameCount", 5, RangeValidator(0, 30))
     # 字幕检测采样步长：0 = 按视频帧率自适应（默认，30fps以上每3帧、60fps以上每4帧）；>0 = 固定每N帧采样一次
     # 字幕通常持续0.5秒以上，采样步长放宽可线性减少OCR调用次数
     subtitleDetectSampleStep = RangeConfigItem("Main", "SubtitleDetectSampleStep", 0, RangeValidator(0, 10))
@@ -78,7 +81,7 @@ class Config(QConfig):
     # 注意：PP-OCRv5 检测模型内部本就把长边钳制到960（inference.yml DetResizeForTest），因此：
     #   >=960 等于无操作（零收益零风险）；设为720 可让模型跳过内部缩放，OCR 实测快约40%
     #   （1080p 33ms→19.5ms；本项目测试视频9.5px高小字在640下仍检出无损，但过小有漏检风险）
-    subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 4096))
+    subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 2560))
     # 智能路由（AUTO模式）静态阈值：区间内采样帧的平均帧差（0-255灰度标度，160px长边灰度图上计算）
     # 低于该值判为静态画面走 LAMA（0.09s/帧，静态背景≈无损），不低于则走 MiniMax（按MiniMax参数组）
     # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
@@ -117,7 +120,7 @@ class Config(QConfig):
     # 参考帧数量
     sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 30))
     # 设置STTN算法最大同时处理的帧数量
-    sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 300))
+    sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 200))
     getSttnMaxLoadNum = lambda self: max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
 
     # 以下参数仅适用MINIMAX算法时，才生效
@@ -125,16 +128,16 @@ class Config(QConfig):
     # 主要是速度参数：块越大固定开销（VAE编解码/调度）摊越薄。A/B 实测（0.30MP条带）：
     # 61帧比25帧快13%而峰值仅多0.3GB——块大小对显存峰值影响很小（峰值由条带分辨率主导）。
     # _fit_chunk_to_vram 按条带分辨率校验显存：典型条带原样保留，超预算时收缩或提示降 ProcessWidth
-    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 201))
+    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 121))
     # 去噪步数：A/B 实测（720p全帧）12→8 步仅慢 13% 时省 13%、与12步画质肉眼无差异（最大像素差18/255）；
     # 480p 等小分辨率下步数近似线性影响速度。8 为画质/速度平衡点，追求极限画质可设 12
-    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 20))
+    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 12))
     # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
     minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 12))
     # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
     # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
     # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
-    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 4096))
+    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 2560))
     # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
     # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
     minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))
