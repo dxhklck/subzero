@@ -103,7 +103,7 @@ class VideoDisplayComponent(QWidget):
             border-top-right-radius: 10px;
             border: 0px solid transparent;
         """)
-        self.video_display.setMinimumSize(self.video_preview_width, self.video_preview_height)
+        self.video_display.setMinimumSize(640, 360)
         
         self.video_display.setMouseTracking(True)
         self.video_display.setScaledContents(True)
@@ -136,7 +136,7 @@ class VideoDisplayComponent(QWidget):
 
         # 设置固定的宽高比
         ratio_container.setFixedHeight(ratio_container.width() * 9 // 16)
-        ratio_container.setMinimumWidth(self.video_preview_width)
+        ratio_container.setMinimumWidth(640)
 
         # 添加到布局
         black_layout.addWidget(ratio_container)
@@ -166,6 +166,7 @@ class VideoDisplayComponent(QWidget):
         black_layout.addWidget(control_container)
         
         self.black_container.setLayout(black_layout)
+        self.black_container.setFixedWidth(self.video_preview_width + 4)
         video_layout.addWidget(self.black_container)
         self.video_container.setLayout(video_layout)
         main_layout.addWidget(self.video_container)
@@ -224,15 +225,16 @@ class VideoDisplayComponent(QWidget):
 
     def update_preview_size(self, width):
         """按窗口宽度更新预览尺寸；尺寸有实质变化返回 True。
-        下限 960 对齐原版观感（小窗口下预览不缩水，由窗口最小尺寸兜底）。"""
-        width = max(960, min(width, 1600))
+        下限 640；上限 960 对齐原版观感，窗口更宽时不再无限撑宽预览。"""
+        width = max(640, min(width, 960))
         height = width * 9 // 16
         if abs(width - self.video_preview_width) < 40:
             return False
         self.video_preview_width = width
         self.video_preview_height = height
-        self.video_display.setMinimumSize(width, height)
+        self.video_display.setMinimumSize(640, 360)
         self.ratio_container.setFixedHeight(height)
+        self.black_container.setFixedWidth(width + 4)
         return True
 
     def update_video_display(self, frame, draw_selection=True):
