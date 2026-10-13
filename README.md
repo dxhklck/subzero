@@ -21,7 +21,7 @@
 主要特性：
 
 - **条带裁剪修复**（本项目的核心优化）：字幕区域外扩后裁剪送修、贴回原帧，窗口外像素零损失——720p 实测比全帧直推**提速 6.9 倍**，显存同比例下降
-- **5 种修复算法**：MiniMax-Remover（推荐）/ STTN / LAMA / ProPainter / OpenCV
+- **4 种修复算法**：MiniMax-Remover（推荐）/ STTN / LAMA / OpenCV
 - **GPU 监控**：界面底部实时显示显存（含本次任务峰值）、GPU 利用率、内存与处理速度
 - **A/B 对比滑块**：处理中拖动分界线，左原帧右修复帧，逐像素验收擦除效果
 - **性能预设**：480p / 720p / 1080p / 4K 一键切换推荐参数
@@ -64,7 +64,6 @@ python gui.py
 | PP-OCRv5 (server) | ≈ 89MB | 字幕检测 |
 | big-lama | 196MB | LAMA 修复 |
 | sttn | 63MB | STTN 修复 |
-| ProPainter | 189MB | ProPainter 修复 |
 | MiniMax-Remover | ≈ 2.6GB | MiniMax 修复（推荐） |
 
 权重文件体积较大，不随源码仓库分发。请在 Release 附件或联系作者获取下载链接，解压后放入 `backend/models/`。可用设置页的**环境自检**核对文件完整性。
@@ -76,7 +75,7 @@ subzero/
 ├── gui.py                      # GUI 入口
 ├── backend/main.py             # CLI 入口 / 处理主流程
 ├── backend/tools/strip_inpaint.py   # 条带裁剪修复包装器（核心优化）
-├── backend/inpaint/            # 五种修复算法实现
+├── backend/inpaint/            # 四种修复算法实现
 ├── backend/models/             # 模型权重（需下载）
 ├── ui/                         # PySide6 + qfluentwidgets 界面
 └── python/                     # 内嵌 Python 运行时（便携版）

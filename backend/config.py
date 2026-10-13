@@ -210,7 +210,7 @@ if _interface_lang != 'ch':
             for _key, _value in _lang_tr[_section].items():
                 tr[_section][_key] = _value
 
-# 旧版 config 里可能残留已删除的算法值（如 ProPainter），直接进 GUI 下拉会 optionToText KeyError
+# 旧版 config 里可能残留已删除的算法值，直接进 GUI 下拉会 optionToText KeyError
 try:
     if config.inpaintMode.value not in [m.value for m in InpaintMode]:
         config.set(config.inpaintMode, InpaintMode.STTN_AUTO)

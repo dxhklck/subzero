@@ -21,7 +21,7 @@ SubZero is a desktop application that removes hard-burned subtitles from videos 
 Highlights:
 
 - **Strip-crop inpainting** (core optimization): crops the subtitle strip (with configurable padding), inpaints it, and pastes it back — pixels outside the window stay untouched. Measured **6.9x faster** than full-frame inference at 720p, with proportional VRAM savings
-- **5 inpainting algorithms**: MiniMax-Remover (recommended) / STTN / LAMA / ProPainter / OpenCV
+- **4 inpainting algorithms**: MiniMax-Remover (recommended) / STTN / LAMA / OpenCV
 - **GPU monitor**: live VRAM (with per-task peak), GPU utilization, RAM and processing speed in the status bar
 - **A/B wipe slider**: drag the split line to compare original vs. inpainted frames during processing
 - **Performance presets**: one-click 480p / 720p / 1080p / 4K parameter sets
@@ -64,7 +64,6 @@ python gui.py
 | PP-OCRv5 (server) | ≈ 89MB | Subtitle detection |
 | big-lama | 196MB | LAMA inpainting |
 | sttn | 63MB | STTN inpainting |
-| ProPainter | 189MB | ProPainter inpainting |
 | MiniMax-Remover | ≈ 2.6GB | MiniMax inpainting (recommended) |
 
 Weights are large and not distributed with the source repository. Get them from Release attachments, then extract into `backend/models/`. Use the **Environment Check** card in Settings to verify file integrity.
