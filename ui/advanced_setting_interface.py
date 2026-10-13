@@ -233,13 +233,14 @@ class AdvancedSettingInterface(ScrollArea):
             st['EnvCheck'], st['EnvCheckDesc'], icon=FluentIcon.SYNC, parent=card)
         self.env_status = self.env_row.add_status_label(width=96)
         self.env_row.add_button(st['EnvCheckBtn'], on_click=self.run_env_check)
-        # 关于并入：版权与版本挂 tooltip，按钮即检查更新
+        vbox.addWidget(CompactParamRow(self.theme_row, self.save_dir_row,
+                                       self.env_row, columns=4))
+
+        # 关于并入：版权与版本直接作为行标题显示（原 tooltip 内容），按钮即检查更新
         self.copyright_row = CompactActionRow(
-            st['CopyrightTitle'], st['CopyrightDesc'].format(VERSION),
+            st['CopyrightDesc'].format(VERSION), st['CopyrightDesc'].format(VERSION),
             icon=FluentIcon.MAIL, parent=card)
         self.copyright_row.add_button(st['CopyrightButton'], on_click=lambda: self.check_update())
-        vbox.addWidget(CompactParamRow(self.theme_row, self.save_dir_row,
-                                       self.env_row, self.copyright_row, columns=4))
 
         # 项目链接（仓库地址配置后才显示）
         self.project_row = None
@@ -249,7 +250,9 @@ class AdvancedSettingInterface(ScrollArea):
                 icon=FluentIcon.GITHUB, parent=card)
             self.project_row.add_button(st['ProjectLinkOpen'],
                                         on_click=lambda: QDesktopServices.openUrl(QUrl(PROJECT_HOME_URL)))
-            vbox.addWidget(CompactParamRow(self.project_row, columns=4))
+            vbox.addWidget(CompactParamRow(self.copyright_row, self.project_row, columns=4))
+        else:
+            vbox.addWidget(CompactParamRow(self.copyright_row, columns=4))
 
     def _update_save_dir_tip(self):
         """保存目录 tooltip：显示当前实际输出位置"""
