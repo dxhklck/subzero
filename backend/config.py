@@ -23,6 +23,20 @@ class Config(QConfig):
     # 应用主题：light / dark / auto（跟随系统），主色固定青绿
     appTheme = OptionsConfigItem("Window", "AppTheme", "auto", OptionsValidator(["light", "dark", "auto"]), restart=False)
 
+    # 界面语言设置（切换后需重启生效：界面文案在软件启动时一次性加载并固化到各控件）
+    intefaceTexts = {
+        '简体中文': 'ch',
+        '繁體中文': 'chinese_cht',
+        'English': 'en',
+        '한국어': 'ko',
+        '日本語': 'japan',
+        'Tiếng Việt': 'vi',
+        'Español': 'es'
+    }
+    # 注意：默认值必须在选项列表内（旧版默认值为 'ChineseSimplified' 不在列表中，
+    # 是语言切换失效的根因之一）
+    interface = OptionsConfigItem("Window", "Interface", "ch", OptionsValidator(intefaceTexts.values()), restart = True)
+
     # 窗口位置和大小
     windowX = ConfigItem("Window", "X", None)
     windowY = ConfigItem("Window", "Y", None)
@@ -65,6 +79,11 @@ class Config(QConfig):
     #   >=960 等于无操作（零收益零风险）；设为720 可让模型跳过内部缩放，OCR 实测快约40%
     #   （1080p 33ms→19.5ms；本项目测试视频9.5px高小字在640下仍检出无损，但过小有漏检风险）
     subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 4096))
+    # 智能路由（AUTO模式）静态阈值：区间内采样帧的平均帧差（0-255灰度标度，160px长边灰度图上计算）
+    # 低于该值判为静态画面走 LAMA（0.09s/帧，静态背景≈无损），不低于则走 MiniMax（按MiniMax参数组）
+    # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
+    # 想更激进可调大（3.0约一半区间走LAMA，5.0约九成——运动区间用LAMA会糊，按素材质量容忍度权衡）
+    autoRouteStaticThreshold = RangeConfigItem("Main", "AutoRouteStaticThreshold", 1, RangeValidator(0, 20))
     # 以下参数仅适用STTN算法时，才生效
     """
     1. STTN_SKIP_DETECTION
@@ -142,6 +161,15 @@ CONFIG_FILE = 'config/config.json'
 config = Config()
 qconfig.load(CONFIG_FILE, config)
 
+# 修复旧版可能遗留的无效语言值（旧默认值 'ChineseSimplified' 不在选项列表中）：
+# 该值会使 GUI 构建设置页语言下拉时 optionToText[无效值] 抛 KeyError
+try:
+    _iface_stored = qconfig.get(config.interface)
+except Exception:
+    _iface_stored = None
+if _iface_stored not in Config.intefaceTexts.values():
+    config.set(config.interface, 'ch')
+
 # 向后兼容：旧的 SubtitleDetectMode 枚举值为中文，迁移为新值
 _detect_mode_value = config.subtitleDetectMode.value
 if isinstance(_detect_mode_value, str) and _detect_mode_value in ("快速", "Fast"):
@@ -149,11 +177,30 @@ if isinstance(_detect_mode_value, str) and _detect_mode_value in ("快速", "Fas
 elif isinstance(_detect_mode_value, str) and _detect_mode_value in ("精准", "Precise"):
     config.set(config.subtitleDetectMode, SubtitleDetectMode.PP_OCRv5_SERVER)
 
-# 界面文案（仅简体中文，多语言已移除）
+# 界面文案：按界面语言配置加载对应 ini；语言文件中缺失的键回退到简体中文，
+# 保证新增文案漏翻译时其他语言也能正常启动（不会 KeyError）
 tr = configparser.ConfigParser()
 
-TRANSLATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'interface', "ch.ini")
-tr.read(TRANSLATION_FILE, encoding='utf-8')
+_INTERFACE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'interface')
+tr.read(os.path.join(_INTERFACE_DIR, 'ch.ini'), encoding='utf-8')
+
+_interface_lang = 'ch'
+try:
+    _v = config.interface.value
+    if _v in Config.intefaceTexts.values():
+        _interface_lang = _v
+except Exception:
+    pass
+if _interface_lang != 'ch':
+    _lang_file = os.path.join(_INTERFACE_DIR, f'{_interface_lang}.ini')
+    if os.path.exists(_lang_file):
+        _lang_tr = configparser.ConfigParser()
+        _lang_tr.read(_lang_file, encoding='utf-8')
+        for _section in _lang_tr.sections():
+            if not tr.has_section(_section):
+                tr.add_section(_section)
+            for _key, _value in _lang_tr[_section].items():
+                tr[_section][_key] = _value
 
 # 项目的base目录
 BASE_DIR = str(Path(os.path.abspath(__file__)).parent)

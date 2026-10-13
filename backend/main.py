@@ -258,7 +258,29 @@ class SubtitleRemover:
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
 
-    def video_inpaint(self, tbar, model, batch_size=None):
+    def _route_pick_model(self, start, end, motion_scores):
+        """AUTO路由：按区间帧差均值选算法。静态区间走LAMA（快，静态背景≈无损），
+        运动区间走MiniMax（质量优先）。返回 (model, batch_size)"""
+        scores = [s for f, s in motion_scores.items() if start <= f <= end] if motion_scores else []
+        if scores:
+            avg = sum(scores) / len(scores)
+        else:
+            # 无帧差采样点（区间由合并/时间线扩展产生，运动量未知）：
+            # 按运动处理走 MiniMax——质量优先取向下限，不用 LAMA 赌静态
+            avg = float('inf')
+        threshold = config.autoRouteStaticThreshold.value
+        if avg < threshold:
+            model = self.lama_inpaint
+            batch_size = config.getSttnMaxLoadNum()
+            tag = 'LAMA(静态)'
+        else:
+            model = self.minimax_inpaint
+            batch_size = config.minimaxMaxLoadNum.value
+            tag = 'MiniMax(运动)'
+        self.append_output(f'[Route] 区间 {start}-{end}: 帧差均值 {avg:.2f} (阈值 {threshold}) -> {tag}')
+        return model, batch_size
+
+    def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         if len(sub_list) == 0:
@@ -269,6 +291,8 @@ class SubtitleRemover:
         tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
         continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
         tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
+        # AUTO路由需要在删除检测器前取出帧差分数
+        motion_scores = sub_detector.frame_diff_scores if route else None
         del sub_detector
         gc.collect()
         start_end_map = dict()
@@ -321,8 +345,16 @@ class SubtitleRemover:
                 # 1. 获取当前批次使用的mask
                 mask = create_mask(self.mask_size, mask_area_coordinates)
                 # self.append_output(f'inpaint with mask: {mask_area_coordinates}')
+                if route:
+                    model, batch_size = self._route_pick_model(start_frame_index, end_frame_index, motion_scores)
                 if batch_size is None:
                     batch_size = config.getSttnMaxLoadNum()
+                # MiniMax（StripCropInpaint包装）内部已按 chunk_frames(4k+1) 分块、块间重叠混合
+                # 并做显存守卫；外层再按小批分割会把接缝混合割裂（每批仅含一块、批间无重叠），
+                # 故整段一次性送入。上限4倍块大小，避免超长区间把全部帧堆在内存
+                if isinstance(model, StripCropInpaint):
+                    chunk = getattr(model.inner, 'chunk_frames', 61)
+                    batch_size = max(batch_size, min(len(frames_need_inpaint), chunk * 4))
                 for batch in batch_generator(frames_need_inpaint, batch_size):
                     # 2. 调用批推理
                     if len(batch) >= 1:
@@ -385,6 +417,9 @@ class SubtitleRemover:
                 self.video_inpaint(tbar, self.lama_inpaint)
             elif config.inpaintMode.value == InpaintMode.MINIMAX:
                 self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
+            elif config.inpaintMode.value == InpaintMode.AUTO:
+                # 智能路由：按区间帧差自动选 LAMA（静态）或 MiniMax（运动）
+                self.video_inpaint(tbar, route=True)
             elif config.inpaintMode.value == InpaintMode.OPENCV:
                 self.video_inpaint(tbar, OpenCVInpaint())
             else:

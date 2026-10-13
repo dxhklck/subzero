@@ -2,6 +2,7 @@ import sys
 from functools import cached_property
 
 import cv2
+import numpy as np
 from tqdm import tqdm
 
 from .model_config import ModelConfig
@@ -24,6 +25,10 @@ class SubtitleDetect:
     def __init__(self, video_path, sub_areas=[]):
         self.video_path = video_path
         self.sub_areas = sub_areas
+        # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
+        # 供 AUTO 路由判定区间运动量用，不影响检测结果
+        self.frame_diff_scores = {}
+        self._prev_gray_small = None
         self._init_sample_step()
 
     def _init_sample_step(self):
@@ -81,6 +86,17 @@ class SubtitleDetect:
             proc_h, proc_w = limit, max(1, int(round(w / scale)))
         return cv2.resize(img, (proc_w, proc_h), interpolation=cv2.INTER_AREA), scale
 
+    def _update_frame_diff(self, frame_no, frame):
+        """计算本采样帧与上一采样帧的平均灰度差（AUTO路由用，缩到160px长边，成本<0.5ms）"""
+        h, w = frame.shape[:2]
+        scale = 160.0 / max(h, w)
+        small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
+                           (max(1, int(w * scale)), max(1, int(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+        if self._prev_gray_small is not None and self._prev_gray_small.shape == small.shape:
+            self.frame_diff_scores[frame_no] = float(np.mean(cv2.absdiff(self._prev_gray_small, small)))
+        self._prev_gray_small = small
+
     def detect_subtitle(self, img):
         temp_list = []
         proc_img, coord_scale = self._prepare_for_detection(img)
@@ -135,6 +151,7 @@ class SubtitleDetect:
                 if not ret:
                     break
                 current_frame_no += 1
+                self._update_frame_diff(current_frame_no, frame)
                 temp_list = self.detect_subtitle(frame)
                 if len(temp_list) > 0:
                     sampled_results[current_frame_no] = temp_list

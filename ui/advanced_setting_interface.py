@@ -78,6 +78,7 @@ class AdvancedSettingInterface(ScrollArea):
         self.subtitle_detection_group.addSettingCard(self.subtitle_timeline_forward_frame_count)
         self.subtitle_detection_group.addSettingCard(self.subtitle_detect_sample_step)
         self.subtitle_detection_group.addSettingCard(self.subtitle_detect_process_width)
+        self.subtitle_detection_group.addSettingCard(self.auto_route_static_threshold)
         self.expandLayout.addWidget(self.subtitle_detection_group)
 
         self.sttn_group.addSettingCard(self.sttn_neighbor_stride)
@@ -194,6 +195,14 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.FIT_PAGE,
             title=tr["Setting"]["SubtitleDetectProcessSize"],
             content=tr["Setting"]["SubtitleDetectProcessSizeDesc"],
+            parent=self.subtitle_detection_group
+        )
+
+        self.auto_route_static_threshold = RangeSettingCard(
+            configItem=config.autoRouteStaticThreshold,
+            icon=FluentIcon.SPEED_HIGH,
+            title=tr["Setting"]["AutoRouteStaticThreshold"],
+            content=tr["Setting"]["AutoRouteStaticThresholdDesc"],
             parent=self.subtitle_detection_group
         )
 
