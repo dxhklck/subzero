@@ -135,7 +135,7 @@ class GpuMonitorBar(QWidget):
         for row in (self.vram_row, self.ram_row):
             row.title_label.setStyleSheet('font-size: 13px;')
             row.value_label.setStyleSheet(
-                f"font-size:11px; font-family:'Consolas'; color:{c['value']};")
+                f"font-size:13px; font-family:'Consolas'; color:{c['value']};")
             row.bar.setStyleSheet(
                 f"QProgressBar {{ background: {c['track']}; border: none; border-radius: 3px; }}")
         self.vram_row.bar.setStyleSheet(
