@@ -87,9 +87,6 @@ class AdvancedSettingInterface(ScrollArea):
         self.sttn_group.addSettingCard(self.sttn_max_load_num)
         self.expandLayout.addWidget(self.sttn_group)
 
-        self.propainter_group.addSettingCard(self.propainter_max_load_num)
-        self.expandLayout.addWidget(self.propainter_group)
-
         self.minimax_group.addSettingCard(self.minimax_max_load_num)
         self.minimax_group.addSettingCard(self.minimax_num_inference_steps)
         self.minimax_group.addSettingCard(self.minimax_iterations)
@@ -112,8 +109,6 @@ class AdvancedSettingInterface(ScrollArea):
         self.subtitle_detection_group = SettingCardGroup(tr["Setting"]["SubtitleDetectionSetting"], self.scrollWidget)
         # STTN设置组
         self.sttn_group = SettingCardGroup(tr["Setting"]["SttnSetting"], self.scrollWidget)
-        # Propainter设置组
-        self.propainter_group = SettingCardGroup(tr["Setting"]["ProPainterSetting"], self.scrollWidget)
         # MiniMax-Remover设置组
         self.minimax_group = SettingCardGroup(tr["Setting"]["MiniMaxSetting"], self.scrollWidget)
         # 通用设置组
@@ -229,14 +224,6 @@ class AdvancedSettingInterface(ScrollArea):
             title=tr["Setting"]["SttnMaxLoadNum"],
             content=tr["Setting"]["SttnMaxLoadNumDesc"],
             parent=self.sttn_group
-        )
-
-        self.propainter_max_load_num = RangeSettingCard(
-            configItem=config.propainterMaxLoadNum,
-            icon=FluentIcon.DICTIONARY,
-            title=tr["Setting"]["PropainterMaxLoadNum"],
-            content=tr["Setting"]["PropainterMaxLoadNumDesc"],
-            parent=self.propainter_group
         )
 
         self.minimax_max_load_num = RangeSettingCard(

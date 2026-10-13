@@ -8,7 +8,6 @@ class InpaintMode(Enum):
     STTN_AUTO = "sttn-auto"
     STTN_DET = "sttn-det"
     LAMA = "lama"
-    PROPAINTER = "propainter"
     OPENCV = "opencv"
     MINIMAX = "minimax"
     # 智能路由：按区间帧差自动选 LAMA（静态区间，快）或 MiniMax（运动区间，质量优先）
