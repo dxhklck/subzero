@@ -40,10 +40,14 @@ class MiniMaxInpaint:
         -> List[np.ndarray BGR]
     """
 
-    # 显存估算系数：GB / (帧 × 百万像素)。实测（RTX 4070 Ti SUPER，fp32 VAE 解码开）：
-    # 960×544 全帧 25 帧峰值 13.46GB → 1.03；720p 全帧 25 帧 21.56GB → 0.94（已溢出走共享内存）。
-    # 取 1.15 留余量；条带裁剪下典型字幕条带仅 0.07~0.35MP，默认块大小通常原样保留
-    _VRAM_GB_PER_FRAME_MP = 1.15
+    # 显存估算模型（纯激活，不含约4G模型权重）。实测标定（RTX 4070 Ti SUPER 16G、
+    # fp32 VAE 解码开、reset峰值统计在模型加载后）：
+    #   0.30MP 条带 25帧/61帧 → 8.97/8.98GB（帧数几乎不影响峰值！）
+    #   0.52MP 全帧 25帧 → 13.46GB；0.92MP 全帧 25帧 → 21.56GB（溢出走共享内存）
+    # 结论：峰值 ≈ MP×(30 + 0.005×帧)——由条带**分辨率**主导，块大小是速度参数而非显存参数
+    # （A/B 实测：0.30MP 条带固定61帧比守卫缩到25帧快13%，峰值仅多0.3GB）
+    _VRAM_GB_PER_MP = 30.0
+    _VRAM_GB_PER_FRAME_MP = 0.005
 
     def __init__(self, device: torch.device,
                  model_dir: str,
@@ -96,11 +100,12 @@ class MiniMaxInpaint:
         return max(16, int(round(value / 16)) * 16)
 
     def _fit_chunk_to_vram(self, proc_h: int, proc_w: int, chunk: int) -> int:
-        """按条带实际推理分辨率 + 当前剩余显存收敛块帧数（只减不增，保持 4k+1）。
+        """按条带实际推理分辨率与剩余显存校验块大小（只减不增，保持 4k+1）。
 
-        条带裁剪下典型字幕条带仅 0.07~0.35MP，配置的块大小通常原样保留；
-        mask 接近全帧（StripCrop 透传全帧）或 4K 宽条带时自动调小，
-        避免超出物理显存被 Windows 静默分配到共享内存（实测降速 4 倍以上）。
+        实测标定（见类属性 _VRAM_GB_PER_MP）：显存峰值由条带**分辨率**主导、与块大小几乎无关
+        （0.30MP 下 25 帧与 61 帧峰值仅差 0.01GB）。因此本守卫在典型字幕条带（≤0.32MP）
+        下不收缩配置值——A/B 实测收缩反而慢 13%；仅在条带分辨率本身超出显存预算时介入：
+        边际项超限则收缩帧数，固定项（分辨率）超限则砍帧无益，改发警告提示降处理分辨率。
         """
         if not (torch.cuda.is_available() and str(self.device).startswith('cuda')):
             return chunk
@@ -112,19 +117,25 @@ class MiniMaxInpaint:
         mp = (proc_h * proc_w) / 1e6
         if mp <= 0:
             return chunk
-        # 预算取剩余显存的 75%，给桌面合成器/其他进程留头
-        safe_frames = int((free_gb * 0.75) / (mp * self._VRAM_GB_PER_FRAME_MP))
-        safe_chunk = max(5, ((max(safe_frames, 1) - 1) // 4) * 4 + 1)
+        # free 已扣除模型权重（约4G）；预算取 85%，其余留给驱动/碎片/桌面合成器
+        budget = free_gb * 0.85
+        pred = mp * (self._VRAM_GB_PER_MP + self._VRAM_GB_PER_FRAME_MP * chunk)
+        if pred <= budget:
+            print(f'[MiniMax] 条带推理 {proc_w}x{proc_h} ({mp:.2f}MP) x {chunk} 帧/块'
+                  f'（预计激活 {pred:.1f}G / 预算 {budget:.1f}G，剩余显存 {free_gb:.1f}G）')
+            return chunk
+        if self._VRAM_GB_PER_MP * mp >= budget:
+            # 固定项已超预算：收缩帧数无益（峰值由分辨率决定），提示降处理分辨率
+            print(f'[MiniMax] 警告：条带 {proc_w}x{proc_h} ({mp:.2f}MP) 预计激活 '
+                  f'{self._VRAM_GB_PER_MP * mp:.1f}G 超出预算 {budget:.1f}G，'
+                  f'块大小已无法改善——建议调小 MiniMax 处理分辨率上限（ProcessWidth）或换更轻的算法')
+            return chunk
+        # 边际项超限：解出预算内的最大帧数（向下取整到 4k+1）
+        max_frames = (budget / mp - self._VRAM_GB_PER_MP) / self._VRAM_GB_PER_FRAME_MP
+        safe_chunk = max(5, ((max(int(max_frames), 1) - 1) // 4) * 4 + 1)
         fitted = min(chunk, safe_chunk)
-        msg = f'[MiniMax] 条带推理 {proc_w}x{proc_h} ({mp:.2f}MP) x {fitted} 帧/块'
-        if fitted != chunk:
-            msg += f'（显存守卫 {chunk} -> {fitted}，剩余 {free_gb:.1f}G）'
-        else:
-            msg += f'（剩余显存 {free_gb:.1f}G）'
-        print(msg)
-        if fitted == 5 and 5 * mp * self._VRAM_GB_PER_FRAME_MP > free_gb * 0.75:
-            print(f'[MiniMax] 警告：条带 {mp:.2f}MP 超出显存预算，即使最小块也可能溢出，'
-                  f'建议调小 MiniMax 处理分辨率上限或换更轻的算法')
+        print(f'[MiniMax] 条带推理 {proc_w}x{proc_h} ({mp:.2f}MP) x {fitted} 帧/块'
+              f'（显存守卫 {chunk} -> {fitted}，剩余 {free_gb:.1f}G）')
         return fitted
 
     def _proc_size(self, h: int, w: int) -> Tuple[int, int]:

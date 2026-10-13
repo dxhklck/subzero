@@ -105,9 +105,9 @@ class Config(QConfig):
 
     # 以下参数仅适用MINIMAX算法时，才生效
     # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
-    # 条带裁剪（StripCropInpaint）下典型字幕条带仅 0.07~0.35MP，本值通常原样保留；
-    # mask 接近全帧（透传）或 4K 宽条带时，_fit_chunk_to_vram 会按剩余显存自动调小并打日志，
-    # 避免超出物理显存被 Windows 静默分到共享内存（实测降速 4 倍以上）。用户也可手动调小
+    # 主要是速度参数：块越大固定开销（VAE编解码/调度）摊越薄。A/B 实测（0.30MP条带）：
+    # 61帧比25帧快13%而峰值仅多0.3GB——块大小对显存峰值影响很小（峰值由条带分辨率主导）。
+    # _fit_chunk_to_vram 按条带分辨率校验显存：典型条带原样保留，超预算时收缩或提示降 ProcessWidth
     minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 201))
     # 去噪步数：A/B 实测（720p全帧）12→8 步仅慢 13% 时省 13%、与12步画质肉眼无差异（最大像素差18/255）；
     # 480p 等小分辨率下步数近似线性影响速度。8 为画质/速度平衡点，追求极限画质可设 12
