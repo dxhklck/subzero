@@ -40,6 +40,11 @@ class MiniMaxInpaint:
         -> List[np.ndarray BGR]
     """
 
+    # 显存估算系数：GB / (帧 × 百万像素)。实测（RTX 4070 Ti SUPER，fp32 VAE 解码开）：
+    # 960×544 全帧 25 帧峰值 13.46GB → 1.03；720p 全帧 25 帧 21.56GB → 0.94（已溢出走共享内存）。
+    # 取 1.15 留余量；条带裁剪下典型字幕条带仅 0.07~0.35MP，默认块大小通常原样保留
+    _VRAM_GB_PER_FRAME_MP = 1.15
+
     def __init__(self, device: torch.device,
                  model_dir: str,
                  max_load_num: int = 81,
@@ -89,6 +94,38 @@ class MiniMaxInpaint:
 
     def _align_16(self, value: int) -> int:
         return max(16, int(round(value / 16)) * 16)
+
+    def _fit_chunk_to_vram(self, proc_h: int, proc_w: int, chunk: int) -> int:
+        """按条带实际推理分辨率 + 当前剩余显存收敛块帧数（只减不增，保持 4k+1）。
+
+        条带裁剪下典型字幕条带仅 0.07~0.35MP，配置的块大小通常原样保留；
+        mask 接近全帧（StripCrop 透传全帧）或 4K 宽条带时自动调小，
+        避免超出物理显存被 Windows 静默分配到共享内存（实测降速 4 倍以上）。
+        """
+        if not (torch.cuda.is_available() and str(self.device).startswith('cuda')):
+            return chunk
+        try:
+            free_b, _ = torch.cuda.mem_get_info()
+        except Exception:
+            return chunk
+        free_gb = free_b / 1024 ** 3
+        mp = (proc_h * proc_w) / 1e6
+        if mp <= 0:
+            return chunk
+        # 预算取剩余显存的 75%，给桌面合成器/其他进程留头
+        safe_frames = int((free_gb * 0.75) / (mp * self._VRAM_GB_PER_FRAME_MP))
+        safe_chunk = max(5, ((max(safe_frames, 1) - 1) // 4) * 4 + 1)
+        fitted = min(chunk, safe_chunk)
+        msg = f'[MiniMax] 条带推理 {proc_w}x{proc_h} ({mp:.2f}MP) x {fitted} 帧/块'
+        if fitted != chunk:
+            msg += f'（显存守卫 {chunk} -> {fitted}，剩余 {free_gb:.1f}G）'
+        else:
+            msg += f'（剩余显存 {free_gb:.1f}G）'
+        print(msg)
+        if fitted == 5 and 5 * mp * self._VRAM_GB_PER_FRAME_MP > free_gb * 0.75:
+            print(f'[MiniMax] 警告：条带 {mp:.2f}MP 超出显存预算，即使最小块也可能溢出，'
+                  f'建议调小 MiniMax 处理分辨率上限或换更轻的算法')
+        return fitted
 
     def _proc_size(self, h: int, w: int) -> Tuple[int, int]:
         """推理分辨率：默认按原分辨率 16 对齐；设置了 process_width 且视频更宽时按宽度等比降采样（对齐 16）"""
@@ -150,14 +187,15 @@ class MiniMaxInpaint:
         H_ori, W_ori = input_frames[0].shape[:2]
         proc_h, proc_w = self._proc_size(H_ori, W_ori)
 
-        n = len(input_frames)
-        chunk = self.chunk_frames
+        # 显存守卫：按实际条带推理分辨率与剩余显存收敛块大小（见 _fit_chunk_to_vram）
+        chunk = self._fit_chunk_to_vram(proc_h, proc_w, self.chunk_frames)
         # 块间重叠：视频按 chunk 帧一块独立推理，块边界处潜空间不连续（VAE 时间压缩4，
         # 接缝约4帧）可能出现闪烁。相邻块重叠 overlap 帧，重叠区用线性加权交叉混合消除接缝。
         # overlap 上限取 chunk//4，保证推理开销不超过约1.3倍；0 = 关闭
         overlap = min(self.block_overlap, chunk // 4)
         step = chunk - overlap
 
+        n = len(input_frames)
         results = [None] * n
         start = 0
         while start < n:

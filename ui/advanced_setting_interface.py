@@ -9,49 +9,12 @@ from qfluentwidgets import (ScrollArea, ExpandLayout, CardWidget, SubtitleLabel,
                            FluentIcon, NavigationWidget, NavigationItemPosition,
                            SettingCardGroup, RangeSettingCard, SwitchSettingCard,
                            HyperlinkCard, PrimaryPushSettingCard, PushSettingCard,
-                           MessageBox, SettingCard, PushButton, InfoBar, InfoBarPosition, RadioButton)
+                           MessageBox, SettingCard, InfoBar, InfoBarPosition, RadioButton)
 from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all, fix_weights
 
-# MiniMax 性能预设：按素材分辨率一键写入推荐参数（16G 显存 + 条带裁剪实测）
-# 注：条带裁剪下典型字幕条带显存约为全帧的 1/5~1/3，原生分辨率可跑；
-#     MaxLoadNum 是宽 mask（多行/居中大字）时的显存保险，超宽 mask 需手动调小
-MINIMAX_PRESETS = {
-    "480p":  dict(maxload=61, steps=4, iterations=8, padding=128, width=0),
-    "720p":  dict(maxload=41, steps=8, iterations=8, padding=128, width=0),
-    "1080p": dict(maxload=41, steps=8, iterations=8, padding=128, width=0),
-    "4K":    dict(maxload=21, steps=8, iterations=8, padding=160, width=0),
-}
-
-
-class MiniMaxPresetCard(SettingCard):
-    """MiniMax 分辨率预设卡：四个按钮一键写入 MaxLoadNum/Steps/Iterations/StripPadding/ProcessWidth"""
-
-    def __init__(self, title, content, parent=None):
-        super().__init__(FluentIcon.SPEED_HIGH, title, content, parent)
-        self._btns = {}
-        for name in ["480p", "720p", "1080p", "4K"]:
-            btn = PushButton(name, self)
-            btn.setFixedWidth(56)
-            btn.clicked.connect(lambda _=False, n=name: self.apply_preset(n))
-            self._btns[name] = btn
-            self.hBoxLayout.addWidget(btn, 0, Qt.AlignRight)
-            self.hBoxLayout.addSpacing(8)
-
-    def apply_preset(self, name):
-        p = MINIMAX_PRESETS[name]
-        self._cards["maxload"].setValue(p["maxload"])
-        self._cards["steps"].setValue(p["steps"])
-        self._cards["iterations"].setValue(p["iterations"])
-        self._cards["padding"].setValue(p["padding"])
-        self._cards["width"].setValue(p["width"])
-        for n, b in self._btns.items():
-            b.setChecked(n == name)
-        InfoBar.success(
-            "预设已应用", f"{name}：MaxLoadNum {p['maxload']} / Steps {p['steps']} / Iterations {p['iterations']} / 外扩 {p['padding']}px",
-            orient=Qt.Horizontal, isClosable=True, position=InfoBarPosition.TOP, duration=2500, parent=self.window())
 
 class ThemeCard(SettingCard):
     """应用主题卡：三个单选按钮直接在卡片内选择（浅色/深色/跟随系统），无下拉"""
@@ -133,7 +96,6 @@ class AdvancedSettingInterface(ScrollArea):
         self.minimax_group.addSettingCard(self.minimax_block_overlap)
         self.minimax_group.addSettingCard(self.minimax_vae_decode_fp32)
         self.minimax_group.addSettingCard(self.minimax_torch_compile)
-        self.minimax_group.addSettingCard(self.minimax_preset_card)
         self.expandLayout.addWidget(self.minimax_group)
 
         self.advanced_group.addSettingCard(self.save_directory)
@@ -330,20 +292,6 @@ class AdvancedSettingInterface(ScrollArea):
             content=tr["Setting"]["MiniMaxTorchCompileDesc"],
             parent=self.minimax_group
         )
-
-        # 性能预设卡（引用上面五张卡，一键写入）
-        self.minimax_preset_card = MiniMaxPresetCard(
-            "性能预设",
-            "按素材分辨率一键写入推荐参数（480p~4K），覆盖下方五项设置",
-            parent=self.minimax_group
-        )
-        self.minimax_preset_card._cards = {
-            "maxload": self.minimax_max_load_num,
-            "steps": self.minimax_num_inference_steps,
-            "iterations": self.minimax_iterations,
-            "padding": self.minimax_strip_padding,
-            "width": self.minimax_process_width,
-        }
 
         # 视频保存路径
         self.save_directory = PushSettingCard(
