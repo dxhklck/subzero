@@ -6,7 +6,6 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 import torch
-import torch._dynamo  # noqa: F401  （torch.compile 的 suppress_errors 配置；模块顶层导入避免函数内 import 遮蔽 torch 名）
 from diffusers.models import AutoencoderKLWan
 from diffusers.schedulers import UniPCMultistepScheduler
 
@@ -17,16 +16,6 @@ if _OFFICIAL_DIR not in sys.path:
 
 from transformer_minimax_remover import Transformer3DModel  # noqa: E402
 from pipeline_minimax_remover import Minimax_Remover_Pipeline  # noqa: E402
-
-
-def _triton_available() -> bool:
-    """GPU inductor 依赖 Triton 生成 kernel，而 Triton 不支持 Windows（本机实测缺失）。
-    不可用时 torch.compile 会静默回退 eager——白费首次编译开销且零增益，故先探测再决定。"""
-    try:
-        import triton  # noqa: F401
-        return True
-    except ImportError:
-        return False
 
 
 class MiniMaxInpaint:
@@ -56,8 +45,7 @@ class MiniMaxInpaint:
                  iterations: int = 6,
                  process_width: int = 0,
                  block_overlap: int = 8,
-                 vae_decode_fp32: bool = True,
-                 torch_compile: bool = True):
+                 vae_decode_fp32: bool = True):
         self.device = device
         self.num_inference_steps = num_inference_steps
         self.iterations = iterations
@@ -81,20 +69,6 @@ class MiniMaxInpaint:
         self.pipe.to(device)
         if vae_decode is not None:
             vae_decode.to(device)
-        # torch.compile：编译 transformer 融合算子、减少每步去噪的 kernel launch 开销（长视频净赚 10-30%）。
-        # ⚠ 依赖 Triton 生成 GPU kernel，而 Triton 不支持 Windows——本机实测（2026-10-13）回退 eager、
-        #   零增益还白费 63% 冷启动开销，故默认关闭；Linux 环境自动生效。
-        # 首次每种输入形状编译 1-3 分钟（有跨进程缓存）；suppress_errors 保证编译失败自动回退，不改变输出
-        self.torch_compiled = False
-        if torch_compile and _triton_available():
-            try:
-                torch._dynamo.config.suppress_errors = True
-                self.pipe.transformer = torch.compile(self.pipe.transformer)
-                self.torch_compiled = True
-            except Exception as e:
-                print(f'[MiniMax] torch.compile 不可用，回退 eager 模式: {e}')
-        elif torch_compile:
-            print('[MiniMax] 未检测到 Triton（Windows 不支持），跳过 torch.compile，使用 eager 模式')
 
     def _align_16(self, value: int) -> int:
         return max(16, int(round(value / 16)) * 16)

@@ -495,8 +495,7 @@ class SubtitleRemover:
                                iterations=config.minimaxIterations.value,
                                process_width=config.minimaxProcessWidth.value,
                                block_overlap=config.minimaxBlockOverlap.value,
-                               vae_decode_fp32=config.minimaxVaeDecodeFp32.value,
-                               torch_compile=config.minimaxTorchCompile.value)
+                               vae_decode_fp32=config.minimaxVaeDecodeFp32.value)
         # 条带裁剪修复：只把 mask 外扩 padding 的条带送入模型，窗口外像素原样保留
         return StripCropInpaint(model, config.minimaxStripPadding.value)
 

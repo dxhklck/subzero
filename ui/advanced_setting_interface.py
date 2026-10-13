@@ -95,7 +95,6 @@ class AdvancedSettingInterface(ScrollArea):
         self.minimax_group.addSettingCard(self.minimax_strip_padding)
         self.minimax_group.addSettingCard(self.minimax_block_overlap)
         self.minimax_group.addSettingCard(self.minimax_vae_decode_fp32)
-        self.minimax_group.addSettingCard(self.minimax_torch_compile)
         self.expandLayout.addWidget(self.minimax_group)
 
         self.advanced_group.addSettingCard(self.save_directory)
@@ -283,13 +282,6 @@ class AdvancedSettingInterface(ScrollArea):
             icon=FluentIcon.ZOOM,
             title=tr["Setting"]["MiniMaxVaeDecodeFp32"],
             content=tr["Setting"]["MiniMaxVaeDecodeFp32Desc"],
-            parent=self.minimax_group
-        )
-        self.minimax_torch_compile = SwitchSettingCard(
-            configItem=config.minimaxTorchCompile,
-            icon=FluentIcon.SPEED_HIGH,
-            title=tr["Setting"]["MiniMaxTorchCompile"],
-            content=tr["Setting"]["MiniMaxTorchCompileDesc"],
             parent=self.minimax_group
         )
 

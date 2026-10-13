@@ -128,10 +128,6 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
-    # torch.compile 编译 transformer：融合算子、减少 12 步去噪的 kernel launch 开销，长视频净赚 10-30%；
-    # ⚠ 依赖 Triton 生成 GPU kernel，Triton 不支持 Windows——本机 2026-10-13 实测：静默回退 eager、
-    #   零增益且冷启动多花 63% 时间，故默认关闭；Linux 环境（有 Triton）下开启生效，首次每种块大小编译 1-3 分钟
-    minimaxTorchCompile = ConfigItem("MiniMax", "TorchCompile", False, BoolValidator())
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())
