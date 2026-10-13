@@ -579,7 +579,7 @@ class HomeInterface(QWidget):
             derive_resume_info, params_hash)
 
         frame_count, fps = probe_video_frames(video_path)
-        seg_frames = compute_segment_frames(frame_count, fps, config.segmentMinutes.value)
+        seg_frames = compute_segment_frames(frame_count, fps, config.segmentSeconds.value)
         if seg_frames is None:
             return self.run_subtitle_remover_process(video_path, output_path, options)
 

@@ -11,7 +11,7 @@ import subprocess
 from PySide6 import QtWidgets, QtCore
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget, QFrame, QLabel
-from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon, SubtitleLabel,
+from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon,
                            PushSettingCard, SettingCard, PushButton,
                            Slider, SpinBox, ComboBox, MessageBox, InfoBar, RadioButton,
                            StrongBodyLabel, BodyLabel, CaptionLabel, isDarkTheme)
@@ -75,7 +75,6 @@ class AdvancedSettingInterface(ScrollArea):
         self._build_header()
         self._build_general_group()
         self._build_detect_group()
-        self._build_performance_group()
         self._build_minimax_group()
         self._build_sttn_group()
         self._build_maintenance_group()
@@ -85,50 +84,40 @@ class AdvancedSettingInterface(ScrollArea):
 
     def _build_header(self):
         header = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(1)
-        title_col.addWidget(SubtitleLabel(tr['Setting']['AdvancedSetting']))
-        self.page_layout.addLayout(title_col)
-
-        header.addStretch(1)
+        # 恢复默认按钮靠最左侧（无页面大标题）
         self.restore_btn = PushButton(tr['Setting']['RestoreDefaultsBtn'], self)
         self.restore_btn.clicked.connect(self._on_restore_defaults)
         header.addWidget(self.restore_btn)
+        header.addStretch(1)
         self.page_layout.addLayout(header)
 
     # ---------- 分组构建 ----------
 
     def _build_general_group(self):
-        """通用：界面语言（切换弹窗确认 + 一键重启）"""
+        """通用：界面语言 + 硬件加速 + 视频分段时长（一行三列）"""
         card, vbox, self._general_header = self._make_group(
             tr['SubtitleExtractorGUI']['GroupGeneral'])
         gui = tr['SubtitleExtractorGUI']
-        self.lang_row = self._add_row(vbox, CompactComboRow(
+        setting_tr = tr['Setting']
+        self.lang_row = CompactComboRow(
             config.interface, gui['InterfaceLanguage'], gui['InterfaceLanguageDesc'],
             texts=list(config.intefaceTexts.keys()),
             values=list(config.intefaceTexts.values()),
             on_user_changed=self._on_interface_changed,
-            icon=FluentIcon.LANGUAGE, parent=card))
-
-    def _build_performance_group(self):
-        """性能与长视频：硬件加速 + 长视频分段时长"""
-        card, vbox, self._perf_header = self._make_group(
-            tr['SubtitleExtractorGUI']['GroupPerformance'])
-        gui = tr['SubtitleExtractorGUI']
-        setting_tr = tr['Setting']
-        self.hw_row = self._add_row(vbox, CompactSwitchRow(
+            icon=FluentIcon.LANGUAGE, parent=card)
+        self.hw_row = CompactSwitchRow(
             config.hardwareAcceleration, setting_tr['HardwareAcceleration'],
             setting_tr['HardwareAccelerationDesc'],
-            icon=FluentIcon.SPEED_HIGH, parent=card))
+            icon=FluentIcon.SPEED_HIGH, parent=card)
         if not HARDWARD_ACCELERATION_OPTION:
             self.hw_row.switch.setEnabled(False)
             self.hw_row.switch.setChecked(False)
             self.hw_row.setToolTip(setting_tr['HardwareAccelerationNO'])
             config.set(config.hardwareAcceleration, False)
         self.segment_row = CompactRangeRow(
-            config.segmentMinutes, gui['SegmentMinutes'],
+            config.segmentSeconds, gui['SegmentMinutes'],
             gui['SegmentMinutesDesc'], icon=FluentIcon.STOP_WATCH, parent=card)
-        vbox.addWidget(CompactParamRow(self.hw_row, self.segment_row))
+        vbox.addWidget(CompactParamRow(self.lang_row, self.hw_row, self.segment_row))
 
     def _make_group(self, title):
         """一组：分组标题（主题色 + 短下划线，参照卡片式设计稿）+ 卡片容器，返回 (card, vbox, header)"""
@@ -157,7 +146,6 @@ class AdvancedSettingInterface(ScrollArea):
     def _build_detect_group(self):
         card, vbox, self._detect_header = self._make_group(tr['Setting']['SubtitleDetectionSetting'])
         gui = tr['SubtitleExtractorGUI']
-        # 检测模型 + 残留二修（从主页迁移，非专家参数）
         self.detect_model_row = CompactComboRow(
             config.subtitleDetectMode, gui['SubtitleDetectMode'], gui['SubtitleDetectModeDesc'],
             texts=[list(tr['SubtitleDetectMode'].values())[i]
@@ -167,42 +155,40 @@ class AdvancedSettingInterface(ScrollArea):
         self.residue_row = CompactSwitchRow(
             config.residueCheck, gui['ResidueCheck'], gui['ResidueCheckDesc'],
             icon=FluentIcon.BROOM, parent=card)
-        vbox.addWidget(CompactParamRow(self.detect_model_row, self.residue_row))
         r1 = CompactRangeRow(
             config.subtitleDetectProcessSize, tr['Setting']['SubtitleDetectProcessSize'],
             tr['Setting']['SubtitleDetectProcessSizeDesc'], icon=FluentIcon.FULL_SCREEN, parent=card)
+        vbox.addWidget(CompactParamRow(self.detect_model_row, self.residue_row, r1))
         r2 = CompactRangeRow(
             config.subtitleDetectSampleStep, tr['Setting']['SubtitleDetectSampleStep'],
             tr['Setting']['SubtitleDetectSampleStepDesc'], icon=FluentIcon.STOP_WATCH, parent=card)
-        vbox.addWidget(CompactParamRow(r1, r2))
         r3 = CompactRangeRow(
             config.subtitleTimelineForwardFrameCount, tr['Setting']['subtitleTimelineForwardFrameCount'],
             tr['Setting']['subtitleTimelineForwardFrameCountDesc'], icon=FluentIcon.MOVIE, parent=card)
         r4 = CompactRangeRow(
             config.subtitleTimelineBackwardFrameCount, tr['Setting']['SubtitleTimelineBackwardFrameCount'],
             tr['Setting']['SubtitleTimelineBackwardFrameCountDesc'], icon=FluentIcon.VIDEO, parent=card)
-        vbox.addWidget(CompactParamRow(r3, r4))
+        vbox.addWidget(CompactParamRow(r2, r3, r4))
         r5 = CompactRangeRow(
             config.subtitleAreaDeviationPixel, tr['Setting']['SubtitleAreaDeviationPixel'],
             tr['Setting']['SubtitleAreaDeviationPixelDesc'], icon=FluentIcon.ZOOM_IN, parent=card)
         r6 = CompactRangeRow(
             config.autoRouteStaticThreshold, tr['Setting']['AutoRouteStaticThreshold'],
             tr['Setting']['AutoRouteStaticThresholdDesc'], icon=FluentIcon.SYNC, parent=card)
-        vbox.addWidget(CompactParamRow(r5, r6))
         e1 = CompactRangeRow(
             config.subtitleYXAxisDifferencePixel, tr['Setting']['SubtitleYXAxisDifferencePixel'],
             tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
+        vbox.addWidget(CompactParamRow(r5, r6, e1))
         e2 = CompactRangeRow(
             config.subtitleAreaYAxisDifferencePixel, tr['Setting']['SubtitleAreaYAxisDifferencePixel'],
             tr['Setting']['SubtitleAreaYAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
-        vbox.addWidget(CompactParamRow(e1, e2))
         e3 = CompactRangeRow(
             config.subtitleAreaPixelToleranceYPixel, tr['Setting']['SubtitleAreaPixelToleranceYPixel'],
             tr['Setting']['SubtitleAreaPixelToleranceYPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
         e4 = CompactRangeRow(
             config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
             tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
-        vbox.addWidget(CompactParamRow(e3, e4))
+        vbox.addWidget(CompactParamRow(e2, e3, e4))
         self.rows_detect = [r1, r2, r3, r4, r5, r6]
         self.rows_detect_expert = [e1, e2, e3, e4]
 
@@ -214,21 +200,20 @@ class AdvancedSettingInterface(ScrollArea):
         m2 = CompactRangeRow(
             config.minimaxNumInferenceSteps, tr['Setting']['MiniMaxNumInferenceSteps'],
             tr['Setting']['MiniMaxNumInferenceStepsDesc'], icon=FluentIcon.HISTORY, parent=card)
-        vbox.addWidget(CompactParamRow(m1, m2))
         m3 = CompactRangeRow(
             config.minimaxBlockOverlap, tr['Setting']['MiniMaxBlockOverlap'],
             tr['Setting']['MiniMaxBlockOverlapDesc'], icon=FluentIcon.LAYOUT, parent=card)
+        vbox.addWidget(CompactParamRow(m1, m2, m3))
         m4 = CompactRangeRow(
             config.minimaxIterations, tr['Setting']['MiniMaxIterations'],
             tr['Setting']['MiniMaxIterationsDesc'], expert=True, icon=FluentIcon.SYNC, parent=card)
-        vbox.addWidget(CompactParamRow(m3, m4))
         m5 = CompactRangeRow(
             config.minimaxProcessWidth, tr['Setting']['MiniMaxProcessWidth'],
             tr['Setting']['MiniMaxProcessWidthDesc'], expert=True, icon=FluentIcon.FIT_PAGE, parent=card)
         m6 = CompactRangeRow(
             config.minimaxStripPadding, tr['Setting']['MiniMaxStripPadding'],
             tr['Setting']['MiniMaxStripPaddingDesc'], expert=True, icon=FluentIcon.ALBUM, parent=card)
-        vbox.addWidget(CompactParamRow(m5, m6))
+        vbox.addWidget(CompactParamRow(m4, m5, m6))
         m7 = CompactSwitchRow(
             config.minimaxVaeDecodeFp32, tr['Setting']['MiniMaxVaeDecodeFp32'],
             tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True, icon=FluentIcon.PALETTE, parent=card)
@@ -244,11 +229,10 @@ class AdvancedSettingInterface(ScrollArea):
         s2 = CompactRangeRow(
             config.sttnReferenceLength, tr['Setting']['SttnReferenceLength'],
             tr['Setting']['SttnReferenceLengthDesc'], expert=True, icon=FluentIcon.LIBRARY, parent=card)
-        vbox.addWidget(CompactParamRow(s1, s2))
         s3 = CompactRangeRow(
             config.sttnMaxLoadNum, tr['Setting']['SttnMaxLoadNum'],
             tr['Setting']['SttnMaxLoadNumDesc'], expert=True, icon=FluentIcon.CLOUD, parent=card)
-        vbox.addWidget(s3)
+        vbox.addWidget(CompactParamRow(s1, s2, s3))
         self.rows_sttn = [s1, s2, s3]
         self.sttn_card = card
 

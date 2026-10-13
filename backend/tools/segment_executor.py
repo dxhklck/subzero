@@ -36,11 +36,11 @@ def probe_video_frames(video_path: str) -> tuple:
 
 
 def compute_segment_frames(frame_count: int, fps: float,
-                           segment_minutes: Optional[float]) -> Optional[int]:
-    """由分段分钟数换算段帧数；不分段（禁用/短片/非法值）返回 None。"""
-    if not segment_minutes or segment_minutes <= 0 or frame_count <= 0 or fps <= 0:
+                           segment_seconds: Optional[float]) -> Optional[int]:
+    """由分段秒数换算段帧数；不分段（禁用/短片/非法值）返回 None。"""
+    if not segment_seconds or segment_seconds <= 0 or frame_count <= 0 or fps <= 0:
         return None
-    seg_frames = int(round(fps * segment_minutes * 60))
+    seg_frames = int(round(fps * segment_seconds))
     if seg_frames <= 0 or frame_count <= seg_frames:
         return None  # 短片：整片处理
     return seg_frames
