@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import cv2
 import time
@@ -21,6 +22,13 @@ from backend.tools.constant import InpaintMode
 from backend.tools.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from backend.tools.process_manager import ProcessManager
 from backend.tools.common_tools import get_readable_path, is_image_file, read_image
+
+
+class _SegmentResult:
+    """分段任务的返回 shim：对齐子进程的 exitcode 判断语义。"""
+
+    def __init__(self, exitcode: int):
+        self.exitcode = exitcode
 
 class HomeInterface(QWidget):
     progress_signal = Signal(int, bool)
@@ -414,7 +422,7 @@ class HomeInterface(QWidget):
                             # 清理缓存, 使用动态路径
                             task_item.output_path = None
                             output_path = task_item.output_path
-                            process = self.run_subtitle_remover_process(task_item.path, output_path, options)
+                            process = self.run_task_with_segments(task_item.path, output_path, options)
 
                             # 检查是否在处理过程中被停止
                             if self._stop_event.is_set():
@@ -505,17 +513,18 @@ class HomeInterface(QWidget):
             
 
     # 修改run_subtitle_remover_process方法
-    def run_subtitle_remover_process(self, video_path, output_path, options):
+    def run_subtitle_remover_process(self, video_path, output_path, options, progress_cb=None):
         """
         使用多进程执行字幕提取，并等待进程完成
-        
+
         Args:
             video_path: 视频文件路径
             output_path: 输出文件路径
             options: 任务选项
+            progress_cb: 进度回调 (progress_total, isFinished)，None 用默认信号
         """
         subtitle_remover_remote_caller = SubtitleRemoverRemoteCall()
-        subtitle_remover_remote_caller.register_update_progress_callback(self.progress_signal.emit)
+        subtitle_remover_remote_caller.register_update_progress_callback(progress_cb or self.progress_signal.emit)
         subtitle_remover_remote_caller.register_log_callback(self.append_log_signal.emit)
         subtitle_remover_remote_caller.register_console_callback(self.console_signal.emit)
         subtitle_remover_remote_caller.register_update_preview_with_comp_callback(self.update_preview_with_comp_signal.emit)
@@ -535,6 +544,105 @@ class HomeInterface(QWidget):
         finally:
             subtitle_remover_remote_caller.stop()
         return process
+
+    # ------------------------------------------------------------------ #
+    # 长视频分段执行（可中断续跑）
+    # ------------------------------------------------------------------ #
+
+    def _segment_log(self, *args):
+        self.append_log_signal.emit([' '.join(str(a) for a in args)])
+
+    def _make_segment_progress_cb(self, done_frames: int, seg_cap: int, total_frames: int):
+        """把段内进度 (0-100) 合成为全局进度；段级 isFinished 压为 False，
+        避免 processing_finished 在段间被误触发。"""
+        def cb(progress_total, isFinished):
+            overall = (done_frames + seg_cap * float(progress_total) / 100.0) / max(1, total_frames) * 100.0
+            self.progress_signal.emit(min(100, int(overall)), False)
+        return cb
+
+    def run_task_with_segments(self, video_path, output_path, options):
+        """长视频分段执行（可中断续跑）；禁用/短片时退化为整片处理。
+
+        返回带 exitcode 属性的对象（整片=子进程；分段=末段子进程或 shim）。
+        """
+        from backend.tools.segment_executor import (probe_video_frames,
+            compute_segment_frames, build_task_params, concat_segments, mux_audio)
+        from backend.tools.segmenter import (load_or_rebuild_checkpoint,
+            derive_resume_info, params_hash)
+
+        frame_count, fps = probe_video_frames(video_path)
+        seg_frames = compute_segment_frames(frame_count, fps, config.segmentMinutes.value)
+        if seg_frames is None:
+            return self.run_subtitle_remover_process(video_path, output_path, options)
+
+        out_dir = os.path.dirname(output_path) or '.'
+        stem = os.path.splitext(os.path.basename(video_path))[0]
+        task_dir = os.path.join(out_dir, f'{stem}_no_sub_segments')
+        ckpt_path = os.path.join(task_dir, 'checkpoint.json')
+        params = build_task_params(options, config.inpaintMode.value)
+
+        checkpoint, mode = load_or_rebuild_checkpoint(
+            ckpt_path, params, frame_count, seg_frames, log=self._segment_log)
+        if mode == 'refused':
+            self._segment_log('[续跑] 参数与上次不一致且已有完成段，拒绝续跑。',
+                              f'如需全新重跑请删除目录：{task_dir}')
+            return _SegmentResult(exitcode=1)
+        checkpoint.reset_running()
+        info = derive_resume_info(ckpt_path, params_hash(params))
+        if info.chip_text:
+            self._segment_log('[续跑]', info.chip_text)
+
+        total = checkpoint.total_count()
+        last_process = None
+        for seg in checkpoint.pending():
+            if self._stop_event.is_set():
+                self._segment_log(f'[分段] 已中断：段 {seg.index + 1}/{total} 未跑，'
+                                  f'已完成段保留，重跑本任务自动续接')
+                return last_process if last_process is not None else _SegmentResult(exitcode=0)
+            seg_file = os.path.join(task_dir, seg.output_name)
+            checkpoint.mark_running(seg.index)
+            seg_options = dict(options)
+            seg_options['frame_start'] = seg.skip
+            seg_options['frame_end'] = seg.frame_end
+            seg_options['is_segment'] = True
+            self._segment_log(f'[分段] 段 {seg.index + 1}/{total}：帧 {seg.skip}-{seg.frame_end} '
+                              f'（{seg.cap} 帧）')
+            process = self.run_subtitle_remover_process(
+                video_path, seg_file, seg_options,
+                progress_cb=self._make_segment_progress_cb(
+                    checkpoint.done_frames(), seg.cap, frame_count))
+            last_process = process
+            if process.exitcode != 0:
+                checkpoint.mark_failed(seg.index)
+                return process  # 段失败/被终止：沿用 worker 的 exitcode != 0 → FAILED 判断
+            # 段正常完成先落 checkpoint，再检查中断——避免“段已完成但状态未写”的丢失
+            checkpoint.mark_done(seg.index)
+            if self._stop_event.is_set():
+                self._segment_log(f'[分段] 段 {seg.index + 1} 已完成后中断，'
+                                  f'重跑本任务自动从下一段续接')
+                return last_process
+
+        # 全部段完成：拼接 + 音频封装 + 清理
+        self._segment_log(f'[分段] 全部 {total} 段完成，拼接成片…')
+        concat_out = os.path.join(task_dir, 'concat_no_sub.mp4')
+        try:
+            concat_segments(task_dir, checkpoint.segments(), concat_out, self._segment_log)
+            ok = mux_audio(video_path, concat_out, output_path, self._segment_log)
+        except Exception as e:
+            self._segment_log(f'[分段] 拼接失败：{e}')
+            return _SegmentResult(exitcode=1)
+        finally:
+            if os.path.exists(concat_out):
+                try:
+                    os.remove(concat_out)
+                except OSError:
+                    pass
+        if not ok:
+            return _SegmentResult(exitcode=1)
+        shutil.rmtree(task_dir, ignore_errors=True)  # 段文件与 checkpoint 清理
+        self._segment_log('[分段] 成片输出：', output_path)
+        self.progress_signal.emit(100, True)
+        return _SegmentResult(exitcode=0)
 
     @Slot()
     def processing_finished(self):

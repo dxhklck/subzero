@@ -65,6 +65,16 @@ class SettingInterface(QtWidgets.QVBoxLayout):
         )
         self.addWidget(self.residue_check)
 
+        # 长视频分段时长：超时长的视频自动切段、可中断续跑
+        self.segment_minutes = RangeSettingCard(
+            configItem=config.segmentMinutes,
+            icon=FluentIcon.STOP_WATCH,
+            title=tr["SubtitleExtractorGUI"]["SegmentMinutes"],
+            content=tr["SubtitleExtractorGUI"]["SegmentMinutesDesc"],
+            parent=parent,
+        )
+        self.addWidget(self.segment_minutes)
+
         # 是否启用硬件加速
         self.hardware_acceleration = SwitchSettingCard(
             configItem=config.hardwareAcceleration,

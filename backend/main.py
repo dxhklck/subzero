@@ -85,6 +85,12 @@ class SubtitleRemover:
         self.progress_listeners = []
         # inpaint的frame_no区域列表, 默认为inpaint所有帧
         self.ab_sections = None
+        # 分段处理帧范围 [frame_start, frame_end)（0-based，frame_end=None=到片尾）。
+        # 分段续跑由外层执行器在构造后注入（setattr），run() 起点据此 seek
+        self.frame_start = 0
+        self.frame_end = None
+        # 分段模式：跳过残留二遍与音频合并（这两步由成片 concat 阶段统一处理）
+        self.is_segment = False
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
         self._first_pass_regions = []
 
@@ -305,13 +311,15 @@ class SubtitleRemover:
         del sub_detector
         gc.collect()
         start_end_map = dict()
+        frame_end = self.frame_end if self.frame_end is not None else self.frame_count
         for start, end in continuous_frame_no_list:
-            # 确保区间不超出视频总帧数，否则会导致 FramePrefetcher 哨兵被内循环消费后外层死锁
-            start_end_map[start] = min(end, self.frame_count)
-        current_frame_index = 0
+            # 确保区间不超出视频总帧数（分段时同时钳制到段尾），否则会导致
+            # FramePrefetcher 哨兵被内循环消费后外层死锁
+            start_end_map[start] = min(end, frame_end)
+        current_frame_index = self.frame_start
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
-        # 使用帧预读取，I/O 与推理重叠
-        reader = FramePrefetcher(self.video_cap)
+        # 使用帧预读取，I/O 与推理重叠；段帧数作为预读取上限（读满即停）
+        reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
         while True:
             ret, frame = reader.read()
             # 如果读取到为，则结束
@@ -405,9 +413,14 @@ class SubtitleRemover:
             if accelerator_name == 'DirectML' and config.inpaintMode.value not in [InpaintMode.STTN_AUTO, InpaintMode.STTN_DET]:
                 self.append_output(tr['Main']['DirectMLWarning'])
         os.makedirs(os.path.dirname(self.video_out_path), exist_ok=True)
+        # 分段帧范围：seek 到段起点（frame_start 在构造后由执行器注入）
+        frame_end = self.frame_end if self.frame_end is not None else self.frame_count
+        seg_total = max(1, frame_end - self.frame_start)
+        if self.frame_start > 0:
+            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_start)
         # 重置进度条
         self.progress_total = 0
-        tbar = tqdm(total=int(self.frame_count), unit='frame', position=0, file=sys.__stdout__,
+        tbar = tqdm(total=int(seg_total), unit='frame', position=0, file=sys.__stdout__,
                     desc='Subtitle Removing')
         if self.is_picture:
             original_frame = read_image(self.video_path)
@@ -450,10 +463,15 @@ class SubtitleRemover:
         self.video_cap.release()
         self.video_writer.release()
         if not self.is_picture:
-            # 二遍残留兜底：对第一遍输出重跑检测，检出残留并二修（可开关）
-            self._residue_second_pass(tbar)
-            # 将原音频合并到新生成的视频文件中
-            self.merge_audio_to_video()
+            if self.is_segment:
+                # 分段模式：段数据仍在临时文件，直接落盘为段输出；
+                # 残留兜底与音频封装由成片 concat 阶段统一处理
+                shutil.copy2(self.video_temp_file.name, self.video_out_path)
+            else:
+                # 二遍残留兜底：对第一遍输出重跑检测，检出残留并二修（可开关）
+                self._residue_second_pass(tbar)
+                # 将原音频合并到新生成的视频文件中
+                self.merge_audio_to_video()
         self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
         self.isFinished = True
@@ -704,5 +722,10 @@ if __name__ == '__main__':
     # 显式传参时仅覆盖内存值（不写盘，不污染 GUI 设置）；不传则沿用 config.json 中 GUI 选择的模式
     if args.inpaint_mode is not None:
         config.inpaintMode.value = args.inpaint_mode
+    # 分段帧范围（可选）：由分段续跑执行器或用户手工分段使用
+    if args.frame_start is not None:
+        sr.frame_start = max(0, args.frame_start)
+    if args.frame_end is not None:
+        sr.frame_end = max(1, args.frame_end)
     sr.run()
         

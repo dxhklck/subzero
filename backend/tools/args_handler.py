@@ -24,6 +24,14 @@ def parse_args():
         choices=[mode.name.lower().replace('_','-') for mode in InpaintMode],
         help="Inpaint mode. If omitted, falls back to the mode selected in the GUI settings (config.json)"
     )
+    parser.add_argument(
+        "--frame-start", type=int, default=None,
+        help="0-based start frame (inclusive) for segmented/resumable processing; default 0"
+    )
+    parser.add_argument(
+        "--frame-end", type=int, default=None,
+        help="0-based end frame (exclusive) for segmented/resumable processing; default video end"
+    )
     args = parser.parse_args()
     if args.inpaint_mode is not None:
         args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]

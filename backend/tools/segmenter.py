@@ -1,0 +1,295 @@
+"""分段计划与断点检查点（checkpoint）管理。
+
+移植自 seedvr2_gui/core/segmenter.py 的零侵入续跑方案：
+外层执行器把长视频按帧数切成若干段，每段作为独立子进程运行
+（SubtitleRemover + frame_start/frame_end），段输出文件本身即检查点产物，
+checkpoint.json 记录每段状态与全局参数哈希——参数不一致的续跑会被拒绝，
+防止新旧段混合产生错位结果。
+
+差异（相对 seedvr2 原版）：
+- 分段单位改为「帧数」而非「秒数」，由执行器按 fps × segment_seconds 换算；
+- params_hash 的相关参数按 VSR 的配置键裁剪。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+#: checkpoint 结构版本（不兼容变更时递增）
+CHECKPOINT_VERSION = 1
+
+#: 段状态
+STATUS_PENDING = "pending"
+STATUS_RUNNING = "running"
+STATUS_DONE = "done"
+STATUS_FAILED = "failed"
+
+
+@dataclass
+class Segment:
+    """一段的处理计划。"""
+
+    index: int
+    skip: int   # 段起始帧（全局 0-based，含）
+    cap: int    # 段帧数
+    status: str = STATUS_PENDING
+
+    @property
+    def frame_end(self) -> int:
+        """段结束帧（不含）。"""
+        return self.skip + self.cap
+
+    @property
+    def output_name(self) -> str:
+        """段输出文件名（相对任务目录）。"""
+        return f"seg_{self.index:04d}.mp4"
+
+
+def build_plan(total_frames: int, segment_frames: int) -> List[Segment]:
+    """按段帧数生成计划；total_frames <= segment_frames 时为单段（整片）。
+
+    Example: 240 帧、段长 100 -> [(skip=0,cap=100), (skip=100,cap=100),
+    (skip=200,cap=40)]。
+    """
+    if total_frames <= 0:
+        return []
+    seg_frames = max(1, int(segment_frames))
+    plan: List[Segment] = []
+    skip = 0
+    index = 0
+    while skip < total_frames:
+        cap = min(seg_frames, total_frames - skip)
+        plan.append(Segment(index=index, skip=skip, cap=cap))
+        index += 1
+        skip += cap
+    return plan
+
+
+def params_hash(params: Dict[str, Any]) -> str:
+    """对所有影响输出像素的任务参数做稳定 SHA-256。
+
+    段位置字段（skip/cap/输出路径）不得参与哈希。
+    """
+    relevant = {
+        k: params[k]
+        for k in sorted(params)
+        if k not in ("video_path", "output_path", "task_dir")
+    }
+    blob = json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class ResumeInfo:
+    """由 checkpoint.json 派生的续跑信息（供 GUI 状态显示）。"""
+
+    exists: bool = False
+    corrupt: bool = False
+    total_segments: int = 0
+    done_count: int = 0
+    first_pending_index: int = -1     # 第一个未完成段的 0-based 序号
+    hash_match: bool = True
+
+    @property
+    def can_resume(self) -> bool:
+        return (self.exists and not self.corrupt and self.hash_match
+                and 0 <= self.first_pending_index < self.total_segments)
+
+    @property
+    def chip_text(self) -> str:
+        """人类可读的续跑状态（段号按 1-based 显示）。"""
+        if not self.exists:
+            return ""
+        if self.corrupt:
+            return "⚠ checkpoint 损坏，将作为全新任务重跑"
+        if not self.hash_match:
+            if self.total_segments > 0 and self.done_count >= self.total_segments:
+                return "✓ 全部段已完成"
+            return "✗ 哈希不一致，拒绝续跑"
+        if self.can_resume and self.done_count > 0:
+            x = self.first_pending_index + 1
+            return (f"⏸ 上次中断于 段 {x}/{self.total_segments} · 可续跑"
+                    f"（段 1..{self.first_pending_index} 已完成，只补 "
+                    f"{x}..{self.total_segments}）")
+        if self.done_count >= self.total_segments > 0:
+            return "✓ 全部段已完成"
+        return ""
+
+
+def load_or_rebuild_checkpoint(path: Union[str, Path], params: Dict[str, Any],
+                               total_frames: int, segment_frames: int,
+                               log: Optional[Any] = None) -> tuple:
+    """为任务解析 checkpoint。
+
+    返回 ``(checkpoint, mode)``，mode 为：
+
+    ``"created"``
+        无 checkpoint —— 用 params 新建全 pending 计划。
+    ``"loaded"``
+        参数哈希一致 —— 安全续跑。
+    ``"rebuilt"``
+        哈希不同但尚无完成段 —— 不会丢任何进度，按新参数重建计划。
+    ``"refused"``
+        哈希不同且存在完成段 —— 拒绝续跑（新旧段混合会错位），
+        调用方需提示用户处理。
+    """
+    p = Path(path)
+    if not p.exists():
+        return Checkpoint.create(p, params, total_frames, segment_frames), "created"
+    try:
+        return Checkpoint.load(p, expected_hash=params_hash(params)), "loaded"
+    except CheckpointMismatch:
+        prior = Checkpoint.load(p)  # 未校验读取（绕过哈希检查）
+        done = prior.done_count() if prior is not None else 0
+        if done == 0:
+            if log is not None:
+                log("[续跑] 参数已变更但尚无已完成段，按新参数重建任务计划")
+            return Checkpoint.create(p, params, total_frames,
+                                     segment_frames), "rebuilt"
+        if log is not None:
+            log(f"[续跑] 参数已变更且已存在 {done} 个按旧参数完成的段，拒绝续跑")
+        return prior, "refused"
+
+
+def derive_resume_info(ckpt_path: Union[str, Path],
+                       expected_hash: Optional[str] = None) -> ResumeInfo:
+    """从 checkpoint.json 派生 ResumeInfo（哈希不匹配不抛异常，报告 hash_match=False）。"""
+    p = Path(ckpt_path)
+    if not p.exists():
+        return ResumeInfo(exists=False)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ResumeInfo(exists=True, corrupt=True)
+    if not isinstance(data, dict) or "param_hash" not in data or "segments" not in data:
+        return ResumeInfo(exists=True, corrupt=True)
+    segments = data.get("segments") or []
+    info = ResumeInfo(exists=True, total_segments=len(segments))
+    first_pending = -1
+    for i, it in enumerate(segments):
+        if str(it.get("status", STATUS_PENDING)) != STATUS_DONE:
+            first_pending = i
+            break
+    info.done_count = sum(1 for it in segments
+                          if str(it.get("status", "")) == STATUS_DONE)
+    info.first_pending_index = first_pending
+    info.hash_match = (expected_hash is None
+                       or str(data.get("param_hash")) == str(expected_hash))
+    return info
+
+
+class CheckpointMismatch(Exception):
+    """续跑时参数哈希不一致。"""
+
+
+class Checkpoint:
+    """任务目录内 checkpoint.json 的读写句柄（原子写入）。"""
+
+    def __init__(self, path: Path, data: Dict[str, Any]):
+        self.path = Path(path)
+        self.data = data
+
+    # -- 创建 / 加载 ---------------------------------------------------------
+
+    @classmethod
+    def create(cls, path: Path, params: Dict[str, Any], total_frames: int,
+               segment_frames: int) -> "Checkpoint":
+        """新建全 pending 计划并写盘。"""
+        plan = build_plan(total_frames, segment_frames)
+        data = {
+            "version": CHECKPOINT_VERSION,
+            "param_hash": params_hash(params),
+            "params": params,
+            "total_frames": total_frames,
+            "segment_frames": segment_frames,
+            "segments": [
+                {"index": s.index, "skip": s.skip, "cap": s.cap, "status": s.status}
+                for s in plan
+            ],
+        }
+        ckpt = cls(path, data)
+        ckpt.save()
+        return ckpt
+
+    @classmethod
+    def load(cls, path: Path, expected_hash: Optional[str] = None) -> Optional["Checkpoint"]:
+        """加载 checkpoint；不存在返回 None；哈希不一致抛 CheckpointMismatch。"""
+        p = Path(path)
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict) or "param_hash" not in data:
+            return None
+        if expected_hash is not None and data.get("param_hash") != expected_hash:
+            raise CheckpointMismatch(
+                f"checkpoint param_hash mismatch: {data.get('param_hash')} != {expected_hash}")
+        return cls(p, data)
+
+    # -- 持久化 --------------------------------------------------------------
+
+    def save(self) -> None:
+        """原子写盘（tmp + replace）。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    # -- 状态变更 ------------------------------------------------------------
+
+    def segments(self) -> List[Segment]:
+        return [
+            Segment(index=int(it["index"]), skip=int(it["skip"]), cap=int(it["cap"]),
+                    status=str(it.get("status", STATUS_PENDING)))
+            for it in self.data.get("segments", [])
+        ]
+
+    def _set_status(self, index: int, status: str) -> None:
+        for it in self.data["segments"]:
+            if int(it["index"]) == index:
+                it["status"] = status
+                self.save()
+                return
+        raise KeyError(f"segment {index} not in checkpoint plan")
+
+    def mark_running(self, index: int) -> None:
+        self._set_status(index, STATUS_RUNNING)
+
+    def mark_done(self, index: int) -> None:
+        self._set_status(index, STATUS_DONE)
+
+    def mark_failed(self, index: int) -> None:
+        self._set_status(index, STATUS_FAILED)
+
+    def reset_running(self) -> None:
+        """启动时把遗留的 running 段复位为 pending（上次进程被杀的残留状态）。"""
+        for it in self.data["segments"]:
+            if it.get("status") == STATUS_RUNNING:
+                it["status"] = STATUS_PENDING
+        self.save()
+
+    # -- 查询 ----------------------------------------------------------------
+
+    def done_count(self) -> int:
+        return sum(1 for s in self.segments() if s.status == STATUS_DONE)
+
+    def total_count(self) -> int:
+        return len(self.data.get("segments", []))
+
+    def pending(self) -> List[Segment]:
+        """所有未完成段。"""
+        return [s for s in self.segments() if s.status != STATUS_DONE]
+
+    def done_frames(self) -> int:
+        """已完成段的总帧数（全局进度合成用）。"""
+        return sum(s.cap for s in self.segments() if s.status == STATUS_DONE)
+
+    def segment_file(self, task_dir: Union[str, Path], index: int) -> Path:
+        """段输出文件的绝对路径。"""
+        return Path(task_dir) / f"seg_{index:04d}.mp4"

@@ -92,6 +92,10 @@ class Config(QConfig):
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
     residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
+    # 长视频分段时长（分钟）：0=禁用分段；视频时长 ≤ 该值整片处理，
+    # 超过则按此值切段逐段执行，支持中断续跑（checkpoint 保存在
+    # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）
+    segmentMinutes = RangeConfigItem("Main", "SegmentMinutes", 30, RangeValidator(0, 240))
     # 以下参数仅适用STTN算法时，才生效
     """
     1. STTN_SKIP_DETECTION

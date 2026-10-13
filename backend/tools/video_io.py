@@ -16,8 +16,12 @@ class FramePrefetcher:
     接口兼容 cv2.VideoCapture（read/release）。
     """
 
-    def __init__(self, video_cap, buffer_size=10):
+    def __init__(self, video_cap, buffer_size=10, max_frames=None):
         self.cap = video_cap
+        #: 最多预读取的帧数（None=读到 EOF）；分段处理时设为段帧数，
+        #: 读满即停，避免把下一段的帧（或哨兵等待）混进当前段
+        self._max_frames = max_frames
+        self._read_count = 0
         self._buffer = queue.Queue(maxsize=buffer_size)
         self._stopped = False
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -25,7 +29,11 @@ class FramePrefetcher:
 
     def _read_loop(self):
         while not self._stopped:
+            if self._max_frames is not None and self._read_count >= self._max_frames:
+                self._buffer.put((False, None))
+                break
             ret, frame = self.cap.read()
+            self._read_count += 1
             self._buffer.put((ret, frame))
             if not ret:
                 break

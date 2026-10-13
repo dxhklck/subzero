@@ -199,19 +199,31 @@ class STTNAutoInpaint:
     def __call__(self, input_mask=None, input_sub_remover=None, tbar=None):
         reader = None
         writer = None
+        prefetcher = None
         try:
             # 读取视频帧信息
             reader, frame_info = self.read_frame_info_from_video()
-            # 使用帧预读取，I/O 与推理重叠
-            prefetcher = FramePrefetcher(reader)
+            # 分段帧范围（与 SubtitleRemover.frame_start/frame_end 对齐），
+            # 需在创建 FramePrefetcher（立即起线程读帧）之前 seek 到段起点
+            frame_start = 0
+            frame_end = None
             if input_sub_remover is not None:
                 ab_sections = input_sub_remover.ab_sections
-                
+
                 writer = input_sub_remover.video_writer
+                frame_start = int(getattr(input_sub_remover, 'frame_start', 0) or 0)
+                frame_end = getattr(input_sub_remover, 'frame_end', None)
             else:
                 ab_sections = None
                 # 创建视频写入对象，用于输出修复后的视频
                 writer = cv2.VideoWriter(self.video_out_path, cv2.VideoWriter_fourcc(*"mp4v"), frame_info['fps'], (frame_info['W_ori'], frame_info['H_ori']))
+            if frame_end is None:
+                frame_end = frame_info['len']
+            seg_total = max(1, frame_end - frame_start)
+            if frame_start > 0:
+                reader.set(cv2.CAP_PROP_POS_FRAMES, frame_start)
+            # 使用帧预读取，I/O 与推理重叠；段帧数为预读取上限（读满即停）
+            prefetcher = FramePrefetcher(reader, max_frames=seg_total)
             
             # 计算分割高度，用于确定修复区域的大小
             split_h = int(frame_info['W_ori'] * 3 / 16)
@@ -236,13 +248,13 @@ class STTNAutoInpaint:
                 effective_clip_gap = min(self.clip_gap, max_frames_by_vram)
                 if effective_clip_gap < self.clip_gap:
                     tqdm.write(f'GPU VRAM: {vram_mb:.0f}MB, adjusting clip_gap: {self.clip_gap} -> {effective_clip_gap}')
-            # 计算需要迭代修复视频的次数
-            rec_time = frame_info['len'] // effective_clip_gap if frame_info['len'] % effective_clip_gap == 0 else frame_info['len'] // effective_clip_gap + 1
+            # 计算需要迭代修复视频的次数（按段帧数）
+            rec_time = seg_total // effective_clip_gap if seg_total % effective_clip_gap == 0 else seg_total // effective_clip_gap + 1
             # 遍历每一次的迭代次数
             for i in range(rec_time):
-                start_f = i * effective_clip_gap  # 起始帧位置
-                end_f = min((i + 1) * effective_clip_gap, frame_info['len'])  # 结束帧位置
-                tqdm.write(f'Processing: {start_f + 1} - {end_f} / Total: {frame_info['len']}')
+                start_f = i * effective_clip_gap  # 段内相对起始帧位置
+                end_f = min((i + 1) * effective_clip_gap, seg_total)  # 段内相对结束帧位置
+                tqdm.write(f'Processing: {frame_start + start_f + 1} - {frame_start + end_f} / Segment: {seg_total}')
                 
                 frames_hr = []  # 高分辨率帧列表
                 frames = {}  # 帧字典，用于存储裁剪后的图像
@@ -263,7 +275,7 @@ class STTNAutoInpaint:
                     frames_hr.append(image)
                     valid_frames_count += 1
                     
-                    if is_frame_number_in_ab_sections(j, ab_sections):
+                    if is_frame_number_in_ab_sections(frame_start + j, ab_sections):
                         for k in range(len(inpaint_area)):
                             # 裁剪、缩放并添加到帧字典
                             image_crop = image[inpaint_area[k][0]:inpaint_area[k][1], :, :]
@@ -290,7 +302,7 @@ class STTNAutoInpaint:
                     
                     # 构建映射关系
                     for j in range(start_f, end_f):
-                        if j - start_f < valid_frames_count and is_frame_number_in_ab_sections(j, ab_sections):
+                        if j - start_f < valid_frames_count and is_frame_number_in_ab_sections(frame_start + j, ab_sections):
                             processed_frames_map[j - start_f] = processed_idx
                             processed_idx += 1
                     
@@ -334,7 +346,7 @@ class STTNAutoInpaint:
             # 避免静默产出缺失帧的截断视频
             raise
         finally:
-            if reader:
+            if prefetcher:
                 prefetcher.release()
             if writer:
                 writer.release()
