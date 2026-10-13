@@ -21,7 +21,8 @@ from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all, fix_weights
 from ui.component.compact_rows import (CompactRangeRow, CompactSwitchRow,
-                                       CompactComboRow, accent_color as _accent_color,
+                                       CompactComboRow, CompactParamRow,
+                                       accent_color as _accent_color,
                                        set_row_tooltip)
 
 
@@ -124,9 +125,10 @@ class AdvancedSettingInterface(ScrollArea):
             self.hw_row.switch.setChecked(False)
             self.hw_row.setToolTip(setting_tr['HardwareAccelerationNO'])
             config.set(config.hardwareAcceleration, False)
-        self.segment_row = self._add_row(vbox, CompactRangeRow(
+        self.segment_row = CompactRangeRow(
             config.segmentMinutes, gui['SegmentMinutes'],
-            gui['SegmentMinutesDesc'], icon=FluentIcon.STOP_WATCH, parent=card))
+            gui['SegmentMinutesDesc'], icon=FluentIcon.STOP_WATCH, parent=card)
+        vbox.addWidget(CompactParamRow(self.hw_row, self.segment_row))
 
     def _make_group(self, title):
         """一组：分组标题（主题色 + 短下划线，参照卡片式设计稿）+ 卡片容器，返回 (card, vbox, header)"""
@@ -156,91 +158,98 @@ class AdvancedSettingInterface(ScrollArea):
         card, vbox, self._detect_header = self._make_group(tr['Setting']['SubtitleDetectionSetting'])
         gui = tr['SubtitleExtractorGUI']
         # 检测模型 + 残留二修（从主页迁移，非专家参数）
-        self.detect_model_row = self._add_row(vbox, CompactComboRow(
+        self.detect_model_row = CompactComboRow(
             config.subtitleDetectMode, gui['SubtitleDetectMode'], gui['SubtitleDetectModeDesc'],
             texts=[list(tr['SubtitleDetectMode'].values())[i]
                    for i, _ in enumerate(config.subtitleDetectMode.validator.options)],
             values=list(config.subtitleDetectMode.validator.options),
-            icon=FluentIcon.SEARCH, parent=card))
-        self.residue_row = self._add_row(vbox, CompactSwitchRow(
+            icon=FluentIcon.SEARCH, parent=card)
+        self.residue_row = CompactSwitchRow(
             config.residueCheck, gui['ResidueCheck'], gui['ResidueCheckDesc'],
-            icon=FluentIcon.BROOM, parent=card))
-        self.rows_detect = [
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleDetectProcessSize, tr['Setting']['SubtitleDetectProcessSize'],
-                tr['Setting']['SubtitleDetectProcessSizeDesc'], icon=FluentIcon.FULL_SCREEN)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleDetectSampleStep, tr['Setting']['SubtitleDetectSampleStep'],
-                tr['Setting']['SubtitleDetectSampleStepDesc'], icon=FluentIcon.STOP_WATCH)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleTimelineForwardFrameCount, tr['Setting']['subtitleTimelineForwardFrameCount'],
-                tr['Setting']['subtitleTimelineForwardFrameCountDesc'], icon=FluentIcon.MOVIE)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleTimelineBackwardFrameCount, tr['Setting']['SubtitleTimelineBackwardFrameCount'],
-                tr['Setting']['SubtitleTimelineBackwardFrameCountDesc'], icon=FluentIcon.VIDEO)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleAreaDeviationPixel, tr['Setting']['SubtitleAreaDeviationPixel'],
-                tr['Setting']['SubtitleAreaDeviationPixelDesc'], icon=FluentIcon.ZOOM_IN)),
-            self._add_row(vbox, CompactRangeRow(
-                config.autoRouteStaticThreshold, tr['Setting']['AutoRouteStaticThreshold'],
-                tr['Setting']['AutoRouteStaticThresholdDesc'], icon=FluentIcon.SYNC)),
-        ]
-        self.rows_detect_expert = [
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleYXAxisDifferencePixel, tr['Setting']['SubtitleYXAxisDifferencePixel'],
-                tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleAreaYAxisDifferencePixel, tr['Setting']['SubtitleAreaYAxisDifferencePixel'],
-                tr['Setting']['SubtitleAreaYAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleAreaPixelToleranceYPixel, tr['Setting']['SubtitleAreaPixelToleranceYPixel'],
-                tr['Setting']['SubtitleAreaPixelToleranceYPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
-            self._add_row(vbox, CompactRangeRow(
-                config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
-                tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
-        ]
+            icon=FluentIcon.BROOM, parent=card)
+        vbox.addWidget(CompactParamRow(self.detect_model_row, self.residue_row))
+        r1 = CompactRangeRow(
+            config.subtitleDetectProcessSize, tr['Setting']['SubtitleDetectProcessSize'],
+            tr['Setting']['SubtitleDetectProcessSizeDesc'], icon=FluentIcon.FULL_SCREEN, parent=card)
+        r2 = CompactRangeRow(
+            config.subtitleDetectSampleStep, tr['Setting']['SubtitleDetectSampleStep'],
+            tr['Setting']['SubtitleDetectSampleStepDesc'], icon=FluentIcon.STOP_WATCH, parent=card)
+        vbox.addWidget(CompactParamRow(r1, r2))
+        r3 = CompactRangeRow(
+            config.subtitleTimelineForwardFrameCount, tr['Setting']['subtitleTimelineForwardFrameCount'],
+            tr['Setting']['subtitleTimelineForwardFrameCountDesc'], icon=FluentIcon.MOVIE, parent=card)
+        r4 = CompactRangeRow(
+            config.subtitleTimelineBackwardFrameCount, tr['Setting']['SubtitleTimelineBackwardFrameCount'],
+            tr['Setting']['SubtitleTimelineBackwardFrameCountDesc'], icon=FluentIcon.VIDEO, parent=card)
+        vbox.addWidget(CompactParamRow(r3, r4))
+        r5 = CompactRangeRow(
+            config.subtitleAreaDeviationPixel, tr['Setting']['SubtitleAreaDeviationPixel'],
+            tr['Setting']['SubtitleAreaDeviationPixelDesc'], icon=FluentIcon.ZOOM_IN, parent=card)
+        r6 = CompactRangeRow(
+            config.autoRouteStaticThreshold, tr['Setting']['AutoRouteStaticThreshold'],
+            tr['Setting']['AutoRouteStaticThresholdDesc'], icon=FluentIcon.SYNC, parent=card)
+        vbox.addWidget(CompactParamRow(r5, r6))
+        e1 = CompactRangeRow(
+            config.subtitleYXAxisDifferencePixel, tr['Setting']['SubtitleYXAxisDifferencePixel'],
+            tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
+        e2 = CompactRangeRow(
+            config.subtitleAreaYAxisDifferencePixel, tr['Setting']['SubtitleAreaYAxisDifferencePixel'],
+            tr['Setting']['SubtitleAreaYAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
+        vbox.addWidget(CompactParamRow(e1, e2))
+        e3 = CompactRangeRow(
+            config.subtitleAreaPixelToleranceYPixel, tr['Setting']['SubtitleAreaPixelToleranceYPixel'],
+            tr['Setting']['SubtitleAreaPixelToleranceYPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
+        e4 = CompactRangeRow(
+            config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
+            tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
+        vbox.addWidget(CompactParamRow(e3, e4))
+        self.rows_detect = [r1, r2, r3, r4, r5, r6]
+        self.rows_detect_expert = [e1, e2, e3, e4]
 
     def _build_minimax_group(self):
         card, vbox, self._minimax_header = self._make_group(tr['Setting']['MiniMaxSetting'])
-        self.rows_minimax = [
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxMaxLoadNum, tr['Setting']['MiniMaxMaxLoadNum'],
-                tr['Setting']['MiniMaxMaxLoadNumDesc'], icon=FluentIcon.CLOUD)),
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxNumInferenceSteps, tr['Setting']['MiniMaxNumInferenceSteps'],
-                tr['Setting']['MiniMaxNumInferenceStepsDesc'], icon=FluentIcon.HISTORY)),
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxBlockOverlap, tr['Setting']['MiniMaxBlockOverlap'],
-                tr['Setting']['MiniMaxBlockOverlapDesc'], icon=FluentIcon.LAYOUT)),
-        ]
-        self.rows_minimax_expert = [
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxIterations, tr['Setting']['MiniMaxIterations'],
-                tr['Setting']['MiniMaxIterationsDesc'], expert=True, icon=FluentIcon.SYNC)),
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxProcessWidth, tr['Setting']['MiniMaxProcessWidth'],
-                tr['Setting']['MiniMaxProcessWidthDesc'], expert=True, icon=FluentIcon.FIT_PAGE)),
-            self._add_row(vbox, CompactRangeRow(
-                config.minimaxStripPadding, tr['Setting']['MiniMaxStripPadding'],
-                tr['Setting']['MiniMaxStripPaddingDesc'], expert=True, icon=FluentIcon.ALBUM)),
-            self._add_row(vbox, CompactSwitchRow(
-                config.minimaxVaeDecodeFp32, tr['Setting']['MiniMaxVaeDecodeFp32'],
-                tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True, icon=FluentIcon.PALETTE)),
-        ]
+        m1 = CompactRangeRow(
+            config.minimaxMaxLoadNum, tr['Setting']['MiniMaxMaxLoadNum'],
+            tr['Setting']['MiniMaxMaxLoadNumDesc'], icon=FluentIcon.CLOUD, parent=card)
+        m2 = CompactRangeRow(
+            config.minimaxNumInferenceSteps, tr['Setting']['MiniMaxNumInferenceSteps'],
+            tr['Setting']['MiniMaxNumInferenceStepsDesc'], icon=FluentIcon.HISTORY, parent=card)
+        vbox.addWidget(CompactParamRow(m1, m2))
+        m3 = CompactRangeRow(
+            config.minimaxBlockOverlap, tr['Setting']['MiniMaxBlockOverlap'],
+            tr['Setting']['MiniMaxBlockOverlapDesc'], icon=FluentIcon.LAYOUT, parent=card)
+        m4 = CompactRangeRow(
+            config.minimaxIterations, tr['Setting']['MiniMaxIterations'],
+            tr['Setting']['MiniMaxIterationsDesc'], expert=True, icon=FluentIcon.SYNC, parent=card)
+        vbox.addWidget(CompactParamRow(m3, m4))
+        m5 = CompactRangeRow(
+            config.minimaxProcessWidth, tr['Setting']['MiniMaxProcessWidth'],
+            tr['Setting']['MiniMaxProcessWidthDesc'], expert=True, icon=FluentIcon.FIT_PAGE, parent=card)
+        m6 = CompactRangeRow(
+            config.minimaxStripPadding, tr['Setting']['MiniMaxStripPadding'],
+            tr['Setting']['MiniMaxStripPaddingDesc'], expert=True, icon=FluentIcon.ALBUM, parent=card)
+        vbox.addWidget(CompactParamRow(m5, m6))
+        m7 = CompactSwitchRow(
+            config.minimaxVaeDecodeFp32, tr['Setting']['MiniMaxVaeDecodeFp32'],
+            tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True, icon=FluentIcon.PALETTE, parent=card)
+        vbox.addWidget(m7)
+        self.rows_minimax = [m1, m2, m3]
+        self.rows_minimax_expert = [m4, m5, m6, m7]
 
     def _build_sttn_group(self):
         card, vbox, self._sttn_header = self._make_group(tr['Setting']['SttnSetting'])
-        self.rows_sttn = [
-            self._add_row(vbox, CompactRangeRow(
-                config.sttnNeighborStride, tr['Setting']['SttnNeighborStride'],
-                tr['Setting']['SttnNeighborStrideDesc'], expert=True, icon=FluentIcon.LINK)),
-            self._add_row(vbox, CompactRangeRow(
-                config.sttnReferenceLength, tr['Setting']['SttnReferenceLength'],
-                tr['Setting']['SttnReferenceLengthDesc'], expert=True, icon=FluentIcon.LIBRARY)),
-            self._add_row(vbox, CompactRangeRow(
-                config.sttnMaxLoadNum, tr['Setting']['SttnMaxLoadNum'],
-                tr['Setting']['SttnMaxLoadNumDesc'], expert=True, icon=FluentIcon.CLOUD)),
-        ]
+        s1 = CompactRangeRow(
+            config.sttnNeighborStride, tr['Setting']['SttnNeighborStride'],
+            tr['Setting']['SttnNeighborStrideDesc'], expert=True, icon=FluentIcon.LINK, parent=card)
+        s2 = CompactRangeRow(
+            config.sttnReferenceLength, tr['Setting']['SttnReferenceLength'],
+            tr['Setting']['SttnReferenceLengthDesc'], expert=True, icon=FluentIcon.LIBRARY, parent=card)
+        vbox.addWidget(CompactParamRow(s1, s2))
+        s3 = CompactRangeRow(
+            config.sttnMaxLoadNum, tr['Setting']['SttnMaxLoadNum'],
+            tr['Setting']['SttnMaxLoadNumDesc'], expert=True, icon=FluentIcon.CLOUD, parent=card)
+        vbox.addWidget(s3)
+        self.rows_sttn = [s1, s2, s3]
         self.sttn_card = card
 
     def _build_maintenance_group(self):

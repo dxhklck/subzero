@@ -74,6 +74,9 @@ class CompactRangeRow(QFrame):
         self.spin.setRange(lo, hi)
         self.spin.setFixedWidth(88)
         self.spin.setAlignment(Qt.AlignCenter)
+        # 移除行末上下调节箭头（qfluentwidgets SpinBox 为自定义按钮，需用 setSymbolVisible；
+        # 键盘键入、滚轮与上下方向键仍可调值）
+        self.spin.setSymbolVisible(False)
         layout.addWidget(self.spin, 0)
 
         set_row_tooltip(desc, self, self._title_label, self.spin)
@@ -207,3 +210,27 @@ class CompactComboRow(QFrame):
         cur = self.config_item.value
         if cur in self._values:
             self.combo.setCurrentIndex(self._values.index(cur))
+
+
+class CompactParamRow(QFrame):
+    """一行多个参数簇：水平均分（参照设计稿一行多参数的紧凑布局）。
+
+    传入若干 CompactRangeRow / CompactSwitchRow / CompactComboRow，
+    每个簇等宽伸展；行内的「已修改」标记等行为不受影响。
+    """
+
+    def __init__(self, *rows, parent=None):
+        super().__init__(parent)
+        self.rows = list(rows)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setStyleSheet('CompactParamRow { background: transparent; }')
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 0, 6, 0)
+        lay.setSpacing(16)
+        for r in rows:
+            lay.addWidget(r, 1)
+
+    def refresh_row(self):
+        for r in self.rows:
+            if hasattr(r, 'refresh_row'):
+                r.refresh_row()

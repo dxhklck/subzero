@@ -131,8 +131,9 @@ class GpuMonitorBar(QWidget):
 
     def _apply_theme(self):
         c = _theme_colors()
+        # 标题样式与「处理模型」行一致：13px 默认文字色，不用灰弱色
         for row in (self.vram_row, self.ram_row):
-            row.title_label.setStyleSheet(f"font-size: 13px; color: {c['muted']};")
+            row.title_label.setStyleSheet('font-size: 13px;')
             row.value_label.setStyleSheet(
                 f"font-size:11px; font-family:'Consolas'; color:{c['value']};")
             row.bar.setStyleSheet(
