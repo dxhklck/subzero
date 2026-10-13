@@ -4,169 +4,25 @@
        专家参数默认隐藏，「专业模式」开关打开后显示（状态记忆在配置）。
 """
 
+import os
+import sys
+import subprocess
+
 from PySide6 import QtWidgets, QtCore
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget, QFrame, QLabel
 from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon, SubtitleLabel,
                            PushSettingCard, SettingCard, PushButton, SwitchButton,
-                           Slider, SpinBox, MessageBox, InfoBar, RadioButton,
+                           Slider, SpinBox, ComboBox, MessageBox, InfoBar, RadioButton,
                            StrongBodyLabel, BodyLabel, CaptionLabel, isDarkTheme)
-from backend.config import config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL, PROJECT_RELEASES_URL
+from backend.config import (config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL,
+                           PROJECT_RELEASES_URL, HARDWARD_ACCELERATION_OPTION, BASE_DIR)
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all, fix_weights
-
-
-def _accent_color():
-    """主题感知的主色：浅色主题用主绿，深色主题用亮一档的绿"""
-    return '#5DCAA5' if isDarkTheme() else '#1D9E75'
-
-
-class CompactRangeRow(QFrame):
-    """紧凑数值参数行：参数名+说明 | 滑条 | 数字框（含 −/+ 步进）。
-
-    - 滑条粗调、数字框精确键入（越界自动钳制到 validator 范围）
-    - 值 ≠ 出厂默认时，说明位置显示「已修改 · 默认 N」标记
-    """
-
-    def __init__(self, config_item, title, desc, expert=False, parent=None):
-        super().__init__(parent)
-        self.config_item = config_item
-        self.expert = expert
-        self._desc_text = desc
-        self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet('CompactRangeRow { background: transparent; }')
-
-        validator = config_item.validator
-        lo, hi = int(validator.min), int(validator.max)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 7, 14, 7)
-        layout.setSpacing(12)
-
-        # 左侧：参数名 + 说明（值偏离默认时说明让位给「已修改」标记）
-        text_col = QVBoxLayout()
-        text_col.setSpacing(1)
-        title_row = QHBoxLayout()
-        title_row.setSpacing(6)
-        self._title_label = StrongBodyLabel(title, self)
-        self._title_label.setStyleSheet('font-size: 13px;')
-        title_row.addWidget(self._title_label)
-        if expert:
-            badge = CaptionLabel(tr['Setting']['ExpertBadge'], self)
-            badge.setStyleSheet(
-                'color:#854F0B; background:#FAEEDA; border-radius:7px; padding:0 7px; font-size:10px;')
-            title_row.addWidget(badge)
-        title_row.addStretch(1)
-        text_col.addLayout(title_row)
-        self._desc_label = CaptionLabel(desc, self)
-        text_col.addWidget(self._desc_label)
-        layout.addLayout(text_col, 0)
-
-        # 中部：滑条
-        self.slider = Slider(Qt.Horizontal, self)
-        self.slider.setRange(lo, hi)
-        layout.addWidget(self.slider, 1)
-
-        # 右侧：数字框（SpinBox 自带键盘输入与上下步进）
-        self.spin = SpinBox(self)
-        self.spin.setRange(lo, hi)
-        self.spin.setFixedWidth(72)
-        self.spin.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.spin, 0)
-
-        self._syncing = False
-        v = int(config_item.value)
-        self.slider.setValue(v)
-        self.spin.setValue(v)
-        self._refresh_mark()
-
-        # UI -> 配置（写盘即保存）；Qt 信号仅在值变化时触发，天然去重
-        self.slider.valueChanged.connect(self._on_slider)
-        self.spin.valueChanged.connect(self._on_spin)
-        # 配置 -> UI（恢复默认等外部写入时同步）
-        config_item.valueChanged.connect(self._on_config_changed)
-
-    def _on_slider(self, v):
-        if self._syncing:
-            return
-        self._syncing = True
-        self.spin.setValue(v)
-        self._syncing = False
-        config.set(self.config_item, int(v))
-        self._refresh_mark()
-
-    def _on_spin(self, v):
-        if self._syncing:
-            return
-        self._syncing = True
-        self.slider.setValue(v)
-        self._syncing = False
-        config.set(self.config_item, int(v))
-        self._refresh_mark()
-
-    def _on_config_changed(self, v):
-        self._syncing = True
-        self.slider.setValue(int(v))
-        self.spin.setValue(int(v))
-        self._syncing = False
-        self._refresh_mark()
-
-    def _refresh_mark(self):
-        """值偏离出厂默认时，说明行让位给「已修改 · 默认 N」标记"""
-        if self.config_item.value != self.config_item.defaultValue:
-            self._desc_label.setText(tr['Setting']['ModifiedTag'].format(self.config_item.defaultValue))
-            self._desc_label.setStyleSheet(f'color: {_accent_color()}; font-size: 11px;')
-            self._title_label.setStyleSheet(f'font-size: 13px; color: {_accent_color()};')
-        else:
-            self._desc_label.setText(self._desc_text)
-            self._desc_label.setStyleSheet('color: var(--color-text-secondary); font-size: 11px;')
-            self._title_label.setStyleSheet('font-size: 13px;')
-
-    def refresh_row(self):
-        self._on_config_changed(self.config_item.value)
-
-
-class CompactSwitchRow(QFrame):
-    """紧凑开关参数行：参数名+说明 | 开关"""
-
-    def __init__(self, config_item, title, desc, expert=False, parent=None):
-        super().__init__(parent)
-        self.config_item = config_item
-        self.expert = expert
-        self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet('CompactSwitchRow { background: transparent; }')
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 7, 14, 7)
-        layout.setSpacing(12)
-        text_col = QVBoxLayout()
-        text_col.setSpacing(1)
-        title_row = QHBoxLayout()
-        title_row.setSpacing(6)
-        self._title_label = StrongBodyLabel(title, self)
-        self._title_label.setStyleSheet('font-size: 13px;')
-        title_row.addWidget(self._title_label)
-        if expert:
-            badge = CaptionLabel(tr['Setting']['ExpertBadge'], self)
-            badge.setStyleSheet(
-                'color:#854F0B; background:#FAEEDA; border-radius:7px; padding:0 7px; font-size:10px;')
-            title_row.addWidget(badge)
-        title_row.addStretch(1)
-        text_col.addLayout(title_row)
-        text_col.addWidget(CaptionLabel(desc, self))
-        layout.addLayout(text_col, 0)
-        layout.addStretch(1)
-        self.switch = SwitchButton(self)
-        self.switch.setChecked(bool(config_item.value))
-        self.switch.checkedChanged.connect(self._on_toggle)
-        layout.addWidget(self.switch)
-
-    def _on_toggle(self, checked):
-        config.set(self.config_item, bool(checked))
-
-    def refresh_row(self):
-        self.switch.setChecked(bool(self.config_item.value))
+from ui.component.compact_rows import (CompactRangeRow, CompactSwitchRow,
+                                       CompactComboRow, accent_color as _accent_color,
+                                       set_row_tooltip)
 
 
 class ThemeCard(SettingCard):
@@ -198,6 +54,8 @@ class AdvancedSettingInterface(ScrollArea):
         super().__init__(parent)
         self.parent = parent
         self.version_manager = VersionService()
+        # 语言切换需重启生效：记录启动时语言，切换时弹窗确认并一键重启
+        self._interface_at_init = config.interface.value
         self.__init_widgets()
 
     def __init_widgets(self):
@@ -214,7 +72,9 @@ class AdvancedSettingInterface(ScrollArea):
         self.setAttribute(QtCore.Qt.WA_StyledBackground)
 
         self._build_header()
+        self._build_general_group()
         self._build_detect_group()
+        self._build_performance_group()
         self._build_minimax_group()
         self._build_sttn_group()
         self._build_maintenance_group()
@@ -246,6 +106,37 @@ class AdvancedSettingInterface(ScrollArea):
 
     # ---------- 分组构建 ----------
 
+    def _build_general_group(self):
+        """通用：界面语言（切换弹窗确认 + 一键重启）"""
+        card, vbox, self._general_header = self._make_group(
+            tr['SubtitleExtractorGUI']['GroupGeneral'])
+        gui = tr['SubtitleExtractorGUI']
+        self.lang_row = self._add_row(vbox, CompactComboRow(
+            config.interface, gui['InterfaceLanguage'], gui['InterfaceLanguageDesc'],
+            texts=list(config.intefaceTexts.keys()),
+            values=list(config.intefaceTexts.values()),
+            on_user_changed=self._on_interface_changed,
+            icon=FluentIcon.LANGUAGE, parent=card))
+
+    def _build_performance_group(self):
+        """性能与长视频：硬件加速 + 长视频分段时长"""
+        card, vbox, self._perf_header = self._make_group(
+            tr['SubtitleExtractorGUI']['GroupPerformance'])
+        gui = tr['SubtitleExtractorGUI']
+        setting_tr = tr['Setting']
+        self.hw_row = self._add_row(vbox, CompactSwitchRow(
+            config.hardwareAcceleration, setting_tr['HardwareAcceleration'],
+            setting_tr['HardwareAccelerationDesc'],
+            icon=FluentIcon.SPEED_HIGH, parent=card))
+        if not HARDWARD_ACCELERATION_OPTION:
+            self.hw_row.switch.setEnabled(False)
+            self.hw_row.switch.setChecked(False)
+            self.hw_row.setToolTip(setting_tr['HardwareAccelerationNO'])
+            config.set(config.hardwareAcceleration, False)
+        self.segment_row = self._add_row(vbox, CompactRangeRow(
+            config.segmentMinutes, gui['SegmentMinutes'],
+            gui['SegmentMinutesDesc'], icon=FluentIcon.STOP_WATCH, parent=card))
+
     def _make_group(self, title):
         """一组：绿色分组标题 + 白卡容器（含行布局），返回 (card, vbox, header)"""
         header = StrongBodyLabel(title, self.scrollWidget)
@@ -264,39 +155,50 @@ class AdvancedSettingInterface(ScrollArea):
 
     def _build_detect_group(self):
         card, vbox, self._detect_header = self._make_group(tr['Setting']['SubtitleDetectionSetting'])
+        gui = tr['SubtitleExtractorGUI']
+        # 检测模型 + 残留二修（从主页迁移，非专家参数）
+        self.detect_model_row = self._add_row(vbox, CompactComboRow(
+            config.subtitleDetectMode, gui['SubtitleDetectMode'], gui['SubtitleDetectModeDesc'],
+            texts=[list(tr['SubtitleDetectMode'].values())[i]
+                   for i, _ in enumerate(config.subtitleDetectMode.validator.options)],
+            values=list(config.subtitleDetectMode.validator.options),
+            icon=FluentIcon.SEARCH, parent=card))
+        self.residue_row = self._add_row(vbox, CompactSwitchRow(
+            config.residueCheck, gui['ResidueCheck'], gui['ResidueCheckDesc'],
+            icon=FluentIcon.BROOM, parent=card))
         self.rows_detect = [
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleDetectProcessSize, tr['Setting']['SubtitleDetectProcessSize'],
-                tr['Setting']['SubtitleDetectProcessSizeDesc'])),
+                tr['Setting']['SubtitleDetectProcessSizeDesc'], icon=FluentIcon.FULL_SCREEN)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleDetectSampleStep, tr['Setting']['SubtitleDetectSampleStep'],
-                tr['Setting']['SubtitleDetectSampleStepDesc'])),
+                tr['Setting']['SubtitleDetectSampleStepDesc'], icon=FluentIcon.STOP_WATCH)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleTimelineForwardFrameCount, tr['Setting']['subtitleTimelineForwardFrameCount'],
-                tr['Setting']['subtitleTimelineForwardFrameCountDesc'])),
+                tr['Setting']['subtitleTimelineForwardFrameCountDesc'], icon=FluentIcon.MOVIE)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleTimelineBackwardFrameCount, tr['Setting']['SubtitleTimelineBackwardFrameCount'],
-                tr['Setting']['SubtitleTimelineBackwardFrameCountDesc'])),
+                tr['Setting']['SubtitleTimelineBackwardFrameCountDesc'], icon=FluentIcon.VIDEO)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleAreaDeviationPixel, tr['Setting']['SubtitleAreaDeviationPixel'],
-                tr['Setting']['SubtitleAreaDeviationPixelDesc'])),
+                tr['Setting']['SubtitleAreaDeviationPixelDesc'], icon=FluentIcon.ZOOM_IN)),
             self._add_row(vbox, CompactRangeRow(
                 config.autoRouteStaticThreshold, tr['Setting']['AutoRouteStaticThreshold'],
-                tr['Setting']['AutoRouteStaticThresholdDesc'])),
+                tr['Setting']['AutoRouteStaticThresholdDesc'], icon=FluentIcon.SYNC)),
         ]
         self.rows_detect_expert = [
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleYXAxisDifferencePixel, tr['Setting']['SubtitleYXAxisDifferencePixel'],
-                tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True)),
+                tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleAreaYAxisDifferencePixel, tr['Setting']['SubtitleAreaYAxisDifferencePixel'],
-                tr['Setting']['SubtitleAreaYAxisDifferencePixelDesc'], expert=True)),
+                tr['Setting']['SubtitleAreaYAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleAreaPixelToleranceYPixel, tr['Setting']['SubtitleAreaPixelToleranceYPixel'],
-                tr['Setting']['SubtitleAreaPixelToleranceYPixelDesc'], expert=True)),
+                tr['Setting']['SubtitleAreaPixelToleranceYPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
             self._add_row(vbox, CompactRangeRow(
                 config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
-                tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True)),
+                tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN)),
         ]
 
     def _build_minimax_group(self):
@@ -304,27 +206,27 @@ class AdvancedSettingInterface(ScrollArea):
         self.rows_minimax = [
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxMaxLoadNum, tr['Setting']['MiniMaxMaxLoadNum'],
-                tr['Setting']['MiniMaxMaxLoadNumDesc'])),
+                tr['Setting']['MiniMaxMaxLoadNumDesc'], icon=FluentIcon.CLOUD)),
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxNumInferenceSteps, tr['Setting']['MiniMaxNumInferenceSteps'],
-                tr['Setting']['MiniMaxNumInferenceStepsDesc'])),
+                tr['Setting']['MiniMaxNumInferenceStepsDesc'], icon=FluentIcon.HISTORY)),
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxBlockOverlap, tr['Setting']['MiniMaxBlockOverlap'],
-                tr['Setting']['MiniMaxBlockOverlapDesc'])),
+                tr['Setting']['MiniMaxBlockOverlapDesc'], icon=FluentIcon.LAYOUT)),
         ]
         self.rows_minimax_expert = [
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxIterations, tr['Setting']['MiniMaxIterations'],
-                tr['Setting']['MiniMaxIterationsDesc'], expert=True)),
+                tr['Setting']['MiniMaxIterationsDesc'], expert=True, icon=FluentIcon.SYNC)),
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxProcessWidth, tr['Setting']['MiniMaxProcessWidth'],
-                tr['Setting']['MiniMaxProcessWidthDesc'], expert=True)),
+                tr['Setting']['MiniMaxProcessWidthDesc'], expert=True, icon=FluentIcon.FIT_PAGE)),
             self._add_row(vbox, CompactRangeRow(
                 config.minimaxStripPadding, tr['Setting']['MiniMaxStripPadding'],
-                tr['Setting']['MiniMaxStripPaddingDesc'], expert=True)),
+                tr['Setting']['MiniMaxStripPaddingDesc'], expert=True, icon=FluentIcon.ALBUM)),
             self._add_row(vbox, CompactSwitchRow(
                 config.minimaxVaeDecodeFp32, tr['Setting']['MiniMaxVaeDecodeFp32'],
-                tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True)),
+                tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True, icon=FluentIcon.PALETTE)),
         ]
 
     def _build_sttn_group(self):
@@ -332,13 +234,13 @@ class AdvancedSettingInterface(ScrollArea):
         self.rows_sttn = [
             self._add_row(vbox, CompactRangeRow(
                 config.sttnNeighborStride, tr['Setting']['SttnNeighborStride'],
-                tr['Setting']['SttnNeighborStrideDesc'], expert=True)),
+                tr['Setting']['SttnNeighborStrideDesc'], expert=True, icon=FluentIcon.LINK)),
             self._add_row(vbox, CompactRangeRow(
                 config.sttnReferenceLength, tr['Setting']['SttnReferenceLength'],
-                tr['Setting']['SttnReferenceLengthDesc'], expert=True)),
+                tr['Setting']['SttnReferenceLengthDesc'], expert=True, icon=FluentIcon.LIBRARY)),
             self._add_row(vbox, CompactRangeRow(
                 config.sttnMaxLoadNum, tr['Setting']['SttnMaxLoadNum'],
-                tr['Setting']['SttnMaxLoadNumDesc'], expert=True)),
+                tr['Setting']['SttnMaxLoadNumDesc'], expert=True, icon=FluentIcon.CLOUD)),
         ]
         self.sttn_card = card
 
@@ -385,8 +287,11 @@ class AdvancedSettingInterface(ScrollArea):
     # ---------- 恢复默认 ----------
 
     def _on_restore_defaults(self):
+        moved_rows = [self.lang_row, self.detect_model_row,
+                      self.residue_row, self.hw_row, self.segment_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
-            len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn)
+            len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \
+            len(moved_rows)
         msg = MessageBox(
             tr['Setting']['RestoreDefaultsTitle'],
             tr['Setting']['RestoreDefaultsContent'].format(total),
@@ -396,7 +301,8 @@ class AdvancedSettingInterface(ScrollArea):
         if not msg.exec():
             return
         all_rows = (self.rows_detect + self.rows_detect_expert +
-                    self.rows_minimax + self.rows_minimax_expert + self.rows_sttn)
+                    self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
+                    moved_rows)
         for row in all_rows:
             config.set(row.config_item, row.config_item.defaultValue)
             row.refresh_row()
@@ -404,6 +310,30 @@ class AdvancedSettingInterface(ScrollArea):
             tr['Setting']['RestoreDefaultsTitle'],
             tr['Setting']['RestoreDone'].format(total),
             duration=2500, parent=self.window())
+
+    # ---------- 语言切换（从主页迁移） ----------
+
+    def _on_interface_changed(self):
+        """语言切换：弹窗确认并一键重启（配置已写盘，重启后按新语言加载界面）"""
+        if config.interface.value == self._interface_at_init:
+            return
+        gui = tr['SubtitleExtractorGUI']
+        box = MessageBox(gui['RestartRequiredTitle'], gui['RestartRequiredContent'], self.window())
+        box.yesButton.setText(gui['RestartNow'])
+        box.cancelButton.setText(gui['RestartLater'])
+        if box.exec():
+            self._restart_app()
+
+    def _restart_app(self):
+        """启动新进程后退出当前进程（优先用 pythonw，避免重启后出现黑窗）"""
+        exe = sys.executable
+        if exe.lower().endswith('python.exe'):
+            pythonw = os.path.join(os.path.dirname(exe), 'pythonw.exe')
+            if os.path.exists(pythonw):
+                exe = pythonw
+        root_dir = os.path.dirname(BASE_DIR)
+        subprocess.Popen([exe, os.path.join(root_dir, 'gui.py')], cwd=root_dir)
+        QtWidgets.QApplication.quit()
 
     # ---------- 保存目录 / 环境自检（保持原逻辑） ----------
 

@@ -7,15 +7,16 @@ import torch
 import threading
 import multiprocessing
 import traceback
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
-from PySide6.QtCore import Slot, QRect, Signal
+from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget,
+                               QPlainTextEdit, QFrame)
+from PySide6.QtCore import Slot, QRect, Signal, Qt
 from PySide6 import QtWidgets
 from datetime import datetime
 from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
-from ui.setting_interface import SettingInterface
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.task_list_component import TaskListComponent, TaskStatus, TaskOptions
 from ui.component.gpu_monitor_bar import GpuMonitorBar
+from ui.component.compact_rows import CompactComboRow
 from ui.icon.my_fluent_icon import MyFluentIcon
 from backend.config import config, tr
 from backend.tools.constant import InpaintMode
@@ -141,15 +142,26 @@ class HomeInterface(QWidget):
         right_layout = QVBoxLayout()
         right_layout.setSpacing(10)
 
-        # GPU 监控卡片（SeedVR2 风格）：处理模型上方
-        self.gpu_monitor_bar = GpuMonitorBar(self)
-        right_layout.addWidget(self.gpu_monitor_bar)
-
-        # 设置容器
-        settings_container = CardWidget(self)
-        self.setting_interface = SettingInterface(settings_container)
-        settings_container.setLayout(self.setting_interface)
-        right_layout.addWidget(settings_container)
+        # 系统状态卡：GPU/内存监控 + 处理模型（主页唯一设置项，其余在「设置」页）
+        status_card = CardWidget(self)
+        status_lay = QVBoxLayout(status_card)
+        status_lay.setContentsMargins(0, 0, 0, 0)
+        status_lay.setSpacing(0)
+        self.gpu_monitor_bar = GpuMonitorBar(self, framed=False)
+        status_lay.addWidget(self.gpu_monitor_bar)
+        sep = QFrame(status_card)
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: rgba(128,128,128,0.35);")
+        status_lay.addWidget(sep)
+        gui_tr = tr['SubtitleExtractorGUI']
+        self.model_row = CompactComboRow(
+            config.inpaintMode, gui_tr['InpaintMode'], gui_tr['InpaintModeDesc'],
+            texts=[list(tr['InpaintMode'].values())[i]
+                   for i, _ in enumerate(config.inpaintMode.validator.options)],
+            values=list(config.inpaintMode.validator.options),
+            icon=FluentIcon.ROBOT, parent=status_card)
+        status_lay.addWidget(self.model_row)
+        right_layout.addWidget(status_card)
         
         # 添加任务列表容器
         task_list_container = CardWidget(self)
@@ -810,14 +822,14 @@ class HomeInterface(QWidget):
         if self._saved_inpaint_mode is None:
             self._saved_inpaint_mode = config.inpaintMode.value
         config.set(config.inpaintMode, InpaintMode.LAMA)
-        self.setting_interface.set_inpaint_mode_enabled(False)
+        self.model_row.combo.setEnabled(False)
 
     def _unlock_inpaint_mode(self):
         """视频模式恢复用户原始的 inpaint 模式选择"""
         if self._saved_inpaint_mode is not None:
             config.set(config.inpaintMode, self._saved_inpaint_mode)
             self._saved_inpaint_mode = None
-        self.setting_interface.set_inpaint_mode_enabled(True)
+        self.model_row.combo.setEnabled(True)
         self.video_slider.setValue(1)
         self.video_display_component.set_dragger_enabled(True)
         return True

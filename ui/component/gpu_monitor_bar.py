@@ -86,12 +86,14 @@ def _value_label():
 class GpuMonitorBar(QWidget):
     """GPU 监控单行卡：显存+内存 同行（静态色块 + 数字/占比/温度）"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, framed=True):
         super().__init__(parent)
         # 普通 QWidget 默认不画样式表背景，必须开启才能呈现整块卡片底色/边框
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFixedHeight(36)
         self.setMinimumWidth(260)  # 允许窄窗口下收缩（文本省略），不与预览争宽度
+        # framed=False：嵌入外层卡片（与处理模型同卡），不画自带底色/边框
+        self._framed = framed
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 4, 14, 4)
@@ -125,14 +127,17 @@ class GpuMonitorBar(QWidget):
 
     def _apply_theme(self):
         c = _theme_colors()
-        # 用 ID 选择器只给卡片本体画底色/边框，子控件（标签/数字）不带任何框
-        self.setObjectName("gpuMonitorBar")
-        self.setStyleSheet(
-            f"QWidget#gpuMonitorBar {{ background:{c['card']}; border:1px solid {c['border']}; border-radius:8px; }}")
         self.vram_tag.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
         self.ram_tag.setStyleSheet(f"color:{c['muted']}; font-size:11px;")
         self.vram_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
         self.ram_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
+        if not self._framed:
+            self.setStyleSheet("background: transparent; border: none;")
+            return
+        # 用 ID 选择器只给卡片本体画底色/边框，子控件（标签/数字）不带任何框
+        self.setObjectName("gpuMonitorBar")
+        self.setStyleSheet(
+            f"QWidget#gpuMonitorBar {{ background:{c['card']}; border:1px solid {c['border']}; border-radius:8px; }}")
 
     def update_stats(self, s):
         vram_ratio = s['vram_used'] / max(s['vram_total'], 1)
