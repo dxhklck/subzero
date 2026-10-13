@@ -7,8 +7,7 @@ import torch
 import threading
 import multiprocessing
 import traceback
-from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget,
-                               QPlainTextEdit, QFrame)
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
 from PySide6.QtCore import Slot, QRect, Signal, Qt
 from PySide6 import QtWidgets
 from datetime import datetime
@@ -142,17 +141,14 @@ class HomeInterface(QWidget):
         right_layout = QVBoxLayout()
         right_layout.setSpacing(10)
 
-        # 系统状态卡：GPU/内存监控 + 处理模型（主页唯一设置项，其余在「设置」页）
+        # 系统状态卡：显存/内存监控 + 处理模型，同一张卡内连续三行（无分隔线）
         status_card = CardWidget(self)
         status_lay = QVBoxLayout(status_card)
         status_lay.setContentsMargins(0, 0, 0, 0)
         status_lay.setSpacing(0)
         self.gpu_monitor_bar = GpuMonitorBar(self)
         status_lay.addWidget(self.gpu_monitor_bar)
-        sep = QFrame(status_card)
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: rgba(128,128,128,0.35);")
-        status_lay.addWidget(sep)
+        status_lay.addSpacing(2)
         gui_tr = tr['SubtitleExtractorGUI']
         self.model_row = CompactComboRow(
             config.inpaintMode, gui_tr['InpaintMode'], gui_tr['InpaintModeDesc'],
