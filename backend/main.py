@@ -474,8 +474,18 @@ class SubtitleRemover:
             return
         self.append_output(tr['Main']['ResidueCheckStart'])
         t0 = time.time()
-        detector = SubtitleDetect(self.video_temp_file.name, self.sub_areas)
-        sub_list = detector.find_subtitle_frame_no()
+        # 盲区补查：二遍用与第一遍不同的检测参数——960长边（检测模型内部的原生分辨率，
+        # 与第一遍720长边「缩小→模型内部放大」的插值路径不同）。同参数两遍检测的漏检
+        # 高度相关（同一图同一缩放路径会同样漏），换参数才有独立的捕获概率；
+        # 残留是持续烘焙在每帧上的，采样密度对检出影响小，换分辨率才是关键。
+        # 仅改内存值，不写盘（item.value= 不触发 qconfig 保存）
+        old_size = config.subtitleDetectProcessSize.value
+        try:
+            config.subtitleDetectProcessSize.value = 960
+            detector = SubtitleDetect(self.video_temp_file.name, self.sub_areas)
+            sub_list = detector.find_subtitle_frame_no()
+        finally:
+            config.subtitleDetectProcessSize.value = old_size
         if len(sub_list) == 0:
             self.append_output(tr['Main']['ResidueCheckClean'].format(round(time.time() - t0)))
             del detector
