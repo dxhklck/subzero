@@ -61,19 +61,19 @@ class Config(QConfig):
 
     # 【设置像素点偏差】
     # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)
-    subtitleYXAxisDifferencePixel = RangeConfigItem("Main", "SubtitleYXAxisDifferencePixel", 10, RangeValidator(0, 300))
+    subtitleYXAxisDifferencePixel = RangeConfigItem("Main", "SubtitleYXAxisDifferencePixel", 10, RangeValidator(0, 100))
     # 用于放大mask大小，防止自动检测的文本框过小，inpaint阶段出现文字边，有残留
-    subtitleAreaDeviationPixel = RangeConfigItem("Main", "SubtitleAreaDeviationPixel", 10, RangeValidator(1, 300))
+    subtitleAreaDeviationPixel = RangeConfigItem("Main", "SubtitleAreaDeviationPixel", 10, RangeValidator(1, 80))
     # 同于判断两个文本框是否为同一行字幕，高度差距指定像素点以内认为是同一行
-    subtitleAreaYAxisDifferencePixel = RangeConfigItem("Main", "SubtitleAreaYAxisDifferencePixel", 20, RangeValidator(0, 300))
+    subtitleAreaYAxisDifferencePixel = RangeConfigItem("Main", "SubtitleAreaYAxisDifferencePixel", 20, RangeValidator(0, 100))
     # 用于判断两个字幕文本的矩形框是否相似，如果X轴和Y轴偏差都在指定阈值内，则认为时同一个文本框
-    subtitleAreaPixelToleranceYPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceYPixel", 20, RangeValidator(0, 300))
-    subtitleAreaPixelToleranceXPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceXPixel", 20, RangeValidator(0, 300))
-    subtitleTimelineBackwardFrameCount = RangeConfigItem("Main", "SubtitleTimelineBackwardFrameCount", 3, RangeValidator(0, 300))
-    subtitleTimelineForwardFrameCount = RangeConfigItem("Main", "subtitleTimelineForwardFrameCount", 3, RangeValidator(0, 300))
+    subtitleAreaPixelToleranceYPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceYPixel", 20, RangeValidator(0, 100))
+    subtitleAreaPixelToleranceXPixel = RangeConfigItem("Main", "SubtitleAreaPixelToleranceXPixel", 20, RangeValidator(0, 100))
+    subtitleTimelineBackwardFrameCount = RangeConfigItem("Main", "SubtitleTimelineBackwardFrameCount", 3, RangeValidator(0, 30))
+    subtitleTimelineForwardFrameCount = RangeConfigItem("Main", "subtitleTimelineForwardFrameCount", 3, RangeValidator(0, 30))
     # 字幕检测采样步长：0 = 按视频帧率自适应（默认，30fps以上每3帧、60fps以上每4帧）；>0 = 固定每N帧采样一次
     # 字幕通常持续0.5秒以上，采样步长放宽可线性减少OCR调用次数
-    subtitleDetectSampleStep = RangeConfigItem("Main", "SubtitleDetectSampleStep", 0, RangeValidator(0, 30))
+    subtitleDetectSampleStep = RangeConfigItem("Main", "SubtitleDetectSampleStep", 0, RangeValidator(0, 10))
     # 字幕检测前的降采样上限（长边像素）：0 = 原分辨率；帧长边超过该值时先等比缩小再送OCR，检测框按比例映射回原分辨率
     # 注意：PP-OCRv5 检测模型内部本就把长边钳制到960（inference.yml DetResizeForTest），因此：
     #   >=960 等于无操作（零收益零风险）；设为720 可让模型跳过内部缩放，OCR 实测快约40%
@@ -83,7 +83,7 @@ class Config(QConfig):
     # 低于该值判为静态画面走 LAMA（0.09s/帧，静态背景≈无损），不低于则走 MiniMax（按MiniMax参数组）
     # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
     # 想更激进可调大（3.0约一半区间走LAMA，5.0约九成——运动区间用LAMA会糊，按素材质量容忍度权衡）
-    autoRouteStaticThreshold = RangeConfigItem("Main", "AutoRouteStaticThreshold", 1, RangeValidator(0, 20))
+    autoRouteStaticThreshold = RangeConfigItem("Main", "AutoRouteStaticThreshold", 1, RangeValidator(0, 10))
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
@@ -113,9 +113,9 @@ class Config(QConfig):
     #     ⚠ 实际批大小 = max(MaxLoadNum, NeighborStride×ReferenceLength)——ReferenceLength=100
     #     会把批量顶到 3000 帧，被 VRAM 自动钳制前先撑爆内存，建议 10~30
     #   MaxLoadNum=50    每个处理块的帧数；sttn_auto_inpaint 已有 VRAM 自适应钳制，OOM 风险低
-    sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(1, 100))
+    sttnNeighborStride = RangeConfigItem("Sttn", "NeighborStride", 5, RangeValidator(1, 20))
     # 参考帧数量
-    sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 100))
+    sttnReferenceLength = RangeConfigItem("Sttn", "ReferenceLength", 10, RangeValidator(1, 30))
     # 设置STTN算法最大同时处理的帧数量
     sttnMaxLoadNum = RangeConfigItem("Sttn", "MaxLoadNum", 50, RangeValidator(1, 300))
     getSttnMaxLoadNum = lambda self: max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
@@ -124,7 +124,7 @@ class Config(QConfig):
     # 【根据自己的GPU显存大小设置】最大同时处理的图片数量，设置越大处理效果越好，但是要求显存越高
     # 1280x720p视频设置80需要25G显存，设置50需要19G显存
     # 720x480p视频设置80需要8G显存，设置50需要7G显存
-    propainterMaxLoadNum = RangeConfigItem("ProPainter", "MaxLoadNum", 70, RangeValidator(1, 300))
+    propainterMaxLoadNum = RangeConfigItem("ProPainter", "MaxLoadNum", 70, RangeValidator(1, 150))
 
     # 以下参数仅适用MINIMAX算法时，才生效
     # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
@@ -134,9 +134,9 @@ class Config(QConfig):
     minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 201))
     # 去噪步数：A/B 实测（720p全帧）12→8 步仅慢 13% 时省 13%、与12步画质肉眼无差异（最大像素差18/255）；
     # 480p 等小分辨率下步数近似线性影响速度。8 为画质/速度平衡点，追求极限画质可设 12
-    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 30))
+    minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 20))
     # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
-    minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 20))
+    minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 12))
     # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
     # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
     # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
@@ -147,7 +147,7 @@ class Config(QConfig):
     # 块间重叠帧数：视频按 chunk(4k+1帧) 分块推理，块边界处潜空间不连续可能出现闪烁/接缝；
     # 相邻块重叠这么多帧并线性加权混合可消除接缝；0 = 关闭（省推理时间）
     # 开销：总推理帧数变为 chunk/(chunk-重叠)，81帧块重叠8约多花11%时间
-    minimaxBlockOverlap = RangeConfigItem("MiniMax", "BlockOverlap", 8, RangeValidator(0, 32))
+    minimaxBlockOverlap = RangeConfigItem("MiniMax", "BlockOverlap", 8, RangeValidator(0, 20))
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())

@@ -8,6 +8,7 @@ from PySide6.QtCore import QThread, Signal, Qt
 from qfluentwidgets import isDarkTheme, qconfig
 
 from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
+from backend.config import tr
 
 VRAM_C = "#9B7BF7"
 RAM_C = "#2ECC71"
@@ -97,11 +98,11 @@ class GpuMonitorBar(QWidget):
         lay.setSpacing(8)
 
         # 显存段
-        self.vram_tag = QLabel("显存")
+        self.vram_tag = QLabel(tr["Setting"]["VramTag"])
         self.vram_chip = _chip(VRAM_C)
         self.vram_label = _value_label()
         # 内存段
-        self.ram_tag = QLabel("内存")
+        self.ram_tag = QLabel(tr["Setting"]["RamTag"])
         self.ram_chip = _chip(RAM_C)
         self.ram_label = _value_label()
 

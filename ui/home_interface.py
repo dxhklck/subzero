@@ -114,7 +114,7 @@ class HomeInterface(QWidget):
         # 双标签：日志（格式化输出）/ 监控（原控制台原始输出，含 tqdm 进度）
         self.log_tabs = QTabWidget(output_container)
         self.log_tabs.setDocumentMode(True)
-        self.log_tabs.addTab(self.output_text, "日志")
+        self.log_tabs.addTab(self.output_text, tr["Setting"]["LogTab"])
 
         self.console_text = QPlainTextEdit()
         self.console_text.setReadOnly(True)
@@ -122,7 +122,7 @@ class HomeInterface(QWidget):
         self.console_text.setStyleSheet(
             "QPlainTextEdit { background:#101010; color:#C8C8C8;"
             "font-family:'Consolas'; font-size:11px; border:none; }")
-        self.log_tabs.addTab(self.console_text, "监控")
+        self.log_tabs.addTab(self.console_text, tr["Setting"]["MonitorTab"])
         output_layout.addWidget(self.log_tabs)
         output_container.setLayout(output_layout)
         left_layout.addWidget(output_container)

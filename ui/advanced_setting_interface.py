@@ -22,7 +22,8 @@ class ThemeCard(SettingCard):
     def __init__(self, title, content, parent=None):
         super().__init__(FluentIcon.BRUSH, title, content, parent)
         self._btns = {}
-        for key, text in [("light", "浅色"), ("dark", "深色"), ("auto", "跟随系统")]:
+        for key, text in [("light", tr["Setting"]["ThemeLight"]), ("dark", tr["Setting"]["ThemeDark"]),
+                          ("auto", tr["Setting"]["ThemeAuto"])]:
             rb = RadioButton(text, self)
             rb.setChecked(config.appTheme.value == key)
             # clicked 仅用户点击时触发（程序 setChecked 不触发），避免初始化回写
@@ -118,11 +119,11 @@ class AdvancedSettingInterface(ScrollArea):
         # 通用设置组
         self.advanced_group = SettingCardGroup(tr["Setting"]["AdvancedSetting"], self.scrollWidget)
         # 外观设置组
-        self.appearance_group = SettingCardGroup("外观", self.scrollWidget)
+        self.appearance_group = SettingCardGroup(tr["Setting"]["AppearanceSetting"], self.scrollWidget)
 
         self.theme_card = ThemeCard(
-            "应用主题",
-            "浅色 / 深色 / 跟随系统（主色固定为青绿），点击即刻生效",
+            tr["Setting"]["AppTheme"],
+            tr["Setting"]["AppThemeDesc"],
             parent=self.appearance_group
         )
         
@@ -306,10 +307,10 @@ class AdvancedSettingInterface(ScrollArea):
 
         # 环境自检（运行时/GPU/驱动/依赖/权重，缺失权重可一键下载）
         self.env_check_card = PushSettingCard(
-            text="立即自检",
+            text=tr["Setting"]["EnvCheckBtn"],
             icon=FluentIcon.SYNC,
-            title="环境自检",
-            content="检查 Python / GPU / 驱动 / 依赖 / 模型权重完整性，缺失权重支持自动下载",
+            title=tr["Setting"]["EnvCheck"],
+            content=tr["Setting"]["EnvCheckDesc"],
             parent=self.advanced_group
         )
         self.env_check_card.clicked.connect(self.run_env_check)
@@ -336,7 +337,7 @@ class AdvancedSettingInterface(ScrollArea):
 
     def run_env_check(self):
         """后台执行环境自检"""
-        self.env_check_card.setContent("正在自检环境，请稍候...")
+        self.env_check_card.setContent(tr["Setting"]["EnvCheckRunning"])
         TaskExecutor.runTask(lambda: check_all()).then(self.on_env_checked)
 
     def on_env_checked(self, payload):
@@ -345,24 +346,31 @@ class AdvancedSettingInterface(ScrollArea):
         report = '\n'.join(lines)
         for line in lines:
             self._env_log(line)
-        self.env_check_card.setContent("全部通过 ✅" if not missing else f"发现 {len(missing)} 项缺失权重，详见日志")
+        self.env_check_card.setContent(
+            f'{tr["Setting"]["EnvCheckPass"]} ✅' if not missing
+            else tr["Setting"]["EnvCheckMissing"].format(len(missing)))
 
         if missing:
             n_dl = sum(1 for m in missing if m.get('sources'))
-            msg = report + f"\n\n缺失权重 {len(missing)} 项"
+            msg = report + f"\n\n{tr['Setting']['EnvCheckMissingSummary'].format(len(missing))}"
             if n_dl:
-                msg += f"，其中 {n_dl} 项可自动下载（大文件支持断点续传）"
-            msg += "\n是否立即下载？"
-            w = MessageBox("环境自检", msg, self.window())
+                msg += f"，{tr['Setting']['EnvCheckDownloadable'].format(n_dl)}"
+            msg += f"\n{tr['Setting']['EnvCheckAskDownload']}"
+            w = MessageBox(tr["Setting"]["EnvCheck"], msg, self.window())
             if w.exec():
-                self.env_check_card.setContent("正在下载缺失权重...")
+                self.env_check_card.setContent(tr["Setting"]["EnvCheckDownloading"])
                 TaskExecutor.runTask(lambda: fix_weights(missing, log=self._env_log)).then(self.on_weights_fixed)
         else:
-            InfoBar.success("环境自检", "全部通过，可以正常使用", duration=2500, parent=self.window())
+            InfoBar.success(tr["Setting"]["EnvCheck"], tr["Setting"]["EnvCheckAllGood"],
+                            duration=2500, parent=self.window())
 
     def on_weights_fixed(self, payload):
         fixed, manual = payload
         if manual:
-            self._env_log(f"⚠ {len(manual)} 项无自动下载源，请按 README 手动获取: {', '.join(manual)}")
-        self.env_check_card.setContent(f"下载完成 ✅（{len(fixed)} 项自动修复）" if fixed else "请按日志提示手动补齐")
-        InfoBar.success("环境自检", f"权重修复完成：自动下载 {len(fixed)} 项", duration=2500, parent=self.window())
+            self._env_log(f"⚠ {tr['Setting']['EnvCheckNoSource'].format(len(manual), ', '.join(manual))}")
+        self.env_check_card.setContent(
+            f'{tr["Setting"]["EnvCheckDownloadDone"].format(len(fixed))} ✅' if fixed
+            else tr["Setting"]["EnvCheckManualHint"])
+        InfoBar.success(tr["Setting"]["EnvCheck"],
+                        tr["Setting"]["EnvCheckRepaired"].format(len(fixed)),
+                        duration=2500, parent=self.window())

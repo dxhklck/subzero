@@ -183,7 +183,7 @@ class TaskListComponent(QWidget):
         layout.addWidget(self.table, 1)
 
         # 底部拖入提示
-        hint = QLabel("拖入单个或多个视频文件")
+        hint = QLabel(tr["Setting"]["DropHint"])
         hint.setAlignment(Qt.AlignCenter)
         hint.setStyleSheet("color:#A9A8A0; font-size:11px; border:1px dashed #5F5E5A;"
                            "border-radius:6px; margin:6px 10px 8px 10px; padding:5px;")
