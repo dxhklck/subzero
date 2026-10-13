@@ -141,11 +141,6 @@ class CompactSwitchRow(QFrame):
         self._title_label = StrongBodyLabel(title, self)
         self._title_label.setStyleSheet('font-size: 13px;')
         title_row.addWidget(self._title_label)
-        if expert:
-            badge = CaptionLabel(tr['Setting']['ExpertBadge'], self)
-            badge.setStyleSheet(
-                'color:#854F0B; background:#FAEEDA; border-radius:7px; padding:0 7px; font-size:10px;')
-            title_row.addWidget(badge)
         title_row.addStretch(1)
         layout.addLayout(title_row, 1)
         self.switch = SwitchButton(self)
@@ -215,24 +210,25 @@ class CompactComboRow(QFrame):
 class CompactParamRow(QFrame):
     """一行多个参数簇：水平均分（参照设计稿一行多参数的紧凑布局）。
 
-    传入若干 CompactRangeRow / CompactSwitchRow / CompactComboRow，
-    每个簇等宽伸展；行内的「已修改」标记等行为不受影响。
-    columns 指定本行列数（如四列布局传 4）；参数不足时用透明占位补齐，
-    保证与同组其他行的列对齐。
+    items 可为行组件，或 (行组件, 跨列数) 元组（如四列布局中末项跨两列）；
+    columns 指定本行总列数，不足部分用透明占位补齐，保证同组各行列对齐。
     """
 
-    def __init__(self, *rows, columns=None, parent=None):
+    def __init__(self, *items, columns=None, parent=None):
         super().__init__(parent)
-        self.rows = list(rows)
+        self.rows = [it[0] if isinstance(it, tuple) else it for it in items]
         self.setAttribute(Qt.WA_StyledBackground)
         self.setStyleSheet('CompactParamRow { background: transparent; }')
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 0, 6, 0)
         lay.setSpacing(16)
-        for r in rows:
-            lay.addWidget(r, 1)
-        pad = max(0, (columns if columns is not None else len(rows)) - len(rows))
-        for _ in range(pad):
+        used = 0
+        for it in items:
+            row, span = it if isinstance(it, tuple) else (it, 1)
+            lay.addWidget(row, span)
+            used += span
+        cols = columns if columns is not None else used
+        for _ in range(max(0, cols - used)):
             spacer = QFrame(self)
             spacer.setStyleSheet('background: transparent;')
             lay.addWidget(spacer, 1)
@@ -274,6 +270,26 @@ class CompactActionRow(QFrame):
         lab.setFixedWidth(width)
         self.layout_row.addWidget(lab, 0)
         return lab
+
+    def add_path_label(self, width=420):
+        """右侧路径标签：中段省略显示，配合 set_path 使用（右对齐贴近按钮）"""
+        lab = CaptionLabel('', self)
+        lab.setFixedWidth(width)
+        lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._path_label = lab
+        self._path_width = width
+        self.layout_row.addWidget(lab, 0)
+        return lab
+
+    def set_path(self, path):
+        """路径中段省略显示（保留盘符与末级目录），完整路径挂 tooltip"""
+        if not hasattr(self, '_path_label'):
+            return
+        if not path:
+            path = tr['Setting']['SaveDirectoryDefault']
+        fm = self._path_label.fontMetrics()
+        self._path_label.setText(fm.elidedText(path, Qt.ElideMiddle, self._path_width - 8))
+        self._path_label.setToolTip(path)
 
     def add_button(self, text, on_click=None, width=84):
         btn = PushButton(text, self)

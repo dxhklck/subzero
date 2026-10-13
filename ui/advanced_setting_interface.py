@@ -216,25 +216,23 @@ class AdvancedSettingInterface(ScrollArea):
         vbox.addWidget(CompactParamRow(self.lang_row, self.hw_row,
                                        self.segment_row, self.update_row, columns=4))
 
-        # 外观并入：应用主题（浅色/深色/跟随系统下拉，点击即生效）
+        # 四列网格：主题 | 环境自检 | 保存目录（跨两列，路径中段省略，悬停看全路径）
         self.theme_row = CompactComboRow(
             config.appTheme, st['AppTheme'], st['AppThemeDesc'],
             texts=[st['ThemeLight'], st['ThemeDark'], st['ThemeAuto']],
             values=['light', 'dark', 'auto'],
             icon=FluentIcon.BRUSH, parent=card)
-        # 保存目录：当前路径挂 tooltip（小字说明改悬停提示）
-        self.save_dir_row = CompactActionRow(
-            st['SaveDirectory'], st['SaveDirectoryDefault'],
-            icon=FluentIcon.DOWNLOAD, parent=card)
-        self.save_dir_row.add_button(st['ChooseDirectory'], on_click=self.choose_save_directory)
-        self._update_save_dir_tip()
-        # 环境自检：说明挂 tooltip，行内仅保留状态与按钮
         self.env_row = CompactActionRow(
             st['EnvCheck'], st['EnvCheckDesc'], icon=FluentIcon.SYNC, parent=card)
-        self.env_status = self.env_row.add_status_label(width=96)
+        self.env_status = self.env_row.add_status_label(width=72)
         self.env_row.add_button(st['EnvCheckBtn'], on_click=self.run_env_check)
-        vbox.addWidget(CompactParamRow(self.theme_row, self.save_dir_row,
-                                       self.env_row, columns=4))
+        self.save_dir_row = CompactActionRow(
+            st['SaveDirectory'], '', icon=FluentIcon.DOWNLOAD, parent=card)
+        self.save_dir_row.add_path_label(width=330)
+        self.save_dir_row.add_button(st['ChooseDirectory'], on_click=self.choose_save_directory)
+        self._update_save_dir_display()
+        vbox.addWidget(CompactParamRow(self.theme_row, self.env_row,
+                                       (self.save_dir_row, 2), columns=4))
 
         # 关于并入：版权与版本直接作为行标题显示（原 tooltip 内容），按钮即检查更新
         self.copyright_row = CompactActionRow(
@@ -250,14 +248,15 @@ class AdvancedSettingInterface(ScrollArea):
                 icon=FluentIcon.GITHUB, parent=card)
             self.project_row.add_button(st['ProjectLinkOpen'],
                                         on_click=lambda: QDesktopServices.openUrl(QUrl(PROJECT_HOME_URL)))
-            vbox.addWidget(CompactParamRow(self.copyright_row, self.project_row, columns=4))
+            vbox.addWidget(CompactParamRow(self.copyright_row, self.project_row, columns=2))
         else:
-            vbox.addWidget(CompactParamRow(self.copyright_row, columns=4))
+            vbox.addWidget(CompactParamRow(self.copyright_row, columns=2))
 
-    def _update_save_dir_tip(self):
-        """保存目录 tooltip：显示当前实际输出位置"""
-        tip = config.saveDirectory.value or tr['Setting']['SaveDirectoryDefault']
-        self.save_dir_row.set_desc(tip)
+    def _update_save_dir_display(self):
+        """保存目录行内显示当前文件夹；整行 tooltip 同步为实际路径"""
+        path = config.saveDirectory.value or tr['Setting']['SaveDirectoryDefault']
+        self.save_dir_row.set_path(path)
+        self.save_dir_row.set_desc(path)
 
     # ---------- 恢复默认 ----------
 
@@ -320,7 +319,7 @@ class AdvancedSettingInterface(ScrollArea):
         if not folder:
             folder = ""
         config.set(config.saveDirectory, folder)
-        self._update_save_dir_tip()
+        self._update_save_dir_display()
 
     def _env_log(self, text):
         """把自检/下载日志写进主界面日志窗"""
