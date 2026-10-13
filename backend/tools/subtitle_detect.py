@@ -67,17 +67,24 @@ class SubtitleDetect:
             enable_hpi=len(onnx_providers) > 0,
         )
 
+    # 检测模型内部的原生长边钳制值（inference.yml DetResizeForTest resize_long=960）。
+    # 模型只在长边超过 960 时才缩小、不会放大（实测 720 输入不触发内部缩放且更快），
+    # 因此长边 <= 960 的源始终按实际分辨率检测——预处理缩小是纯画质损失换不来收益
+    NATIVE_LONG_SIDE = 960
+
     def _prepare_for_detection(self, img):
         """按配置的长边上限等比缩小待检测帧，返回 (缩小后的帧, 坐标还原倍数)。
         倍数为1表示未缩小；检测框坐标需乘该倍数映射回原分辨率。
-        注意：检测模型内部本就把长边钳制到960，因此上限>=960时等于无操作；
-        设为720可让模型跳过内部缩放从而提速（竖屏视频按长边缩放才有效）。"""
+        规则：
+        - 实际长边 <= 960（模型原生上限）：始终按实际分辨率，不缩不放
+        - 设定值 >= 960：等于无操作（模型内部本就会钳到 960）
+        - 仅当实际长边 > 960 且 > 设定值时，等比缩小到设定值（可跳过模型内部缩放提速）"""
         limit = config.subtitleDetectProcessSize.value
-        if not limit or limit <= 0:
+        if not limit or limit >= self.NATIVE_LONG_SIDE:
             return img, 1.0
         h, w = img.shape[:2]
         long_side = max(h, w)
-        if long_side <= limit:
+        if long_side <= limit or long_side <= self.NATIVE_LONG_SIDE:
             return img, 1.0
         scale = long_side / float(limit)
         if w >= h:
