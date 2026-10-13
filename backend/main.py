@@ -194,6 +194,70 @@ class SubtitleRemover:
         self.append_output(f'[Route] 区间 {start}-{end}: 帧差均值 {avg:.2f} (阈值 {threshold}) -> {tag}')
         return model, batch_size
 
+    @staticmethod
+    def _bbox_union(boxes):
+        return (min(b[0] for b in boxes), max(b[1] for b in boxes),
+                min(b[2] for b in boxes), max(b[3] for b in boxes))
+
+    @staticmethod
+    def _bbox_iou(a, b):
+        ix = min(a[1], b[1]) - max(a[0], b[0])
+        iy = min(a[3], b[3]) - max(a[2], b[2])
+        if ix <= 0 or iy <= 0:
+            return 0.0
+        inter = ix * iy
+        area_a = (a[1] - a[0]) * (a[3] - a[2])
+        area_b = (b[1] - b[0]) * (b[3] - b[2])
+        return inter / float(area_a + area_b - inter)
+
+    def _group_interval_masks(self, start, end, sub_list, iou_threshold=0.5):
+        """把区间 [start,end] 按帧间字幕框变化切成连续小组。
+
+        背景：此前每个区间只用一张「整区间并集mask」——运动镜头下字幕扫过的大片背景
+        都会被圈进mask重绘（糊）。分组后每组mask只覆盖本组的实际字幕范围：
+        只修需要的区域，推理面积更小，未覆盖的好背景原样保留。
+
+        规则：
+        - 帧框先过与非字幕过滤（高瘦误检，与主链路同一规则）
+        - 帧并集框与当前组的运行并集 IoU>=iou_threshold 则并入本组，否则另开新组
+        - 无框帧（时间线扩展产生的淡出帧）：组间空隙对半分给相邻两组，
+          首组向前扩到区间头、末组向后扩到区间尾，保证区间内每帧恰好属于一组
+
+        返回 [(g_start, g_end, coords), ...]；coords 为组内全部有效框，
+        coords 为空表示整组帧都无有效检测框（直接写原帧即可）
+        """
+        limit = config.subtitleYXAxisDifferencePixel.value
+        groups = []  # [g_start, g_end, coords(list), 运行并集]
+        for f in range(start, end + 1):
+            boxes = []
+            for area in sub_list.get(f, []):
+                xmin, xmax, ymin, ymax = area
+                if (ymax - ymin) - (xmax - xmin) > limit:
+                    continue
+                if area not in boxes:
+                    boxes.append(area)
+            if not boxes:
+                continue
+            ub = self._bbox_union(boxes)
+            if groups and self._bbox_iou(ub, groups[-1][3]) >= iou_threshold:
+                g = groups[-1]
+                g[1] = f
+                g[3] = self._bbox_union([g[3], ub])
+                g[2].extend(boxes)
+            else:
+                groups.append([f, f, list(boxes), ub])
+        if not groups:
+            return [(start, end, [])]
+        # 无框帧归属：首组向前扩、末组向后扩、组间空隙对半分
+        groups[0][0] = start
+        groups[-1][1] = end
+        for i in range(len(groups) - 1):
+            mid = (groups[i][1] + groups[i + 1][0]) // 2
+            groups[i][1] = mid
+            groups[i + 1][0] = mid + 1
+        # 组内坐标去重（静态字幕每帧同框会重复）
+        return [(g[0], g[1], list(dict.fromkeys(g[2]))) for g in groups]
+
     def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
@@ -238,7 +302,6 @@ class SubtitleRemover:
                 # 用于存储需要去字幕的视频帧
                 frames_need_inpaint = list()
                 frames_need_inpaint.append(frame)
-                inner_index = 0
                 # 接着往下读，直到读取到尾巴
                 for j in range(end_frame_index - start_frame_index):
                     ret, frame = reader.read()
@@ -246,40 +309,40 @@ class SubtitleRemover:
                         break
                     current_frame_index += 1
                     frames_need_inpaint.append(frame)
-                mask_area_coordinates = []
-                # 1. 获取当前批次的mask坐标全集
-                for mask_index in range(start_frame_index, end_frame_index + 1):
-                    if mask_index in sub_list.keys():
-                        for area in sub_list[mask_index]:
-                            xmin, xmax, ymin, ymax = area
-                            # 判断是不是非字幕区域(如果宽大于长，则认为是错误检测)
-                            if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
-                                continue
-                            if area not in mask_area_coordinates:
-                                mask_area_coordinates.append(area)
-                # 1. 获取当前批次使用的mask
-                mask = create_mask(self.mask_size, mask_area_coordinates)
-                # self.append_output(f'inpaint with mask: {mask_area_coordinates}')
-                if route:
-                    model, batch_size = self._route_pick_model(start_frame_index, end_frame_index, motion_scores)
-                if batch_size is None:
-                    batch_size = config.getSttnMaxLoadNum()
-                # MiniMax（StripCropInpaint包装）内部已按 chunk_frames(4k+1) 分块、块间重叠混合
-                # 并做显存守卫；外层再按小批分割会把接缝混合割裂（每批仅含一块、批间无重叠），
-                # 故整段一次性送入。上限4倍块大小，避免超长区间把全部帧堆在内存
-                if isinstance(model, StripCropInpaint):
-                    chunk = getattr(model.inner, 'chunk_frames', 61)
-                    batch_size = max(batch_size, min(len(frames_need_inpaint), chunk * 4))
-                for batch in batch_generator(frames_need_inpaint, batch_size):
-                    # 2. 调用批推理
-                    if len(batch) >= 1:
-                        inpainted_frames = model(batch, mask)
-                        for i, inpainted_frame in enumerate(inpainted_frames):
-                            self.video_writer.write(inpainted_frame)
-                            # self.append_output(f'write frame: {start_frame_index + inner_index} with mask')
-                            inner_index += 1
-                            self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
-                    self.update_progress(tbar, increment=len(batch))
+                # 1. 按帧间bbox变化把区间切组，每组独立mask（运动镜头下整区间并集mask
+                #    会把字幕扫过的大片背景圈进去重绘导致糊，分组后只修实际字幕范围）
+                groups = self._group_interval_masks(start_frame_index, end_frame_index, sub_list)
+                # 2. 逐组推理
+                for g_start, g_end, g_coords in groups:
+                    frames_g = frames_need_inpaint[g_start - start_frame_index: g_end - start_frame_index + 1]
+                    if not frames_g:
+                        continue
+                    if not g_coords:
+                        # 整组帧都无有效检测框（全被过滤为误检）：写原帧
+                        for frame in frames_g:
+                            self.video_writer.write(frame)
+                            self.update_preview_with_comp(frame, frame)
+                        self.update_progress(tbar, increment=len(frames_g))
+                        continue
+                    mask = create_mask(self.mask_size, g_coords)
+                    if route:
+                        model, batch_size = self._route_pick_model(g_start, g_end, motion_scores)
+                    if batch_size is None:
+                        batch_size = config.getSttnMaxLoadNum()
+                    # MiniMax（StripCropInpaint包装）内部已按 chunk_frames(4k+1) 分块、块间重叠混合
+                    # 并做显存守卫；外层再按小批分割会把接缝混合割裂（每批仅含一块、批间无重叠），
+                    # 故整组一次性送入。上限4倍块大小，避免超长组把全部帧堆在内存
+                    if isinstance(model, StripCropInpaint):
+                        chunk = getattr(model.inner, 'chunk_frames', 61)
+                        batch_size = max(batch_size, min(len(frames_g), chunk * 4))
+                    for batch in batch_generator(frames_g, batch_size):
+                        # 3. 调用批推理
+                        if len(batch) >= 1:
+                            inpainted_frames = model(batch, mask)
+                            for i, inpainted_frame in enumerate(inpainted_frames):
+                                self.video_writer.write(inpainted_frame)
+                                self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
+                        self.update_progress(tbar, increment=len(batch))
         reader.stop()
 
     def run(self):
@@ -582,6 +645,8 @@ if __name__ == '__main__':
     sr = SubtitleRemover(args.input)
     sr.sub_areas = args.subtitle_area_coords
     sr.video_out_path = args.output
-    config.inpaintMode.value = args.inpaint_mode
+    # 显式传参时仅覆盖内存值（不写盘，不污染 GUI 设置）；不传则沿用 config.json 中 GUI 选择的模式
+    if args.inpaint_mode is not None:
+        config.inpaintMode.value = args.inpaint_mode
     sr.run()
         

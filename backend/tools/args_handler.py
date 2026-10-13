@@ -20,12 +20,13 @@ def parse_args():
         help="Subtitle area coordinates (ymin ymax xmin xmax). Can be specified multiple times for multiple areas."
     )
     parser.add_argument(
-        "--inpaint-mode", type=str, default="sttn-auto",
+        "--inpaint-mode", type=str, default=None,
         choices=[mode.name.lower().replace('_','-') for mode in InpaintMode],
-        help="Inpaint mode, default is sttn-auto"
+        help="Inpaint mode. If omitted, falls back to the mode selected in the GUI settings (config.json)"
     )
     args = parser.parse_args()
-    args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
+    if args.inpaint_mode is not None:
+        args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]
     if args.subtitle_area_coords is None:
         args.subtitle_area_coords = []
     return args
