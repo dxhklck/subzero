@@ -96,7 +96,7 @@ class Config(QConfig):
     # 超过则按此值切段逐段执行，支持中断续跑（checkpoint 保存在
     # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）
     # 视频分段时长（秒）：0=不分段；新键名避免旧配置的分钟值被误读为秒
-    segmentSeconds = RangeConfigItem("Main", "SegmentSeconds", 1800, RangeValidator(0, 14400))
+    segmentSeconds = RangeConfigItem("Main", "SegmentSeconds", 600, RangeValidator(0, 14400))
     # 以下参数仅适用STTN算法时，才生效
     """
     1. STTN_SKIP_DETECTION
