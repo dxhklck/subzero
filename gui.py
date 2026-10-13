@@ -48,7 +48,6 @@ from backend.config import config, tr, VERSION
 from backend.tools.theme_listener import SystemThemeListener
 from backend.tools.process_manager import ProcessManager
 from ui.advanced_setting_interface import AdvancedSettingInterface
-from ui.about_interface import AboutInterface
 from ui.home_interface import HomeInterface
 
 
@@ -92,7 +91,7 @@ class SubtitleExtractorGUI(FluentWindow):
             return
         self.check_update_timer = QtCore.QTimer(self)
         self.check_update_timer.setSingleShot(True)
-        self.check_update_timer.timeout.connect(lambda: self.aboutInterface.check_update(ignore=True))
+        self.check_update_timer.timeout.connect(lambda: self.settingsInterface.check_update(ignore=True))
         self.check_update_timer.start(2000)
 
     def _connectSignalToSlot(self):
@@ -108,18 +107,15 @@ class SubtitleExtractorGUI(FluentWindow):
         )
 
     def _create_layout(self):
-        # 创建主页面和设置、关于页面
+        # 创建主页面和设置页面（关于内容已并入设置页「通用」卡）
         self.homeInterface = HomeInterface(self)
         self.homeInterface.setObjectName("HomeInterface")
         self.settingsInterface = AdvancedSettingInterface(self)
         self.settingsInterface.setObjectName("SettingsInterface")
-        self.aboutInterface = AboutInterface(self)
-        self.aboutInterface.setObjectName("AboutInterface")
 
-        # 三个页面：首页 / 设置 / 关于
+        # 两个页面：首页 / 设置
         self.addSubInterface(self.homeInterface, FluentIcon.HOME, "首页")
         self.addSubInterface(self.settingsInterface, FluentIcon.SETTING, "设置")
-        self.addSubInterface(self.aboutInterface, FluentIcon.INFO, "关于", NavigationItemPosition.BOTTOM)
 
     def on_navigation_item_changed(self, key):
         """导航项变更时的处理函数"""

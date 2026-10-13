@@ -12,7 +12,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout
 from qfluentwidgets import (SpinBox, ComboBox, SwitchButton, IconWidget,
-                           StrongBodyLabel, CaptionLabel, isDarkTheme)
+                           StrongBodyLabel, CaptionLabel, PushButton, isDarkTheme)
 from backend.config import config, tr
 
 
@@ -217,9 +217,11 @@ class CompactParamRow(QFrame):
 
     传入若干 CompactRangeRow / CompactSwitchRow / CompactComboRow，
     每个簇等宽伸展；行内的「已修改」标记等行为不受影响。
+    columns 指定本行列数（如四列布局传 4）；参数不足时用透明占位补齐，
+    保证与同组其他行的列对齐。
     """
 
-    def __init__(self, *rows, parent=None):
+    def __init__(self, *rows, columns=None, parent=None):
         super().__init__(parent)
         self.rows = list(rows)
         self.setAttribute(Qt.WA_StyledBackground)
@@ -229,8 +231,54 @@ class CompactParamRow(QFrame):
         lay.setSpacing(16)
         for r in rows:
             lay.addWidget(r, 1)
+        pad = max(0, (columns if columns is not None else len(rows)) - len(rows))
+        for _ in range(pad):
+            spacer = QFrame(self)
+            spacer.setStyleSheet('background: transparent;')
+            lay.addWidget(spacer, 1)
 
     def refresh_row(self):
         for r in self.rows:
             if hasattr(r, 'refresh_row'):
                 r.refresh_row()
+
+
+class CompactActionRow(QFrame):
+    """紧凑动作行：图示 + 参数名 | 右侧按钮/状态文字（保存目录、环境自检、检查更新等）。
+
+    desc 挂 tooltip，不占行内空间；set_desc 供运行时更新提示。
+    """
+
+    def __init__(self, title, desc, icon=None, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setStyleSheet('CompactActionRow { background: transparent; }')
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 7, 14, 7)
+        layout.setSpacing(10)
+        icon_widget = _make_icon(icon, self)
+        if icon_widget is not None:
+            layout.addWidget(icon_widget, 0, Qt.AlignVCenter)
+        self._title_label = StrongBodyLabel(title, self)
+        self._title_label.setStyleSheet('font-size: 13px;')
+        layout.addWidget(self._title_label, 1)
+        self.layout_row = layout
+        set_row_tooltip(desc, self, self._title_label)
+
+    def set_desc(self, desc):
+        set_row_tooltip(desc, self, self._title_label)
+
+    def add_status_label(self, width=96):
+        """右侧状态小字（动态反馈，如自检进度），等宽裁剪防撑宽"""
+        lab = CaptionLabel('', self)
+        lab.setFixedWidth(width)
+        self.layout_row.addWidget(lab, 0)
+        return lab
+
+    def add_button(self, text, on_click=None, width=84):
+        btn = PushButton(text, self)
+        btn.setFixedWidth(width)
+        if on_click is not None:
+            btn.clicked.connect(on_click)
+        self.layout_row.addWidget(btn, 0)
+        return btn
