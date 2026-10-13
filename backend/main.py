@@ -258,6 +258,36 @@ class SubtitleRemover:
         # 组内坐标去重（静态字幕每帧同框会重复）
         return [(g[0], g[1], list(dict.fromkeys(g[2]))) for g in groups]
 
+    @staticmethod
+    def _split_duplicate_frames(frames, diff_threshold=1.0, probe_width=160):
+        """识别组内与代表帧几乎相同的帧，跳过其推理、直接复用代表帧的修复结果。
+
+        固定机位/静止画面（录屏、停顿、定格）常见成片重复帧；运动画面零跳过。
+        判据为缩放灰度图的均值绝对差（0-255 标度）：阈值 1.0 约等于压缩噪声上限，
+        真实运动（字幕动画/镜头晃动/胶片颗粒）通常大于 3，因此设计上零画质影响。
+
+        返回 (kept_idx, dup_map)：kept_idx 为参与推理的帧下标（有序），
+        dup_map 为 {被跳过帧下标: 代表帧下标}。
+        """
+        kept_idx = []
+        dup_map = {}
+        last_gray = None
+        for i, frame in enumerate(frames):
+            h, w = frame.shape[:2]
+            pw = min(probe_width, w)
+            gray = cv2.cvtColor(cv2.resize(frame, (pw, max(1, int(h * pw / w)))), cv2.COLOR_BGR2GRAY)
+            if last_gray is None:
+                kept_idx.append(i)
+                last_gray = gray
+                continue
+            diff = float(np.mean(np.abs(gray.astype(np.int16) - last_gray.astype(np.int16))))
+            if diff < diff_threshold:
+                dup_map[i] = kept_idx[-1]
+            else:
+                kept_idx.append(i)
+                last_gray = gray
+        return kept_idx, dup_map
+
     def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
@@ -329,20 +359,36 @@ class SubtitleRemover:
                         model, batch_size = self._route_pick_model(g_start, g_end, motion_scores)
                     if batch_size is None:
                         batch_size = config.getSttnMaxLoadNum()
+                    # 重复帧跳过：与代表帧几乎相同的帧不送推理，修复后直接复用其结果
+                    kept_idx, dup_map = self._split_duplicate_frames(frames_g)
+                    frames_run = [frames_g[i] for i in kept_idx]
+                    if len(dup_map) > 0:
+                        self.append_output(f'[Skip] 组 {g_start}-{g_end}: {len(dup_map)}/{len(frames_g)} 帧与相邻帧几乎相同，跳过推理直接复用')
                     # MiniMax（StripCropInpaint包装）内部已按 chunk_frames(4k+1) 分块、块间重叠混合
                     # 并做显存守卫；外层再按小批分割会把接缝混合割裂（每批仅含一块、批间无重叠），
                     # 故整组一次性送入。上限4倍块大小，避免超长组把全部帧堆在内存
                     if isinstance(model, StripCropInpaint):
                         chunk = getattr(model.inner, 'chunk_frames', 61)
-                        batch_size = max(batch_size, min(len(frames_g), chunk * 4))
-                    for batch in batch_generator(frames_g, batch_size):
+                        batch_size = max(batch_size, min(len(frames_run), chunk * 4))
+                    out_kept = []
+                    for batch in batch_generator(frames_run, batch_size):
                         # 3. 调用批推理
                         if len(batch) >= 1:
-                            inpainted_frames = model(batch, mask)
-                            for i, inpainted_frame in enumerate(inpainted_frames):
-                                self.video_writer.write(inpainted_frame)
-                                self.update_preview_with_comp(np.clip(batch[i]+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), inpainted_frame)
+                            out_kept.extend(model(batch, mask))
                         self.update_progress(tbar, increment=len(batch))
+                    # 重建全组输出：推理帧按原位回填，重复帧复用代表帧的修复结果
+                    if dup_map:
+                        out_full = [None] * len(frames_g)
+                        for k, i in enumerate(kept_idx):
+                            out_full[i] = out_kept[k]
+                        for di, ri in dup_map.items():
+                            out_full[di] = out_full[ri]
+                        self.update_progress(tbar, increment=len(dup_map))
+                    else:
+                        out_full = out_kept
+                    for src, rep in zip(frames_g, out_full):
+                        self.video_writer.write(rep)
+                        self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
         reader.stop()
 
     def run(self):
