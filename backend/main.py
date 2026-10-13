@@ -87,6 +87,8 @@ class SubtitleRemover:
         self.progress_listeners = []
         # inpaint的frame_no区域列表, 默认为inpaint所有帧
         self.ab_sections = None
+        # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
+        self._first_pass_regions = []
 
     @staticmethod
     def is_current_frame_no_start(frame_no, continuous_frame_no_list):
@@ -161,6 +163,7 @@ class SubtitleRemover:
     def propainter_mode(self, tbar):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self._collect_first_pass_regions(sub_list)
         if len(sub_list) == 0:
             raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -254,6 +257,7 @@ class SubtitleRemover:
         for sub_area in self.sub_areas:
             ymin, ymax, xmin, xmax = sub_area
             mask_area_coordinates.append((xmin, xmax, ymin, ymax))
+        self._first_pass_regions.extend(mask_area_coordinates)
         mask = create_mask(self.mask_size, mask_area_coordinates)
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
         sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
@@ -283,6 +287,7 @@ class SubtitleRemover:
     def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self._collect_first_pass_regions(sub_list)
         if len(sub_list) == 0:
             raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
         continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
@@ -428,6 +433,8 @@ class SubtitleRemover:
         self.video_cap.release()
         self.video_writer.release()
         if not self.is_picture:
+            # 二遍残留兜底：对第一遍输出重跑检测，检出残留并二修（可开关）
+            self._residue_second_pass(tbar)
             # 将原音频合并到新生成的视频文件中
             self.merge_audio_to_video()
         self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
@@ -464,6 +471,128 @@ class SubtitleRemover:
             paddle_cuda = self.hardware_accelerator.get_paddle_compile_cuda()
             self.append_output('NVIDIA driver: {} (supports CUDA {}), paddle compiled CUDA: {}'.format(
                 driver_ver or 'unknown', driver_cuda or 'unknown', paddle_cuda or 'n/a'))
+
+    def _collect_first_pass_regions(self, sub_list):
+        """收集第一遍检测/修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定。
+        剔除高瘦误检框（与第一遍修复同规则），保证"第一遍真正修过的区域"这个语义一致。"""
+        for boxes in sub_list.values():
+            for b in boxes:
+                xmin, xmax, ymin, ymax = b
+                if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
+                    continue
+                self._first_pass_regions.append((xmin, xmax, ymin, ymax))
+
+    def _overlaps_first_pass(self, box, margin=30):
+        """残留判定：输出视频中新检出的框必须与第一遍修复过的区域（外扩 margin 容差）有重叠。
+        防止把画面里天然像文字的纹理（波纹/栅栏/立面/水面反光）误当残留而误修。"""
+        xmin, xmax, ymin, ymax = box
+        for rx0, rx1, ry0, ry1 in self._first_pass_regions:
+            if xmin < rx1 + margin and xmax > rx0 - margin and ymin < ry1 + margin and ymax > ry0 - margin:
+                return True
+        return False
+
+    def _residue_second_pass(self, tbar):
+        """二遍残留兜底：第一遍修复依赖检测，漏检/欠覆盖的字幕会残留在输出里。
+        对第一遍输出（video_temp_file，此时无音频）重跑检测：
+        1. 检出框必须与第一遍修复区域重叠才算残留（防误修天然纹理）；
+        2. 残留按帧分组、时间线扩展后逐区间二修（AUTO 模式下按帧差路由，其余模式用 LAMA——
+           残留 mask 小，LAMA 快且对静态/小区域足够好；残留根因是检测漏而不是算法差）；
+        3. 修复帧替换后整体写新临时文件并原子替换，保证音频合并拿到的是修复后的视频；
+        4. 无残留时只多花一次检测时间，不做任何重编码。"""
+        if self.is_picture or not config.residueCheck.value or not self._first_pass_regions:
+            return
+        self.append_output(tr['Main']['ResidueCheckStart'])
+        t0 = time.time()
+        detector = SubtitleDetect(self.video_temp_file.name, self.sub_areas)
+        sub_list = detector.find_subtitle_frame_no()
+        if len(sub_list) == 0:
+            self.append_output(tr['Main']['ResidueCheckClean'].format(round(time.time() - t0)))
+            del detector
+            gc.collect()
+            return
+        # 只保留与第一遍修复区域重叠、且非高瘦误检的检出框
+        filtered = {}
+        for fno, boxes in sub_list.items():
+            keep = [b for b in boxes
+                    if (b[3] - b[2]) - (b[1] - b[0]) <= config.subtitleYXAxisDifferencePixel.value
+                    and self._overlaps_first_pass(b)]
+            if keep:
+                filtered[fno] = keep
+        if not filtered:
+            self.append_output(tr['Main']['ResidueCheckClean'].format(round(time.time() - t0)))
+            del detector
+            gc.collect()
+            return
+        ranges = detector.find_continuous_ranges_with_same_mask(filtered)
+        ranges = expand_frame_ranges(ranges, config.subtitleTimelineBackwardFrameCount.value,
+                                     config.subtitleTimelineForwardFrameCount.value)
+        ranges = detector.filter_and_merge_intervals(ranges, config.sttnReferenceLength.value)
+        motion_scores = detector.frame_diff_scores
+        del detector
+        gc.collect()
+        self.append_output(tr['Main']['ResidueCheckFound'].format(len(filtered), len(ranges)))
+        # 逐区间二修
+        repaired = {}  # 帧号(1基) -> 修复帧
+        for start, end in ranges:
+            end = min(end, self.frame_count)
+            coords = []
+            for fno in range(start, end + 1):
+                for area in filtered.get(fno, []):
+                    if area not in coords:
+                        coords.append(area)
+            if not coords:
+                continue
+            if config.inpaintMode.value == InpaintMode.AUTO:
+                model, batch_size = self._route_pick_model(start, end, motion_scores)
+            else:
+                model, batch_size = self.lama_inpaint, config.getSttnMaxLoadNum()
+            tbar.write(f"[Residue] repairing frames {start}-{end} with {type(model).__name__}")
+            cap = cv2.VideoCapture(get_readable_path(self.video_temp_file.name))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)
+            frames = []
+            for _ in range(end - start + 1):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(frame)
+            cap.release()
+            if not frames:
+                continue
+            mask = create_mask(self.mask_size, coords)
+            out_frames = []
+            for batch in batch_generator(frames, batch_size):
+                out_frames.extend(model(batch, mask))
+            for i, f in enumerate(out_frames):
+                repaired[start + i] = f
+        if not repaired:
+            self.append_output(tr['Main']['ResidueCheckClean'].format(round(time.time() - t0)))
+            return
+        # 整体回写：读第一遍输出，残留帧替换为修复帧，写新临时文件后原子替换
+        new_temp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+        new_temp.close()
+        try:
+            writer = FFmpegVideoWriter(get_readable_path(new_temp.name), self.fps, self.size)
+        except Exception:
+            writer = cv2.VideoWriter(get_readable_path(new_temp.name), cv2.VideoWriter_fourcc(*'mp4v'),
+                                     self.fps, self.size)
+        cap = cv2.VideoCapture(get_readable_path(self.video_temp_file.name))
+        n_repaired = len(repaired)
+        fno = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            fno += 1
+            writer.write(repaired.pop(fno, frame))
+        cap.release()
+        writer.release()
+        # 关闭旧临时文件句柄后原子替换（Windows 下句柄未关会替换失败）
+        try:
+            self.video_temp_file.close()
+        except Exception:
+            pass
+        os.replace(new_temp.name, self.video_temp_file.name)
+        self.append_output(tr['Main']['ResidueCheckRepaired'].format(n_repaired, round(time.time() - t0)))
 
     def merge_audio_to_video(self):
         # 创建音频临时对象，windows下delete=True会有permission denied的报错

@@ -55,6 +55,16 @@ class SettingInterface(QtWidgets.QVBoxLayout):
         )
         self.addWidget(self.subtitle_detect_model_combo)
 
+        # 二遍残留兜底：第一遍修复后对输出重跑检测，检出残留并二修
+        self.residue_check = SwitchSettingCard(
+            configItem=config.residueCheck,
+            icon=FluentIcon.SEARCH,
+            title=tr["SubtitleExtractorGUI"]["ResidueCheck"],
+            content=tr["SubtitleExtractorGUI"]["ResidueCheckDesc"],
+            parent=parent,
+        )
+        self.addWidget(self.residue_check)
+
         # 是否启用硬件加速
         self.hardware_acceleration = SwitchSettingCard(
             configItem=config.hardwareAcceleration,

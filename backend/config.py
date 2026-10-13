@@ -84,6 +84,10 @@ class Config(QConfig):
     # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
     # 想更激进可调大（3.0约一半区间走LAMA，5.0约九成——运动区间用LAMA会糊，按素材质量容忍度权衡）
     autoRouteStaticThreshold = RangeConfigItem("Main", "AutoRouteStaticThreshold", 1, RangeValidator(0, 20))
+    # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
+    # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
+    # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
+    residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
     # 以下参数仅适用STTN算法时，才生效
     """
     1. STTN_SKIP_DETECTION
