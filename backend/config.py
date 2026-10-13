@@ -81,7 +81,8 @@ class Config(QConfig):
     # 注意：PP-OCRv5 检测模型内部本就把长边钳制到960（inference.yml DetResizeForTest），因此：
     #   >=960 等于无操作（零收益零风险）；设为720 可让模型跳过内部缩放，OCR 实测快约40%
     #   （1080p 33ms→19.5ms；本项目测试视频9.5px高小字在640下仍检出无损，但过小有漏检风险）
-    subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 2560))
+    # 上限 960：模型内部本就把长边钳到 960，>=960 的任何值结果完全相同，再大没有意义
+    subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 960))
     # 智能路由（AUTO模式）静态阈值：区间内采样帧的平均帧差（0-255灰度标度，160px长边灰度图上计算）
     # 低于该值判为静态画面走 LAMA（0.09s/帧，静态背景≈无损），不低于则走 MiniMax（按MiniMax参数组）
     # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
@@ -137,7 +138,8 @@ class Config(QConfig):
     # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
     # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
     # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
-    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 2560))
+    # 上限 2160：条带裁剪下只有 4K 宽 mask 透传时条带长边才会到 2160，再大用不上
+    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 2160))
     # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
     # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
     minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))
