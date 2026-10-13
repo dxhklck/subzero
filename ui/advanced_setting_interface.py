@@ -12,7 +12,7 @@ from PySide6 import QtWidgets, QtCore
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget, QFrame, QLabel
 from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon, SubtitleLabel,
-                           PushSettingCard, SettingCard, PushButton, SwitchButton,
+                           PushSettingCard, SettingCard, PushButton,
                            Slider, SpinBox, ComboBox, MessageBox, InfoBar, RadioButton,
                            StrongBodyLabel, BodyLabel, CaptionLabel, isDarkTheme)
 from backend.config import (config, tr, VERSION, PROJECT_HOME_URL, PROJECT_ISSUES_URL,
@@ -79,9 +79,8 @@ class AdvancedSettingInterface(ScrollArea):
         self._build_sttn_group()
         self._build_maintenance_group()
         self.page_layout.addStretch(1)
-        self._apply_expert_visibility()
 
-    # ---------- 页头：标题 + 专业模式开关 + 恢复默认 ----------
+    # ---------- 页头：标题 + 恢复默认（参数全部直接展示，不再折叠隐藏） ----------
 
     def _build_header(self):
         header = QHBoxLayout()
@@ -91,14 +90,6 @@ class AdvancedSettingInterface(ScrollArea):
         self.page_layout.addLayout(title_col)
 
         header.addStretch(1)
-        expert_box = QHBoxLayout()
-        expert_box.setSpacing(6)
-        self.expert_switch = SwitchButton(tr['Setting']['ExpertMode'], self)
-        self.expert_switch.setChecked(bool(config.expertMode.value))
-        self.expert_switch.checkedChanged.connect(self._on_expert_toggled)
-        expert_box.addWidget(self.expert_switch)
-        header.addLayout(expert_box)
-
         self.restore_btn = PushButton(tr['Setting']['RestoreDefaultsBtn'], self)
         self.restore_btn.clicked.connect(self._on_restore_defaults)
         header.addWidget(self.restore_btn)
@@ -138,14 +129,22 @@ class AdvancedSettingInterface(ScrollArea):
             gui['SegmentMinutesDesc'], icon=FluentIcon.STOP_WATCH, parent=card))
 
     def _make_group(self, title):
-        """一组：绿色分组标题 + 白卡容器（含行布局），返回 (card, vbox, header)"""
+        """一组：分组标题（主题色 + 短下划线，参照卡片式设计稿）+ 卡片容器，返回 (card, vbox, header)"""
+        head_col = QVBoxLayout()
+        head_col.setSpacing(4)
         header = StrongBodyLabel(title, self.scrollWidget)
-        header.setStyleSheet(f'color: {_accent_color()}; font-size: 12px;')
+        header.setStyleSheet(f'color: {_accent_color()}; font-size: 13px; font-weight: 600;')
+        underline = QFrame(self.scrollWidget)
+        underline.setFixedSize(42, 2)
+        underline.setStyleSheet(f'background: {_accent_color()}; border-radius: 1px;')
+        head_col.addWidget(header)
+        head_col.addWidget(underline)
+        head_col.addSpacing(2)
         card = CardWidget(self.scrollWidget)
         vbox = QVBoxLayout(card)
         vbox.setContentsMargins(0, 2, 0, 2)
         vbox.setSpacing(0)
-        self.page_layout.addWidget(header)
+        self.page_layout.addLayout(head_col)
         self.page_layout.addWidget(card)
         return card, vbox, header
 
@@ -269,20 +268,6 @@ class AdvancedSettingInterface(ScrollArea):
         )
         self.env_check_card.clicked.connect(self.run_env_check)
         vbox.addWidget(self.env_check_card)
-
-    # ---------- 专业模式 ----------
-
-    def _on_expert_toggled(self, checked):
-        config.set(config.expertMode, bool(checked))
-        self._apply_expert_visibility()
-
-    def _apply_expert_visibility(self):
-        expert = bool(config.expertMode.value)
-        for row in self.rows_detect_expert + self.rows_minimax_expert + self.rows_sttn:
-            row.setVisible(expert)
-        # STTN 组整体是专家内容：普通模式连组标题一起隐藏
-        self._sttn_header.setVisible(expert)
-        self.sttn_card.setVisible(expert)
 
     # ---------- 恢复默认 ----------
 

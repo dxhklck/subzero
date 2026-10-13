@@ -147,7 +147,7 @@ class HomeInterface(QWidget):
         status_lay = QVBoxLayout(status_card)
         status_lay.setContentsMargins(0, 0, 0, 0)
         status_lay.setSpacing(0)
-        self.gpu_monitor_bar = GpuMonitorBar(self, framed=False)
+        self.gpu_monitor_bar = GpuMonitorBar(self)
         status_lay.addWidget(self.gpu_monitor_bar)
         sep = QFrame(status_card)
         sep.setFrameShape(QFrame.HLine)
