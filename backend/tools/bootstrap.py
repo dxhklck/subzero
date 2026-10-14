@@ -30,7 +30,9 @@ PYTHON_DEPS = [
 # 每源: {'url':...} 直存 | {'url':..., 'zip_member':...} 解压 | {'url':..., 'parts':[...]} 拼接
 # 分片文件(*_1.pt 等)是历史分发残留，运行时不需要，不检查。
 MS_BASE = 'https://modelscope.cn/models/dxhklck/subzero-models/resolve/master/'
-RELEASE_BASE = 'https://github.com/dxhklck/subzero/releases/download/v1.0.0/'
+# Release 权重源跟随 backend/config.py 的 VERSION 自动升级，避免版本漂移指向旧 Release
+from backend.config import VERSION as _APP_VERSION  # noqa: E402
+RELEASE_BASE = f'https://github.com/dxhklck/subzero/releases/download/v{_APP_VERSION}/'
 WEIGHT_MANIFEST = [
     # 字幕检测（PP-OCRv5 server / fast）
     {'path': 'V5/ch_det/inference.pdiparams', 'min_mb': 80,
