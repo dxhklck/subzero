@@ -1,5 +1,6 @@
 ; 净影 SubZero v1.1.0 安装包脚本
-; 打包：源码 + 预烘焙运行时(embeddable 3.13.12 + 轻量UI依赖) + SubZero.exe 启动器
+; 打包：pyd 编译发行目录(pyd-dist，源码保护) + 预烘焙运行时(embeddable 3.13.12 + 轻量UI依赖) + SubZero.exe 启动器
+; 构建：先 python packaging\build_pyd.py（Cython 编译 backend/ui → pyd-dist）再 ISCC
 ; 首启自举：gui.py 钩子 → first_run.py（pip 镜像装依赖 → 权重魔搭/GitHub 双源下载）
 ; 编译: ISCC.exe packaging\subzero.iss
 
@@ -39,14 +40,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "{app}\config"
 
 [Files]
-; 源码（排除模型权重/缓存/用户配置/测试）
-Source: "..\gui.py"; DestDir: "{app}"; Flags: ignoreversion
+; pyd 编译发行目录（build_pyd.py 产物：53 个 .pyd + stub/first_run/scenedetect 保留 .py）
+Source: "pyd-dist\gui.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README_en.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "requirements-lock.txt"; DestDir: "{app}\packaging"; Flags: ignoreversion
-Source: "..\backend\*"; DestDir: "{app}\backend"; Excludes: "models,ffmpeg,__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\ui\*"; DestDir: "{app}\ui"; Excludes: "__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "pyd-dist\backend\*"; DestDir: "{app}\backend"; Excludes: "models,ffmpeg,__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "pyd-dist\ui\*"; DestDir: "{app}\ui"; Excludes: "__pycache__,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\design\*"; DestDir: "{app}\design"; Excludes: "_*"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 预烘焙运行时（embeddable + PySide6 等轻量依赖）
 Source: "runtime\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs

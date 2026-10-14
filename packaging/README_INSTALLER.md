@@ -20,13 +20,30 @@
 #    产物：packaging/runtime/runtime/（PySide6 / qfluentwidgets / frameless 等）
 python packaging/build_runtime.py
 
-# 2) 编译安装包（在 packaging/ 目录下执行，或从仓库根目录用完整路径）
+# 2) 编译 pyd 发行目录（源码保护）：backend/ui → .pyd，产物 packaging/pyd-dist/
+#    依赖：MSVC 2022 + Windows SDK + 系统 Python 3.13 头文件（脚本自动探测，
+#    通过 INCLUDE/LIB 环境变量注入，绕过 setuptools 的注册表探测）
+python packaging/build_pyd.py
+
+# 3) 编译安装包（在 packaging/ 目录下执行，或从仓库根目录用完整路径）
 ISCC.exe packaging\subzero.iss
 ```
 
-- 步骤 1 只需在运行时依赖清单变化时重跑；日常发版若预烘焙产物已在仓库中，可直接步骤 2。
+- 步骤 1 只需在运行时依赖清单变化时重跑；步骤 2 在**每次发版源码有改动时必须重跑**。
 - 编译产物：`packaging/output/净影SubZero-Setup-1.1.0.exe`（`OutputBaseFilename` 由
   `#define MyAppVersion` 自动派生，发新版只需改 `MyAppVersion` 一处）。
+
+## 源码保护（pyd）说明
+
+- 安装包内**不含业务 .py 源码**：backend/ui 共 53 个模块经 Cython 编译为
+  `.cp313-win_amd64.pyd`（与内嵌 Python 3.13.12 ABI 绑定）
+- 保留的 .py 仅 5 类：包 `__init__.py`（空或 2 行）、两个入口 stub
+  （`gui.py`/`backend/main.py` 各 3 行转发，逻辑在 `gui_main.pyd`/`cli.pyd`）、
+  `first_run.py`（首启自举基础设施，gui 钩子按文件路径加载）、
+  `backend/scenedetect/`（内嵌第三方库 PySceneDetect，BSD 开源）
+- 分段子进程 / 残留二修仍以 `python backend/main.py` 脚本方式调用——stub 保持
+  命令行接口不变，对 GUI 与 CLI 用户完全透明
+- pyd 与 Python 小版本 ABI 绑定（cp313）：升级内嵌 Python 必须重新跑步骤 2
 
 ## 安装版结构（iss 脚本要点）
 
