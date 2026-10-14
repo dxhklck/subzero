@@ -1,10 +1,10 @@
-; 净影 SubZero v1.0.0 安装包脚本
+; 净影 SubZero v1.1.0 安装包脚本
 ; 打包：源码 + 预烘焙运行时(embeddable 3.13.12 + 轻量UI依赖) + SubZero.exe 启动器
 ; 首启自举：gui.py 钩子 → first_run.py（pip 镜像装依赖 → 权重魔搭/GitHub 双源下载）
 ; 编译: ISCC.exe packaging\subzero.iss
 
 #define MyAppName "净影 SubZero"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "SubZero"
 #define MyAppExeName "SubZero.exe"
 
@@ -17,7 +17,7 @@ DefaultDirName={autopf}\SubZero
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=output
-OutputBaseFilename=SubZero-Setup-{#MyAppVersion}
+OutputBaseFilename=净影SubZero-Setup-{#MyAppVersion}
 SetupIconFile=..\design\subzero.ico
 UninstallDisplayIcon={app}\design\subzero.ico
 Compression=lzma2/max

@@ -202,6 +202,9 @@ if __name__ == '__main__':
     Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QtWidgets.QApplication(sys.argv)
     app.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
+    # 权重完整性启动扫描（首启自举钩子之后、主窗口构建之前；不阻塞、不弹模态框）
+    from backend.tools.model_scanner import scan_weights, format_report
+    _scan_ok, _scan_missing, _scan_mismatch = scan_weights()
     window = SubtitleExtractorGUI()
     # 先设置透明, 再显示, 否则会有闪烁的效果
     window.setWindowOpacity(0.0)
@@ -213,4 +216,15 @@ if __name__ == '__main__':
     animation.setStartValue(0.0)
     animation.setEndValue(1.0)
     animation.start()
+    # 权重异常提示：日志窗逐行警告 + InfoBar（duration 8000，不阻塞启动）
+    if _scan_missing or _scan_mismatch:
+        for _line in format_report(_scan_ok, _scan_missing, _scan_mismatch).splitlines():
+            window.homeInterface.append_output(_line)
+        InfoBar.warning(
+            '权重完整性',
+            f'发现 {len(_scan_missing) + len(_scan_mismatch)} 项权重异常，详见日志；'
+            '可在 设置-环境自检 一键修复',
+            duration=8000,
+            parent=window
+        )
     app.exec()
