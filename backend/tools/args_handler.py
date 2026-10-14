@@ -63,7 +63,8 @@ def parse_args():
     parser.add_argument(
         "--sub-area", action="append", type=_sub_area, metavar="YMIN,YMAX,XMIN,XMAX",
         help="Subtitle area coordinates 'ymin,ymax,xmin,xmax' (original pixel coords). "
-             "Can be specified multiple times for multiple areas."
+             "Can be specified multiple times for multiple areas. "
+             "Use the equals form (--sub-area=...) when any coordinate is negative."
     )
     parser.add_argument(
         "--time-range", type=_time_range, metavar="START-END",
