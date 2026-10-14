@@ -39,8 +39,17 @@ class FramePrefetcher:
                 break
 
     def read(self):
-        """读取下一帧，接口与 cv2.VideoCapture.read() 一致。"""
-        return self._buffer.get()
+        """读取下一帧，接口与 cv2.VideoCapture.read() 一致。
+
+        读取线程中途死亡（EOF/读满后哨兵已被消费/线程内异常）时，
+        空队列上的 get() 会永久阻塞——用超时轮询 + 线程存活判断兜底返回 (False, None)。
+        """
+        while True:
+            try:
+                return self._buffer.get(timeout=0.5)
+            except queue.Empty:
+                if not self._thread.is_alive() and self._buffer.empty():
+                    return (False, None)
 
     def get(self, propId):
         return self.cap.get(propId)
@@ -68,6 +77,9 @@ class FFmpegVideoWriter:
 
     def __init__(self, output_path, fps, size):
         w, h = size
+        # fps 读不到（0/负值）时 libx264 会以 -r 0 拒绝或产出坏文件；回退 25 保底
+        if not fps or fps <= 0:
+            fps = 25.0
         # veryfast + crf 20：相较 fast + crf 18 编码快约一倍、文件小约25%，
         # 对字幕擦除输出（非母版）画质损失可忽略；极限画质可改回 fast/18
         cmd = [
@@ -93,6 +105,9 @@ class FFmpegVideoWriter:
             stderr=subprocess.DEVNULL,
             creationflags=SUBPROCESS_CREATION_FLAGS,
         )
+        # 编码器秒死（参数非法/磁盘满等）时立即暴露，让上层走 cv2 回退，而不是静默产出空文件
+        if self._process.poll() is not None:
+            raise RuntimeError(f'ffmpeg encoder exited immediately (rc={self._process.returncode})')
 
     def write(self, frame):
         """写入一帧（numpy BGR 数组）。"""
@@ -101,7 +116,8 @@ class FFmpegVideoWriter:
         try:
             self._process.stdin.write(frame.tobytes())
         except BrokenPipeError:
-            pass
+            # 管道断裂 = ffmpeg 已退出，继续写只会静默丢帧；抛出让任务显式失败
+            raise RuntimeError('ffmpeg encoder died mid-write (BrokenPipeError)')
 
     def release(self):
         """关闭管道并等待编码完成。"""

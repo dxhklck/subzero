@@ -134,8 +134,13 @@ def collect_segment_info(task):
         ckpt_path = os.path.join(task_dir, 'checkpoint.json')
         if not os.path.exists(ckpt_path):
             return None
-        from backend.tools.segmenter import derive_resume_info
-        info = derive_resume_info(ckpt_path)
+        from backend.tools.segment_executor import build_task_params
+        from backend.tools.segmenter import derive_resume_info, params_hash
+        # 传入当前参数哈希：与 run_task_with_segments 的续跑判定同一口径，
+        # 否则参数已改时角标仍显示「可续跑」而实际运行会被拒绝，误导用户
+        params = build_task_params(task.options, config.inpaintMode.value)
+        params['segmentOverlapFrames'] = config.segmentOverlapFrames.value
+        info = derive_resume_info(ckpt_path, params_hash(params))
         return {
             'task_dir': task_dir,
             'checkpoint': ckpt_path,
@@ -450,11 +455,11 @@ class TaskListComponent(QWidget):
         Args:
             video_path: 视频文件路径
         """
-        # 覆盖相同路径的任务
-        for row, task in enumerate(self.tasks[:]):
-            if task.path == video_path:
-                self.delete_task(row)
-                continue
+        # 覆盖相同路径的任务（先收集全部匹配行再倒序删除：
+        # 边删边遍历会使后续 row 前移错位——误删无关任务或漏删形成重复）
+        dup_rows = [row for row, task in enumerate(self.tasks) if task.path == video_path]
+        for row in reversed(dup_rows):
+            self.delete_task(row)
                 
         # 获取文件名
         file_name = os.path.basename(video_path)
@@ -645,9 +650,12 @@ class TaskListComponent(QWidget):
             # 从表格中删除
             self.table.removeRow(row)
                 
-            # 如果删除的是当前任务，重置当前任务索引
+            # 删除当前任务则重置；删除其前的任务会使当前索引前移，
+            # 否则后续进度/状态/输出路径会写到错误的任务上
             if row == self.current_task_index:
                 self.current_task_index = -1
+            elif 0 <= self.current_task_index and row < self.current_task_index:
+                self.current_task_index -= 1
                 
             # 发出任务删除信号
             self.task_deleted.emit(row)

@@ -41,6 +41,8 @@ class HomeInterface(QWidget):
     task_status_signal = Signal(int, object)  # (task_index, TaskStatus)
     select_task_signal = Signal(int)  # task_index
     task_output_path_signal = Signal(int, str)  # (task_index, output_path)
+    task_progress_signal = Signal(int, int)  # (task_index, progress)——worker 线程更新任务卡片用
+    task_option_signal = Signal(int, object, object)  # (task_index, TaskOptions, value)
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("HomeInterface")
@@ -80,6 +82,8 @@ class HomeInterface(QWidget):
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
+        self.task_progress_signal.connect(self.task_list_component.update_task_progress)
+        self.task_option_signal.connect(self.task_list_component.update_task_option)
         self.task_status_signal.connect(lambda idx, status: self.task_list_component.update_task_status(idx, status))
         self.task_output_path_signal.connect(self.on_task_output_path)
         self.select_task_signal.connect(self.task_list_component.select_task)
@@ -269,9 +273,12 @@ class HomeInterface(QWidget):
         Args:
             index: 任务索引
         """
-        # 如果删除的是正在处理的任务，则需要更新状态
+        # 删除的是正在处理的任务则重置；删除其前的任务会使索引前移，
+        # 否则后续进度/状态/输出路径会写到错误的任务上
         if index == self.current_processing_task_index:
             self.current_processing_task_index = -1
+        elif 0 <= self.current_processing_task_index and index < self.current_processing_task_index:
+            self.current_processing_task_index -= 1
         
         task = self.task_list_component.get_task(0)
         if task:
@@ -358,12 +365,13 @@ class HomeInterface(QWidget):
                             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
                             if not subtitle_areas or len(subtitle_areas) <= 0:
                                 subtitle_areas = [(0, self.frame_height, 0, self.frame_width)]
-                                self.task_list_component.update_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, subtitle_areas)
+                                self.task_option_signal.emit(self.current_processing_task_index,
+                                                             TaskOptions.SUB_AREAS, subtitle_areas)
 
                             self.video_display_component.save_selections_to_config()
 
-                            # 更新任务状态为运行中
-                            self.task_list_component.update_task_progress(self.current_processing_task_index, 1)
+                            # 更新任务状态为运行中（worker 线程不得直接触碰 Qt 控件，一律经信号）
+                            self.task_progress_signal.emit(self.current_processing_task_index, 1)
 
                             # 选中当前任务
                             self.select_task_signal.emit(self.current_processing_task_index)
@@ -385,14 +393,18 @@ class HomeInterface(QWidget):
                             if self._stop_event.is_set():
                                 break
 
-                            # 更新任务状态为已完成
+                            # 更新任务状态为已完成/失败。
+                            # 仅当状态已同步为 PROCESSING 才判失败：GUI 线程繁忙时
+                            # PROCESSING 信号可能尚未落地，exitcode!=0 + PENDING 的组合
+                            # 若直接标 FAILED 会覆盖停止操作设置的 PENDING（状态竞态）
                             task_obj = self.task_list_component.get_task(self.current_processing_task_index)
-                            if process.exitcode == 0 and task_obj and task_obj.status == TaskStatus.PROCESSING:
+                            if process.exitcode == 0 and not self._stop_event.is_set() \
+                                    and task_obj and task_obj.status == TaskStatus.PROCESSING:
                                 self.progress_signal.emit(100, True)
                                 # 任务完成, 更新输出路径为只读（经信号在 GUI 线程落库+持久化）
                                 self.task_output_path_signal.emit(self.current_processing_task_index, output_path)
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.COMPLETED)
-                            else:
+                            elif task_obj and task_obj.status == TaskStatus.PROCESSING:
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
 
                         except Exception as e:
@@ -902,12 +914,20 @@ class HomeInterface(QWidget):
             self.video_display_component.video_slider.valueChanged.disconnect(self.slider_changed)
             self.video_display_component.ab_sections_changed.disconnect(self.ab_sections_changed)
             self.video_display_component.selections_changed.disconnect(self.selections_changed)
+            # 其余信号一并断开（部分连接目标是 lambda，用无参 disconnect）
+            for _sig in (self.console_signal, self.task_status_signal,
+                         self.task_output_path_signal, self.select_task_signal,
+                         self.task_progress_signal, self.task_option_signal):
+                try:
+                    _sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
             # 释放视频资源
             with self._video_cap_lock:
                 if self.video_cap:
                     self.video_cap.release()
                     self.video_cap = None
         except Exception as e:
-            print(f"Error during close window:", e)
+            print("Error during close window:", e)
         super().closeEvent(event)
     

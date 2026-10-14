@@ -1024,5 +1024,5 @@ class VideoDisplayComponent(QWidget):
             self.action_delete_selection.triggered.disconnect(self.__handle_delete_selection)
             self.shortcut_delete_selection.activated.disconnect(self.__handle_delete_selection)
         except Exception as e:
-            print(f"Error during close window:", e)
+            print("Error during close window:", e)
         super().closeEvent(event)

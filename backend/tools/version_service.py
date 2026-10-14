@@ -85,7 +85,7 @@ class VersionService:
 
                     if enabled:
                         return "http://" + winreg.QueryValueEx(key, 'ProxyServer')
-            except:
+            except OSError:
                 pass
         elif sys.platform == "darwin":
             s = os.popen('scutil --proxy').read()

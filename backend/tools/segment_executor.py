@@ -99,9 +99,10 @@ def concat_segments(task_dir: Path, segments: List[Segment],
            "-c", "copy", "-loglevel", "error", str(concat_out)]
     if log is not None:
         log(f"[分段] 拼接 {len(segments)} 段 -> {concat_out.name}")
-    r = subprocess.run(cmd, stdin=open(os.devnull), shell=(os.name == "nt"),
-                       cwd=str(task_dir), capture_output=True, text=True,
-                       timeout=3600, creationflags=SUBPROCESS_CREATION_FLAGS)
+    with open(os.devnull) as devnull:
+        r = subprocess.run(cmd, stdin=devnull, shell=(os.name == "nt"),
+                           cwd=str(task_dir), capture_output=True, text=True,
+                           timeout=3600, creationflags=SUBPROCESS_CREATION_FLAGS)
     if r.returncode != 0:
         raise RuntimeError(f"ffmpeg concat 失败 rc={r.returncode}: {r.stderr[-500:]}")
 
@@ -110,19 +111,22 @@ def mux_audio(source_video: str, video_in: Path, video_out: Path,
               log: Optional[Callable[[str], None]] = None) -> bool:
     """把源视频音频封装进成片；无音频/失败时直接把视频流复制为成片。"""
     ffmpeg = FFmpegCLI.instance().ffmpeg_path
-    temp = tempfile.NamedTemporaryFile(suffix=".aac", delete=False)
+    temp = tempfile.NamedTemporaryFile(suffix=".mka", delete=False)
     temp.close()
     use_shell = True if os.name == "nt" else False
     try:
+        # .mka 中转：-acodec copy 到 .aac（ADTS）容器对 AC-3/DTS 等编码必然失败
         extract_cmd = [ffmpeg, "-y", "-i", str(source_video), "-acodec", "copy",
                        "-vn", "-loglevel", "error", temp.name]
-        subprocess.check_output(extract_cmd, stdin=open(os.devnull), shell=use_shell,
-                                timeout=600, creationflags=SUBPROCESS_CREATION_FLAGS)
+        with open(os.devnull) as devnull:
+            subprocess.check_output(extract_cmd, stdin=devnull, shell=use_shell,
+                                    timeout=600, creationflags=SUBPROCESS_CREATION_FLAGS)
         merge_cmd = [ffmpeg, "-y", "-i", str(video_in), "-i", temp.name,
                      "-vcodec", "copy", "-acodec", "copy", "-loglevel", "error",
                      str(video_out)]
-        subprocess.check_output(merge_cmd, stdin=open(os.devnull), shell=use_shell,
-                                timeout=3600, creationflags=SUBPROCESS_CREATION_FLAGS)
+        with open(os.devnull) as devnull:
+            subprocess.check_output(merge_cmd, stdin=devnull, shell=use_shell,
+                                    timeout=3600, creationflags=SUBPROCESS_CREATION_FLAGS)
         return True
     except Exception as e:
         # 无音轨（extract 失败）或封装失败：退化为纯视频拷贝，保证有产物

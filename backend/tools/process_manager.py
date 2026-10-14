@@ -100,12 +100,12 @@ class ProcessManager:
             if hasattr(process, 'join'):
                 try:
                     process.join(timeout=3)
-                except:
+                except Exception:
                     pass
             if hasattr(process, 'wait'):
                 try:
                     process.wait(timeout=3)
-                except:
+                except Exception:
                     pass
             # 进程未能正常终止，尝试强制终止
             if hasattr(process, 'kill'):
@@ -113,7 +113,12 @@ class ProcessManager:
         except Exception as e:
             # print(f"Error terminating process: {str(e)}")
             pass
-        self.terminate_by_pid(process.pid)
+        # PID 补杀前先复查：进程已正常退出就不再按 PID 强杀（防 PID 复用误杀无关进程）
+        try:
+            if process.poll() is None:
+                self.terminate_by_pid(process.pid)
+        except Exception:
+            self.terminate_by_pid(process.pid)
 
     def terminate_by_pid(self, pid):
         try:

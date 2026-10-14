@@ -264,9 +264,16 @@ class Checkpoint:
             return None
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
+        # 结构校验：非 dict / 缺 param_hash / segments 缺失或元素缺关键字段时按损坏处理
+        # （返回 None → 上层 load_or_rebuild_checkpoint 走重建/降级，而不是直接抛异常炸任务）
         if not isinstance(data, dict) or "param_hash" not in data:
+            return None
+        segments = data.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return None
+        if not all(isinstance(it, dict) and {"index", "skip", "cap"} <= set(it) for it in segments):
             return None
         if expected_hash is not None and data.get("param_hash") != expected_hash:
             raise CheckpointMismatch(

@@ -6,23 +6,6 @@
 @desc: 字幕去除器图形化界面（由 PySimpleGUI 改写为 PySide6）
 """
 
-# ── 首启自举钩子：必须在 cv2/torch 等重导入之前 ──────────────────────
-# 注意：不能用 sys.path.insert(0, 'backend/tools') 再 import first_run——
-# backend/tools 下有 concurrent 包，插到最前会遮蔽标准库 concurrent.futures！
-import os as _os
-import sys as _sys
-import importlib.util as _ilu
-
-_spec = _ilu.spec_from_file_location(
-    '_first_run_hook',
-    _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'backend', 'tools', 'first_run.py'))
-_mod = _ilu.module_from_spec(_spec) if _spec else None
-if _mod is not None:
-    _spec.loader.exec_module(_mod)
-    _mod.ensure_environment()  # 环境齐备→返回；不齐备→自举后 execv 重启（不返回）
-del _os, _sys, _ilu
-# ─────────────────────────────────────────────────────────────────────
-
 import sys
 import os
 import configparser
@@ -223,7 +206,7 @@ if __name__ == '__main__':
         InfoBar.warning(
             '权重完整性',
             f'发现 {len(_scan_missing) + len(_scan_mismatch)} 项权重异常，详见日志；'
-            '可在 设置-环境自检 一键修复',
+            '请按 使用教程 手动下载补齐',
             duration=8000,
             parent=window
         )

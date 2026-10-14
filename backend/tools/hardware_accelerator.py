@@ -258,9 +258,9 @@ class HardwareAccelerator:
             if self.__dml:
                 try:
                     import torch_directml
-                    return torch_directml.device(torch_directml.default_device())
                     self.__dml = True
-                except:
+                    return torch_directml.device(torch_directml.default_device())
+                except Exception:
                     traceback.print_exc()
                     self.__dml = False
             if self.__cuda:

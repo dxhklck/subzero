@@ -100,8 +100,9 @@ def parse_args():
     if args.sub_area:
         args.subtitle_area_coords = args.subtitle_area_coords + args.sub_area
     # --time-range 与 --frame-start/--frame-end 都定义处理范围，同时给出会歧义
-    if args.time_range is not None and (args.frame_start is not None or args.frame_end is not None):
-        parser.error("--time-range conflicts with --frame-start/--frame-end "
+    if args.time_range is not None and (args.frame_start is not None or args.frame_end is not None
+                                        or args.frame_write_start is not None):
+        parser.error("--time-range conflicts with --frame-start/--frame-end/--frame-write-start "
                      "(both define the processing frame range)")
     # --residue-only 对整段输入执行二修，不支持再限定帧范围
     if args.residue_only and (args.time_range is not None or args.frame_start is not None

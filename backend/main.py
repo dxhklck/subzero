@@ -321,8 +321,10 @@ class SubtitleRemover:
         frame_end = self.frame_end if self.frame_end is not None else self.frame_count
         for start, end in continuous_frame_no_list:
             # 确保区间不超出视频总帧数（分段时同时钳制到段尾），否则会导致
-            # FramePrefetcher 哨兵被内循环消费后外层死锁
-            start_end_map[start] = min(end, frame_end)
+            # FramePrefetcher 哨兵被内循环消费后外层死锁；
+            # 起点同时钳制到段首（帧号体系为 1-based 标签，段内首帧 = frame_start+1），
+            # 否则向前外扩跨段边界时整段区间匹配不到、原帧直接写出（字幕漏除）
+            start_end_map[max(start, self.frame_start + 1)] = min(end, frame_end)
         # 段间重叠：frame_write_start 之前的帧只作上下文（送模型、不写入、不计进度）；
         # 未注入时等于 frame_start，行为与旧版完全一致
         write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
@@ -513,6 +515,10 @@ class SubtitleRemover:
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
         self.isFinished = True
         self.progress_total = 100
+        try:
+            self.video_temp_file.close()  # 先关句柄，否则 Windows 下 os.remove 报 PermissionError 泄漏临时文件
+        except Exception:
+            pass
         if os.path.exists(self.video_temp_file.name):
             try:
                 os.remove(self.video_temp_file.name)
@@ -565,6 +571,10 @@ class SubtitleRemover:
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
         self.isFinished = True
         self.progress_total = 100
+        try:
+            self.video_temp_file.close()  # 先关句柄，否则 Windows 下 os.remove 报 PermissionError 泄漏临时文件
+        except Exception:
+            pass
         if os.path.exists(self.video_temp_file.name):
             try:
                 os.remove(self.video_temp_file.name)
@@ -729,16 +739,19 @@ class SubtitleRemover:
         self.append_output(tr['Main']['ResidueCheckRepaired'].format(n_repaired, round(time.time() - t0)))
 
     def merge_audio_to_video(self):
-        # 创建音频临时对象，windows下delete=True会有permission denied的报错
-        temp = tempfile.NamedTemporaryFile(suffix='.aac', delete=False)
+        # 创建音频临时对象，windows下delete=True会有permission denied的报错。
+        # 用 .mka 中转：-acodec copy 到 .aac（ADTS）容器时 AC-3/DTS 等编码必然失败，
+        # mka 可容纳任意编码，抽取/封装全程无损
+        temp = tempfile.NamedTemporaryFile(suffix='.mka', delete=False)
         audio_extract_command = [FFmpegCLI.instance().ffmpeg_path,
                                  "-y", "-i", self.video_path,
                                  "-acodec", "copy",
                                  "-vn", "-loglevel", "error", temp.name]
         use_shell = True if os.name == "nt" else False
         try:
-            subprocess.check_output(audio_extract_command, stdin=open(os.devnull), shell=use_shell, timeout=600,
-                                    creationflags=SUBPROCESS_CREATION_FLAGS)
+            with open(os.devnull) as devnull:
+                subprocess.check_output(audio_extract_command, stdin=devnull, shell=use_shell, timeout=600,
+                                        creationflags=SUBPROCESS_CREATION_FLAGS)
         except Exception as e:
             traceback.print_exc()
             self.append_output(tr['Main']['FailToExtractAudio'].format(str(e)))
@@ -752,8 +765,12 @@ class SubtitleRemover:
                                        "-acodec", "copy",
                                        "-loglevel", "error", self.video_out_path]
                 try:
-                    subprocess.check_output(audio_merge_command, stdin=open(os.devnull), shell=use_shell, timeout=600,
-                                            creationflags=SUBPROCESS_CREATION_FLAGS)
+                    with open(os.devnull) as devnull:
+                        subprocess.check_output(audio_merge_command, stdin=devnull, shell=use_shell, timeout=600,
+                                                creationflags=SUBPROCESS_CREATION_FLAGS)
+                    # 仅在真正完成封装时置位；临时文件缺失/封装失败时保持 False，
+                    # 让 finally 的 copy 兜底产出无音频成片
+                    self.is_successful_merged = True
                 except Exception as e:
                     traceback.print_exc()
                     self.append_output(tr['Main']['FailToMergeAudio'].format(str(e)))
@@ -764,7 +781,6 @@ class SubtitleRemover:
                 except Exception:
                     #ignore
                     pass
-            self.is_successful_merged = True
         finally:
             temp.close()
             if not self.is_successful_merged:
@@ -807,9 +823,10 @@ if __name__ == '__main__':
         exit(-1)
     sr = SubtitleRemover(args.input)
     sr.sub_areas = args.subtitle_area_coords
-    # 显式传 -o 时覆盖；省略则用默认（输入同目录 <名>_no_sub.mp4，见 __init__）
+    # 显式传 -o 时覆盖（转绝对路径：纯文件名时 os.path.dirname('') 会使 makedirs 崩溃）；
+    # 省略则用默认（输入同目录 <名>_no_sub.mp4，见 __init__）
     if args.output is not None:
-        sr.video_out_path = args.output
+        sr.video_out_path = os.path.abspath(args.output)
     # 显式传参时仅覆盖内存值（不写盘，不污染 GUI 设置）；不传则沿用 config.json 中 GUI 选择的模式
     if args.inpaint_mode is not None:
         config.inpaintMode.value = args.inpaint_mode
@@ -821,6 +838,18 @@ if __name__ == '__main__':
     # 段间重叠写入起点：之前的帧只作上下文送模型、不写入（默认与 frame_start 相同）
     if args.frame_write_start is not None:
         sr.frame_write_start = max(0, args.frame_write_start)
+    # 帧范围合法性：start/end 倒置或写入起点越界会使预读取读零帧/区间永远不命中，静默输出空视频
+    if sr.frame_start is not None and sr.frame_end is not None and sr.frame_end <= sr.frame_start:
+        print(f"Error: --frame-end ({args.frame_end}) must be greater than "
+              f"--frame-start ({args.frame_start}).")
+        exit(-1)
+    if sr.frame_write_start is not None:
+        lo = sr.frame_start if sr.frame_start is not None else 0
+        hi = sr.frame_end if sr.frame_end is not None else sr.frame_count
+        if not (lo <= sr.frame_write_start < hi):
+            print(f"Error: --frame-write-start ({args.frame_write_start}) must be within "
+                  f"[--frame-start, --frame-end).")
+            exit(-1)
     # 时间区间（秒 → 帧范围，0-based、end 排他）：仅处理并输出区间内帧；
     # 同时按 GUI 时间区间（AB 区块）语义设置 ab_sections（0-based、end 排他）
     if args.time_range is not None:

@@ -18,7 +18,7 @@ from backend.config import (config, tr, VERSION, PROJECT_HOME_URL, PROJECT_UPDAT
                            PROJECT_RELEASES_URL, HARDWARD_ACCELERATION_OPTION, BASE_DIR)
 from backend.tools.version_service import VersionService
 from backend.tools.concurrent import TaskExecutor
-from backend.tools.bootstrap import check_all, fix_weights
+from backend.tools.bootstrap import check_all
 from ui.component.compact_rows import (CompactRangeRow, CompactSwitchRow,
                                        CompactComboRow, CompactParamRow,
                                        CompactActionRow,
@@ -345,7 +345,6 @@ class AdvancedSettingInterface(ScrollArea):
     def on_env_checked(self, payload):
         results, missing = payload
         lines = [f"{'✅' if r['ok'] else '❌'} {r['name']}: {r['detail']}" for r in results]
-        report = '\n'.join(lines)
         for line in lines:
             self._env_log(line)
         self.env_status.setText(
@@ -353,29 +352,15 @@ class AdvancedSettingInterface(ScrollArea):
             else tr["Setting"]["EnvCheckMissing"].format(len(missing)))
 
         if missing:
-            n_dl = sum(1 for m in missing if m.get('sources'))
-            msg = report + f"\n\n{tr['Setting']['EnvCheckMissingSummary'].format(len(missing))}"
-            if n_dl:
-                msg += f"，{tr['Setting']['EnvCheckDownloadable'].format(n_dl)}"
-            msg += f"\n{tr['Setting']['EnvCheckAskDownload']}"
-            w = MessageBox(tr["Setting"]["EnvCheck"], msg, self.window())
-            if w.exec():
-                self.env_status.setText(tr["Setting"]["EnvCheckDownloading"])
-                TaskExecutor.runTask(lambda: fix_weights(missing, log=self._env_log)).then(self.on_weights_fixed)
+            # 不内置任何下载逻辑：列出缺失项，由用户按使用教程手动补齐
+            self._env_log(f"{tr['Setting']['EnvCheckMissingSummary'].format(len(missing))}: "
+                          + ', '.join(m['path'] for m in missing))
+            self._env_log(tr['Setting']['EnvCheckManualHint'])
+            InfoBar.warning(tr["Setting"]["EnvCheck"], tr["Setting"]["EnvCheckManualHint"],
+                            duration=4000, parent=self.window())
         else:
             InfoBar.success(tr["Setting"]["EnvCheck"], tr["Setting"]["EnvCheckAllGood"],
                             duration=2500, parent=self.window())
-
-    def on_weights_fixed(self, payload):
-        fixed, manual = payload
-        if manual:
-            self._env_log(f"⚠ {tr['Setting']['EnvCheckNoSource'].format(len(manual), ', '.join(manual))}")
-        self.env_status.setText(
-            tr["Setting"]["EnvCheckDownloadDone"].format(len(fixed)) if fixed
-            else tr["Setting"]["EnvCheckManualHint"])
-        InfoBar.success(tr["Setting"]["EnvCheck"],
-                        tr["Setting"]["EnvCheckRepaired"].format(len(fixed)),
-                        duration=2500, parent=self.window())
 
     # ---------- 检查更新（自「关于」页并入） ----------
 
