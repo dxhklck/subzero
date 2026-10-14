@@ -9,17 +9,19 @@
 # ── 首启自举钩子：必须在 cv2/torch 等重导入之前 ──────────────────────
 # 注意：不能用 sys.path.insert(0, 'backend/tools') 再 import first_run——
 # backend/tools 下有 concurrent 包，插到最前会遮蔽标准库 concurrent.futures！
+# 纯源码发布不含 first_run.py（无自动安装逻辑），文件不存在时静默跳过。
 import os as _os
 import sys as _sys
 import importlib.util as _ilu
 
-_spec = _ilu.spec_from_file_location(
-    '_first_run_hook',
-    _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'backend', 'tools', 'first_run.py'))
-_mod = _ilu.module_from_spec(_spec) if _spec else None
-if _mod is not None:
-    _spec.loader.exec_module(_mod)
-    _mod.ensure_environment()  # 环境齐备→返回；不齐备→自举后 execv 重启（不返回）
+_first_run_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                'backend', 'tools', 'first_run.py')
+if _os.path.isfile(_first_run_path):
+    _spec = _ilu.spec_from_file_location('_first_run_hook', _first_run_path)
+    _mod = _ilu.module_from_spec(_spec) if _spec else None
+    if _mod is not None:
+        _spec.loader.exec_module(_mod)
+        _mod.ensure_environment()  # 环境齐备→返回；不齐备→自举后 execv 重启（不返回）
 del _os, _sys, _ilu
 # ─────────────────────────────────────────────────────────────────────
 
