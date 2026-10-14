@@ -3,7 +3,9 @@
 纯函数模块（不依赖 GUI），供 HomeInterface 的分段任务编排调用：
 - checkpoint 状态机见 backend/tools/segmenter.py；
 - 每段子进程由 HomeInterface.run_subtitle_remover_process 以
-  frame_start/frame_end/is_segment 注入 options 执行。
+  frame_start/frame_end/is_segment 注入 options 执行；
+- 段间重叠（segmentOverlapFrames）：后续段 frame_start 向前多取 overlap 帧
+  作上下文，frame_write_start 仍指段首——重叠帧只送模型、不写入。
 """
 
 from __future__ import annotations
@@ -47,13 +49,28 @@ def compute_segment_frames(frame_count: int, fps: float,
 
 
 def build_task_params(options: Dict[str, Any], inpaint_mode: Any) -> Dict[str, Any]:
-    """组装参与参数哈希的任务参数（一切影响输出像素的字段；路径除外）。"""
+    """组装参与参数哈希的任务参数（一切影响输出像素的字段；路径除外）。
+
+    段位置字段（frame_start/frame_end/frame_write_start/is_segment）不参与哈希；
+    段间重叠帧数由调用方作为 segmentOverlapFrames 放入（改重叠值=拒绝续跑/重建）。
+    """
     params: Dict[str, Any] = {"inpaint_mode": str(inpaint_mode)}
     for key, value in options.items():
-        if key in ("frame_start", "frame_end", "is_segment"):
+        if key in ("frame_start", "frame_end", "frame_write_start", "is_segment"):
             continue  # 段位置字段，不属于内容参数
         params[key] = value
     return params
+
+
+def build_segment_options(seg: Segment) -> Dict[str, Any]:
+    """单段子进程注入选项：处理范围 [frame_start, frame_end) 含重叠上下文，
+    写入起点 frame_write_start=段首（跳过前 overlap 帧，只送模型不写入）。"""
+    return {
+        "frame_start": seg.frame_start,        # 处理起点（段首向前 overlap 帧）
+        "frame_end": seg.frame_end,
+        "frame_write_start": seg.write_start,  # 写入起点（段首，跳过重叠帧）
+        "is_segment": True,
+    }
 
 
 def build_concat_list(task_dir: Path, segments: List[Segment]) -> Path:

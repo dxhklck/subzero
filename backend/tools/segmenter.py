@@ -8,7 +8,11 @@ checkpoint.json 记录每段状态与全局参数哈希——参数不一致的�
 
 差异（相对 seedvr2 原版）：
 - 分段单位改为「帧数」而非「秒数」，由执行器按 fps × segment_seconds 换算；
-- params_hash 的相关参数按 VSR 的配置键裁剪。
+- params_hash 的相关参数按 VSR 的配置键裁剪；
+- 段间重叠（overlap）：除第一段外每段向前多取 N 帧作上下文（只送模型、不写入），
+  段内区分「处理范围」[frame_start, frame_end) 与「写入范围」[write_start, frame_end)，
+  拼接时无需裁剪、成片总帧数不变。overlap 由调用方作为内容参数放入 params
+  （参与 params_hash：改重叠值=拒绝续跑/重建），段位置字段（skip/cap）不参与。
 """
 
 from __future__ import annotations
@@ -31,12 +35,19 @@ STATUS_FAILED = "failed"
 
 @dataclass
 class Segment:
-    """一段的处理计划。"""
+    """一段的处理计划。
+
+    skip/cap 描述「写入范围」[skip, skip+cap)（段首 0-based，含）；
+    overlap 为段首向前重叠的上下文帧数（只送入模型、不写入段文件），
+    由此派生「处理范围」[frame_start, frame_end)。
+    第 0 段 overlap 恒为 0（无前序段可重叠）。
+    """
 
     index: int
-    skip: int   # 段起始帧（全局 0-based，含）
-    cap: int    # 段帧数
+    skip: int   # 段写入起始帧（全局 0-based，含）
+    cap: int    # 段写入帧数
     status: str = STATUS_PENDING
+    overlap: int = 0  # 段首向前重叠的上下文帧数（不写入）
 
     @property
     def frame_end(self) -> int:
@@ -44,26 +55,49 @@ class Segment:
         return self.skip + self.cap
 
     @property
+    def frame_start(self) -> int:
+        """处理起点（全局 0-based，含）：写入起点向前 overlap 帧（段0无重叠）。"""
+        return max(0, self.skip - self.overlap)
+
+    @property
+    def write_start(self) -> int:
+        """写入起点（全局 0-based，含）：段首，跳过前 overlap 帧上下文。"""
+        return self.skip
+
+    @property
+    def process_frames(self) -> int:
+        """本段实际读取/推理的帧数（含重叠上下文）。"""
+        return self.frame_end - self.frame_start
+
+    @property
     def output_name(self) -> str:
         """段输出文件名（相对任务目录）。"""
         return f"seg_{self.index:04d}.mp4"
 
 
-def build_plan(total_frames: int, segment_frames: int) -> List[Segment]:
+def build_plan(total_frames: int, segment_frames: int,
+               overlap: int = 0) -> List[Segment]:
     """按段帧数生成计划；total_frames <= segment_frames 时为单段（整片）。
 
-    Example: 240 帧、段长 100 -> [(skip=0,cap=100), (skip=100,cap=100),
-    (skip=200,cap=40)]。
+    overlap>0 时，除第 0 段外每段处理范围向前扩展 overlap 帧作为上下文
+    （写入范围不变，仍从段首开始，成片总帧数不变）。
+
+    Example: 240 帧、段长 100、overlap=2 ->
+    [(skip=0,cap=100,overlap=0), (skip=100,cap=100,overlap=2),
+    (skip=200,cap=40,overlap=2)]——第 2 段处理 [98,200)、写入 [100,200)。
+    overlap=0（默认）时与旧行为完全一致。
     """
     if total_frames <= 0:
         return []
     seg_frames = max(1, int(segment_frames))
+    ov = max(0, int(overlap))
     plan: List[Segment] = []
     skip = 0
     index = 0
     while skip < total_frames:
         cap = min(seg_frames, total_frames - skip)
-        plan.append(Segment(index=index, skip=skip, cap=cap))
+        plan.append(Segment(index=index, skip=skip, cap=cap,
+                            overlap=0 if index == 0 else ov))
         index += 1
         skip += cap
     return plan
@@ -72,7 +106,8 @@ def build_plan(total_frames: int, segment_frames: int) -> List[Segment]:
 def params_hash(params: Dict[str, Any]) -> str:
     """对所有影响输出像素的任务参数做稳定 SHA-256。
 
-    段位置字段（skip/cap/输出路径）不得参与哈希。
+    段位置字段（skip/cap/输出路径）不得参与哈希；段间重叠帧数属于内容参数
+    （改变邻帧模型的上下文即改变输出像素），由调用方放入 params 参与哈希。
     """
     relevant = {
         k: params[k]
@@ -122,7 +157,8 @@ class ResumeInfo:
 
 def load_or_rebuild_checkpoint(path: Union[str, Path], params: Dict[str, Any],
                                total_frames: int, segment_frames: int,
-                               log: Optional[Any] = None) -> tuple:
+                               log: Optional[Any] = None,
+                               overlap: int = 0) -> tuple:
     """为任务解析 checkpoint。
 
     返回 ``(checkpoint, mode)``，mode 为：
@@ -136,10 +172,13 @@ def load_or_rebuild_checkpoint(path: Union[str, Path], params: Dict[str, Any],
     ``"refused"``
         哈希不同且存在完成段 —— 拒绝续跑（新旧段混合会错位），
         调用方需提示用户处理。
+
+    overlap 为段间重叠帧数（随 params 参与哈希，改值即触发上述分流）。
     """
     p = Path(path)
     if not p.exists():
-        return Checkpoint.create(p, params, total_frames, segment_frames), "created"
+        return Checkpoint.create(p, params, total_frames, segment_frames,
+                                 overlap), "created"
     try:
         return Checkpoint.load(p, expected_hash=params_hash(params)), "loaded"
     except CheckpointMismatch:
@@ -149,7 +188,7 @@ def load_or_rebuild_checkpoint(path: Union[str, Path], params: Dict[str, Any],
             if log is not None:
                 log("[续跑] 参数已变更但尚无已完成段，按新参数重建任务计划")
             return Checkpoint.create(p, params, total_frames,
-                                     segment_frames), "rebuilt"
+                                     segment_frames, overlap), "rebuilt"
         if log is not None:
             log(f"[续跑] 参数已变更且已存在 {done} 个按旧参数完成的段，拒绝续跑")
         return prior, "refused"
@@ -197,17 +236,19 @@ class Checkpoint:
 
     @classmethod
     def create(cls, path: Path, params: Dict[str, Any], total_frames: int,
-               segment_frames: int) -> "Checkpoint":
+               segment_frames: int, overlap: int = 0) -> "Checkpoint":
         """新建全 pending 计划并写盘。"""
-        plan = build_plan(total_frames, segment_frames)
+        plan = build_plan(total_frames, segment_frames, overlap)
         data = {
             "version": CHECKPOINT_VERSION,
             "param_hash": params_hash(params),
             "params": params,
             "total_frames": total_frames,
             "segment_frames": segment_frames,
+            "overlap": max(0, int(overlap)),
             "segments": [
-                {"index": s.index, "skip": s.skip, "cap": s.cap, "status": s.status}
+                {"index": s.index, "skip": s.skip, "cap": s.cap,
+                 "overlap": s.overlap, "status": s.status}
                 for s in plan
             ],
         }
@@ -246,7 +287,8 @@ class Checkpoint:
     def segments(self) -> List[Segment]:
         return [
             Segment(index=int(it["index"]), skip=int(it["skip"]), cap=int(it["cap"]),
-                    status=str(it.get("status", STATUS_PENDING)))
+                    status=str(it.get("status", STATUS_PENDING)),
+                    overlap=int(it.get("overlap", 0) or 0))
             for it in self.data.get("segments", [])
         ]
 

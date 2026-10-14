@@ -89,6 +89,10 @@ class SubtitleRemover:
         # 分段续跑由外层执行器在构造后注入（setattr），run() 起点据此 seek
         self.frame_start = 0
         self.frame_end = None
+        # 分段写入起点 [frame_write_start, frame_end)（0-based，None=frame_start 即不跳写）。
+        # 段间重叠：执行器令 frame_start 向前多取 overlap 帧作上下文，frame_write_start
+        # 仍指段首——之前的帧只送模型（保邻帧窗口上下文）、不写入也不计进度
+        self.frame_write_start = None
         # 分段模式：跳过残留二遍与音频合并（这两步由成片 concat 阶段统一处理）
         self.is_segment = False
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
@@ -316,6 +320,9 @@ class SubtitleRemover:
             # 确保区间不超出视频总帧数（分段时同时钳制到段尾），否则会导致
             # FramePrefetcher 哨兵被内循环消费后外层死锁
             start_end_map[start] = min(end, frame_end)
+        # 段间重叠：frame_write_start 之前的帧只作上下文（送模型、不写入、不计进度）；
+        # 未注入时等于 frame_start，行为与旧版完全一致
+        write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
         current_frame_index = self.frame_start
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
         # 使用帧预读取，I/O 与推理重叠；段帧数作为预读取上限（读满即停）
@@ -328,10 +335,12 @@ class SubtitleRemover:
             current_frame_index += 1
             # 判断当前帧号是不是字幕区间开始, 如果不是，则直接写
             if current_frame_index not in start_end_map.keys():
-                self.video_writer.write(frame)
-                # self.append_output(f'write frame: {current_frame_index}')
-                self.update_progress(tbar, increment=1)
-                self.update_preview_with_comp(frame, frame)
+                # 段首重叠帧（全局帧号 <= write_start）只作上下文，不写入
+                if current_frame_index > write_start:
+                    self.video_writer.write(frame)
+                    # self.append_output(f'write frame: {current_frame_index}')
+                    self.update_progress(tbar, increment=1)
+                    self.update_preview_with_comp(frame, frame)
             # 如果是区间开始，则找到尾巴
             else:
                 start_frame_index = current_frame_index
@@ -357,10 +366,15 @@ class SubtitleRemover:
                         continue
                     if not g_coords:
                         # 整组帧都无有效检测框（全被过滤为误检）：写原帧
-                        for frame in frames_g:
-                            self.video_writer.write(frame)
-                            self.update_preview_with_comp(frame, frame)
-                        self.update_progress(tbar, increment=len(frames_g))
+                        # （组内前 ctx 帧为段间重叠上下文：不写、不计进度）
+                        n_write = 0
+                        for i, frame in enumerate(frames_g):
+                            if g_start + i > write_start:
+                                self.video_writer.write(frame)
+                                self.update_preview_with_comp(frame, frame)
+                                n_write += 1
+                        if n_write:
+                            self.update_progress(tbar, increment=n_write)
                         continue
                     mask = create_mask(self.mask_size, g_coords)
                     if route:
@@ -370,6 +384,9 @@ class SubtitleRemover:
                     # 重复帧跳过：与代表帧几乎相同的帧不送推理，修复后直接复用其结果
                     kept_idx, dup_map = self._split_duplicate_frames(frames_g)
                     frames_run = [frames_g[i] for i in kept_idx]
+                    # 组内前 ctx 帧为段间重叠上下文（全局帧号 <= write_start）：
+                    # 仍送推理保邻帧窗口上下文，但不写入、不计进度
+                    ctx = max(0, min(len(frames_g), write_start + 1 - g_start))
                     if len(dup_map) > 0:
                         self.append_output(f'[Skip] 组 {g_start}-{g_end}: {len(dup_map)}/{len(frames_g)} 帧与相邻帧几乎相同，跳过推理直接复用')
                     # MiniMax（StripCropInpaint包装）内部已按 chunk_frames(4k+1) 分块、块间重叠混合
@@ -379,11 +396,16 @@ class SubtitleRemover:
                         chunk = getattr(model.inner, 'chunk_frames', 61)
                         batch_size = max(batch_size, min(len(frames_run), chunk * 4))
                     out_kept = []
+                    run_pos = 0
                     for batch in batch_generator(frames_run, batch_size):
                         # 3. 调用批推理
                         if len(batch) >= 1:
                             out_kept.extend(model(batch, mask))
-                        self.update_progress(tbar, increment=len(batch))
+                        # 仅统计本批中需要写入的帧（重叠上下文帧不计进度）
+                        n_write = sum(1 for i in kept_idx[run_pos:run_pos + len(batch)] if i >= ctx)
+                        run_pos += len(batch)
+                        if n_write:
+                            self.update_progress(tbar, increment=n_write)
                     # 重建全组输出：推理帧按原位回填，重复帧复用代表帧的修复结果
                     if dup_map:
                         out_full = [None] * len(frames_g)
@@ -391,12 +413,16 @@ class SubtitleRemover:
                             out_full[i] = out_kept[k]
                         for di, ri in dup_map.items():
                             out_full[di] = out_full[ri]
-                        self.update_progress(tbar, increment=len(dup_map))
+                        n_dup_write = sum(1 for di in dup_map if di >= ctx)
+                        if n_dup_write:
+                            self.update_progress(tbar, increment=n_dup_write)
                     else:
                         out_full = out_kept
-                    for src, rep in zip(frames_g, out_full):
-                        self.video_writer.write(rep)
-                        self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
+                    for i, (src, rep) in enumerate(zip(frames_g, out_full)):
+                        # 段首重叠帧只作上下文不写入（进度已在上面按写入帧计数）
+                        if g_start + i > write_start:
+                            self.video_writer.write(rep)
+                            self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
         reader.stop()
 
     def run(self):
@@ -415,7 +441,10 @@ class SubtitleRemover:
         os.makedirs(os.path.dirname(self.video_out_path), exist_ok=True)
         # 分段帧范围：seek 到段起点（frame_start 在构造后由执行器注入）
         frame_end = self.frame_end if self.frame_end is not None else self.frame_count
-        seg_total = max(1, frame_end - self.frame_start)
+        # 进度条总量 = 本次要写入的帧数（frame_end - frame_write_start）；
+        # 段间重叠的前 overlap 帧只作上下文送模型（不写入），不计入进度
+        write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
+        seg_total = max(1, frame_end - write_start)
         if self.frame_start > 0:
             self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, self.frame_start)
         # 重置进度条
@@ -727,5 +756,8 @@ if __name__ == '__main__':
         sr.frame_start = max(0, args.frame_start)
     if args.frame_end is not None:
         sr.frame_end = max(1, args.frame_end)
+    # 段间重叠写入起点：之前的帧只作上下文送模型、不写入（默认与 frame_start 相同）
+    if args.frame_write_start is not None:
+        sr.frame_write_start = max(0, args.frame_write_start)
     sr.run()
         

@@ -32,6 +32,11 @@ def parse_args():
         "--frame-end", type=int, default=None,
         help="0-based end frame (exclusive) for segmented/resumable processing; default video end"
     )
+    parser.add_argument(
+        "--frame-write-start", type=int, default=None,
+        help="0-based first frame to write (inclusive); frames before it are processed as "
+             "context only and not written (segment overlap). Default: same as --frame-start"
+    )
     args = parser.parse_args()
     if args.inpaint_mode is not None:
         args.inpaint_mode = InpaintMode[args.inpaint_mode.replace('-','_').upper()]

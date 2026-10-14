@@ -97,6 +97,10 @@ class Config(QConfig):
     # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）
     # 视频分段时长（秒）：0=不分段；新键名避免旧配置的分钟值被误读为秒
     segmentSeconds = RangeConfigItem("Main", "SegmentSeconds", 600, RangeValidator(0, 14400))
+    # 段间重叠帧数：除第一段外，每段向前多处理 N 帧作为邻帧模型（STTN/MiniMax 靠前后帧
+    # 窗口推理）的上下文，消除段边界处上下文被截断产生的接缝；重叠帧只送入模型、
+    # 不写入段文件，因此拼接时无需裁剪、成片总帧数不变。0=关闭（与旧行为一致）
+    segmentOverlapFrames = RangeConfigItem("Main", "SegmentOverlapFrames", 2, RangeValidator(0, 10))
     # 以下参数仅适用STTN算法时，才生效
     """
     1. STTN_SKIP_DETECTION

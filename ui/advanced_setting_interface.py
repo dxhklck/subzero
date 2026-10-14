@@ -185,8 +185,9 @@ class AdvancedSettingInterface(ScrollArea):
     def _build_general_group(self):
         """通用（页面最底部）：并入外观与关于。
         行1：界面语言 | 硬件加速 | 视频分段时长 | 启动检查更新
-        行2：应用主题 | 保存目录 | 环境自检 | 关于·检查更新
-        行3：项目链接
+        行2：段间重叠帧数（单独一行，四列占位）
+        行3：应用主题 | 保存目录 | 环境自检 | 关于·检查更新
+        行4：项目链接
         """
         gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
@@ -215,6 +216,12 @@ class AdvancedSettingInterface(ScrollArea):
             st['CheckUpdateOnStartupDesc'], icon=FluentIcon.UPDATE, parent=card)
         vbox.addWidget(CompactParamRow(self.lang_row, self.hw_row,
                                        self.segment_row, self.update_row, columns=4))
+
+        # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
+        self.segment_overlap_row = CompactRangeRow(
+            config.segmentOverlapFrames, gui['SegmentOverlap'],
+            gui['SegmentOverlapDesc'], icon=FluentIcon.LINK, parent=card)
+        vbox.addWidget(CompactParamRow(self.segment_overlap_row, columns=4))
 
         # 四列网格：主题 | 环境自检 | 保存目录（跨两列，路径中段省略，悬停看全路径）
         self.theme_row = CompactComboRow(
@@ -263,6 +270,7 @@ class AdvancedSettingInterface(ScrollArea):
     def _on_restore_defaults(self):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
+                      self.segment_overlap_row,
                       self.update_row, self.theme_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \

@@ -207,12 +207,17 @@ class STTNAutoInpaint:
             # 需在创建 FramePrefetcher（立即起线程读帧）之前 seek 到段起点
             frame_start = 0
             frame_end = None
+            # 段间重叠写入起点（全局 0-based）：之前的帧只作上下文送模型、不写入；
+            # 未注入（独立运行/无重叠）时等于 frame_start，行为与旧版一致
+            frame_write_start = 0
             if input_sub_remover is not None:
                 ab_sections = input_sub_remover.ab_sections
 
                 writer = input_sub_remover.video_writer
                 frame_start = int(getattr(input_sub_remover, 'frame_start', 0) or 0)
                 frame_end = getattr(input_sub_remover, 'frame_end', None)
+                _fws = getattr(input_sub_remover, 'frame_write_start', None)
+                frame_write_start = frame_start if _fws is None else int(_fws)
             else:
                 ab_sections = None
                 # 创建视频写入对象，用于输出修复后的视频
@@ -325,14 +330,18 @@ class STTNAutoInpaint:
                                     comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
                                     mask_area = mask[inpaint_area[k][0]:inpaint_area[k][1], :]
                                     frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
-                        
-                        writer.write(frame)
-                        
-                        if input_sub_remover is not None:
-                            if tbar is not None:
-                                input_sub_remover.update_progress(tbar, increment=1)
-                            if original_frame is not None and input_sub_remover.gui_mode:
-                                input_sub_remover.update_preview_with_comp(original_frame, frame)
+
+                        # 段间重叠：全局帧号（1-based）= frame_start + start_f + j + 1
+                        # （j 为块内相对下标），<= frame_write_start 的帧只作上下文
+                        # （已送入上方推理），不写入、不计进度
+                        if frame_start + start_f + j + 1 > frame_write_start:
+                            writer.write(frame)
+
+                            if input_sub_remover is not None:
+                                if tbar is not None:
+                                    input_sub_remover.update_progress(tbar, increment=1)
+                                if original_frame is not None and input_sub_remover.gui_mode:
+                                    input_sub_remover.update_preview_with_comp(original_frame, frame)
                 # 每个chunk处理完后清理GPU缓存
                 del frames_hr, frames, comps
                 gc.collect()

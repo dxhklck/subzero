@@ -512,7 +512,8 @@ class HomeInterface(QWidget):
         返回带 exitcode 属性的对象（整片=子进程；分段=末段子进程或 shim）。
         """
         from backend.tools.segment_executor import (probe_video_frames,
-            compute_segment_frames, build_task_params, concat_segments, mux_audio)
+            compute_segment_frames, build_task_params, build_segment_options,
+            concat_segments, mux_audio)
         from backend.tools.segmenter import (load_or_rebuild_checkpoint,
             derive_resume_info, params_hash)
 
@@ -521,14 +522,20 @@ class HomeInterface(QWidget):
         if seg_frames is None:
             return self.run_subtitle_remover_process(video_path, output_path, options)
 
+        # 段间重叠帧数（0=关闭）：除第一段外每段向前多取 N 帧作邻帧模型上下文，
+        # 只写本段真正的帧；参与参数哈希——改重叠值=拒绝续跑/按新参数重建
+        overlap = int(config.segmentOverlapFrames.value or 0)
+
         out_dir = os.path.dirname(output_path) or '.'
         stem = os.path.splitext(os.path.basename(video_path))[0]
         task_dir = os.path.join(out_dir, f'{stem}_no_sub_segments')
         ckpt_path = os.path.join(task_dir, 'checkpoint.json')
         params = build_task_params(options, config.inpaintMode.value)
+        params['segmentOverlapFrames'] = overlap
 
         checkpoint, mode = load_or_rebuild_checkpoint(
-            ckpt_path, params, frame_count, seg_frames, log=self._segment_log)
+            ckpt_path, params, frame_count, seg_frames, log=self._segment_log,
+            overlap=overlap)
         if mode == 'refused':
             self._segment_log('[续跑] 参数与上次不一致且已有完成段，拒绝续跑。',
                               f'如需全新重跑请删除目录：{task_dir}')
@@ -548,11 +555,16 @@ class HomeInterface(QWidget):
             seg_file = os.path.join(task_dir, seg.output_name)
             checkpoint.mark_running(seg.index)
             seg_options = dict(options)
-            seg_options['frame_start'] = seg.skip
-            seg_options['frame_end'] = seg.frame_end
-            seg_options['is_segment'] = True
-            self._segment_log(f'[分段] 段 {seg.index + 1}/{total}：帧 {seg.skip}-{seg.frame_end} '
-                              f'（{seg.cap} 帧）')
+            # 处理范围含重叠上下文，frame_write_start=段首（跳过前 overlap 帧）
+            seg_options.update(build_segment_options(seg))
+            if seg.overlap:
+                self._segment_log(f'[分段] 段 {seg.index + 1}/{total}：写入帧 '
+                                  f'{seg.skip}-{seg.frame_end}（{seg.cap} 帧），'
+                                  f'处理 {seg.frame_start}-{seg.frame_end}'
+                                  f'（含 {seg.overlap} 帧重叠上下文）')
+            else:
+                self._segment_log(f'[分段] 段 {seg.index + 1}/{total}：帧 {seg.skip}-{seg.frame_end} '
+                                  f'（{seg.cap} 帧）')
             process = self.run_subtitle_remover_process(
                 video_path, seg_file, seg_options,
                 progress_cb=self._make_segment_progress_cb(
