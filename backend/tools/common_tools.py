@@ -38,8 +38,9 @@ def is_image_file(filename):
 
 def is_video_or_image(filename):
     file_extension = os.path.splitext(filename)[-1].lower()
-    # 检查扩展名是否在定义的视频或图片文件后缀集合中
-    return file_extension in video_extensions or file_extension in image_extensions
+    # 检查扩展名是否在定义的视频或图片文件后缀集合中；路径不存在也判 False（提前报错）
+    return (os.path.exists(filename)
+            and (file_extension in video_extensions or file_extension in image_extensions))
 
 def merge_big_file_if_not_exists(dir, file, man_filename = None):
     if file not in os.listdir(dir):

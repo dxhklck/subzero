@@ -95,6 +95,9 @@ class SubtitleRemover:
         self.frame_write_start = None
         # 分段模式：跳过残留二遍与音频合并（这两步由成片 concat 阶段统一处理）
         self.is_segment = False
+        # 仅残留二修模式（--residue-only）：输入视频即第一遍修复产物，
+        # 跳过主修复循环与检测驱动的主流程，仅对输入执行残留检测+二修后输出
+        self.residue_only = False
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
         self._first_pass_regions = []
 
@@ -428,6 +431,11 @@ class SubtitleRemover:
     def run(self):
         # 记录开始时间
         start_time = time.time()
+        # 仅残留二修模式：短路主流程，仅对输入（第一遍修复产物）执行
+        # 「残留检测 + 二修」并输出（含音频 mux）
+        if self.residue_only:
+            self._run_residue_only(start_time)
+            return
         if len(self.sub_areas) == 0:
             self.append_output(tr['Main']['FullScreenProcessingNote'])
             self.sub_areas.append((0, self.frame_height, 0, self.frame_width))
@@ -501,6 +509,58 @@ class SubtitleRemover:
                 self._residue_second_pass(tbar)
                 # 将原音频合并到新生成的视频文件中
                 self.merge_audio_to_video()
+        self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
+        self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
+        self.isFinished = True
+        self.progress_total = 100
+        if os.path.exists(self.video_temp_file.name):
+            try:
+                os.remove(self.video_temp_file.name)
+            except Exception:
+                pass #ignore
+
+    def _run_residue_only(self, start_time):
+        """--residue-only：输入视频（-i）即第一遍修复产物。
+        跳过主修复循环与检测驱动的主流程，仅对输入执行「残留检测 + 二修」
+        （复用 _residue_second_pass 既有逻辑），输出到 -o（含音频 mux）。"""
+        if self.is_picture:
+            raise Exception('--residue-only only supports video input, got an image file.')
+        self.append_output('[ResidueOnly] 输入视频为第一遍修复产物, 跳过主修复流程, 仅执行残留检测与二次修复')
+        # 残留检查开关在该模式下强制启用（仅改内存值不写盘；调用方已判断过需要二修）
+        old_residue = config.residueCheck.value
+        config.residueCheck.value = True
+        try:
+            # _residue_second_pass 以 video_temp_file 为「第一遍输出」：
+            # 先释放主写通道（其编码子进程持有该临时路径），再把输入复制过去
+            try:
+                self.video_writer.release()
+            except Exception:
+                pass
+            shutil.copy2(get_readable_path(self.video_path), get_readable_path(self.video_temp_file.name))
+            # 第一遍覆盖区域（供残留重叠判定，防止把画面里天然像文字的纹理误当残留误修）：
+            # 指定了字幕区域时用区域本身（与 sttn_auto_mode 收集方式一致）；
+            # 未指定时按第一遍检测流程在输入上采样检测收集（与 video_inpaint 一致），
+            # 使未传 --sub-area 的契约调用（GUI 分段成片二修兜底）也能生效
+            if len(self.sub_areas) > 0:
+                for ymin, ymax, xmin, xmax in self.sub_areas:
+                    self._first_pass_regions.append((xmin, xmax, ymin, ymax))
+            else:
+                self.append_output(tr['Main']['ProcessingStartFindingSubtitles'])
+                detector = SubtitleDetect(self.video_path, self.sub_areas)
+                sub_list = detector.find_subtitle_frame_no()
+                self._collect_first_pass_regions(sub_list)
+                del detector
+                gc.collect()
+            tbar = tqdm(total=1, unit='pass', position=0, file=sys.__stdout__,
+                        desc='Residue Second Pass')
+            # 残留检测 + 二修（内部按 config.residueCheck 开关与第一遍区域判定）
+            self._residue_second_pass(tbar)
+            # 将原音频合并到新生成的视频文件中
+            self.merge_audio_to_video()
+            tbar.update(1)
+        finally:
+            config.residueCheck.value = old_residue
+        self.video_cap.release()
         self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
         self.isFinished = True
@@ -747,7 +807,9 @@ if __name__ == '__main__':
         exit(-1)
     sr = SubtitleRemover(args.input)
     sr.sub_areas = args.subtitle_area_coords
-    sr.video_out_path = args.output
+    # 显式传 -o 时覆盖；省略则用默认（输入同目录 <名>_no_sub.mp4，见 __init__）
+    if args.output is not None:
+        sr.video_out_path = args.output
     # 显式传参时仅覆盖内存值（不写盘，不污染 GUI 设置）；不传则沿用 config.json 中 GUI 选择的模式
     if args.inpaint_mode is not None:
         config.inpaintMode.value = args.inpaint_mode
@@ -759,5 +821,35 @@ if __name__ == '__main__':
     # 段间重叠写入起点：之前的帧只作上下文送模型、不写入（默认与 frame_start 相同）
     if args.frame_write_start is not None:
         sr.frame_write_start = max(0, args.frame_write_start)
+    # 时间区间（秒 → 帧范围，0-based、end 排他）：仅处理并输出区间内帧；
+    # 同时按 GUI 时间区间（AB 区块）语义设置 ab_sections（0-based、end 排他）
+    if args.time_range is not None:
+        start_sec, end_sec = args.time_range
+        fps = sr.fps
+        if not fps or fps <= 0:
+            print(f'Error: cannot determine the frame rate of {args.input}, '
+                  f'--time-range requires a readable video.')
+            exit(-1)
+        frame_start = int(start_sec * fps)
+        frame_end = int(end_sec * fps)
+        if frame_end <= frame_start:
+            print(f"Error: --time-range '{start_sec}-{end_sec}' is shorter than one frame "
+                  f"at {fps:.3f} fps.")
+            exit(-1)
+        if frame_start >= sr.frame_count:
+            print(f'Error: --time-range start {start_sec}s (frame {frame_start}) is at or beyond '
+                  f'the end of the video ({sr.frame_count} frames).')
+            exit(-1)
+        sr.frame_start = frame_start
+        sr.frame_end = min(frame_end, sr.frame_count)
+        sr.ab_sections = [range(sr.frame_start, sr.frame_end)]
+        print(f'Time range {start_sec}s-{end_sec}s -> frames [{sr.frame_start}, {sr.frame_end}) '
+              f'at {fps:.3f} fps')
+    # 仅残留二修模式：输入视频即第一遍修复产物，跳过主修复流程
+    if args.residue_only:
+        if sr.is_picture:
+            print('Error: --residue-only only supports video input, got an image file.')
+            exit(-1)
+        sr.residue_only = True
     sr.run()
         
