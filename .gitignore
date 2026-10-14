@@ -426,3 +426,6 @@ test/
 # 打包构建产物（可由 build_runtime.py + ISCC 重建，不入库）
 packaging/runtime/
 packaging/output/
+
+# 安装版 pyd 编译发行目录（build_pyd.py 产物，含 junction 不入库）
+/packaging/pyd-dist/
