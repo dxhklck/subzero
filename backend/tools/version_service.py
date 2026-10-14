@@ -19,6 +19,8 @@ class VersionService:
         self.api_endpoints = PROJECT_UPDATE_URLS
         # 新版本安装包直链（来自魔搭 version.json 的 download_url；GitHub API 无此字段）
         self.download_url = None
+        # 更新说明（网盘提取码等，随 download_url 一起来自 version.json；弹窗中展示）
+        self.release_notes = None
 
     def get_latest_version(self):
         """ get latest version """
@@ -46,8 +48,9 @@ class VersionService:
                     continue  # 如果版本格式不匹配，尝试下一个API
 
                 self.lastest_version = match.group(1)
-                # 国内源清单可带安装包直链（download_url），GitHub API 无此字段保持 None
+                # 国内源清单可带安装包直链与说明（网盘提取码等），GitHub API 无此字段保持 None
                 self.download_url = data.get('download_url') or None
+                self.release_notes = data.get('notes') or None
                 print(tr['VersionService']['VersionInfo'].format(VERSION, self.lastest_version))
                 return self.lastest_version
             except Exception as e:
@@ -60,6 +63,10 @@ class VersionService:
     def get_download_url(self):
         """新版本安装包直链；无（如 GitHub 端点）返回 None，调用方回退 Releases 页"""
         return self.download_url
+
+    def get_release_notes(self):
+        """更新说明（提取码/备注等），无则 None"""
+        return self.release_notes
 
     def has_new_version(self) -> bool:
         """ check whether there is a new version """

@@ -403,9 +403,14 @@ class AdvancedSettingInterface(ScrollArea):
             # 优先用更新清单里的国内直链（魔搭 version.json）；GitHub API 端点无直链，回退 Releases 页
             dl = self.version_manager.get_download_url()
             target = dl or PROJECT_RELEASES_URL
+            desc = tr["Setting"]["UpdatesAvailableDesc"].format(self.version_manager.lastest_version)
+            # 清单可带更新说明（网盘提取码等），追加到弹窗正文
+            notes = self.version_manager.get_release_notes()
+            if notes:
+                desc += '\n' + notes
             self.show_message_box(
                 tr["Setting"]["UpdatesAvailableTitle"],
-                tr["Setting"]["UpdatesAvailableDesc"].format(self.version_manager.lastest_version),
+                desc,
                 True,
                 lambda: QDesktopServices.openUrl(QUrl(target))
             )
