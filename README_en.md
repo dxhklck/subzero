@@ -19,7 +19,7 @@
 
 SubZero removes hard-burned subtitles from videos: OCR locates the subtitle region and an AI inpainting model fills it in, preserving the original resolution. Available as a GUI app and a CLI, with automatic segmentation for long videos, checkpoint resuming, and a locally persisted task queue.
 
-> This repository contains source only — **no automatic environment setup or weight downloading is built in**. For installation, weight download links, parameter reference and configuration examples, see the detailed tutorial (in Chinese): **[使用教程.md](使用教程.md)**.
+> This repository contains source only — **no automatic environment setup or weight downloading is built in**. For installation, weight download links, parameter reference and configuration examples, see the detailed tutorial: **[Tutorial (English)](使用教程_en.md)** · [使用教程 (简体中文)](使用教程.md)
 
 ## Quick Start
 
@@ -39,7 +39,7 @@ python backend/main.py -i input.mp4 -o output.mp4    # CLI
 ```
 subzero/
 ├── gui.py                          # GUI entry point
-├── 使用教程.md                      # Setup / parameter reference / examples / FAQ (Chinese)
+├── 使用教程.md / 使用教程_en.md      # Setup / parameter reference / examples / FAQ
 ├── backend/
 │   ├── main.py                     # CLI entry / processing pipeline
 │   ├── config.py                   # All config items (single source of version)
