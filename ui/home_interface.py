@@ -9,7 +9,7 @@ import threading
 import multiprocessing
 import traceback
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
-from PySide6.QtCore import Slot, QRect, Signal, Qt
+from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer
 from PySide6 import QtWidgets
 from datetime import datetime
 from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
@@ -82,6 +82,8 @@ class HomeInterface(QWidget):
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
+        # 主进程启动期日志（gui.py 落盘的 gui-main.log）回显到监控标签
+        QTimer.singleShot(0, self._load_main_log_tail)
         self.task_progress_signal.connect(self.task_list_component.update_task_progress)
         self.task_option_signal.connect(self.task_list_component.update_task_option)
         self.task_status_signal.connect(lambda idx, status: self.task_list_component.update_task_status(idx, status))
@@ -210,6 +212,25 @@ class HomeInterface(QWidget):
         main_layout.addLayout(right_layout, 1)
 
         outer_layout.addLayout(main_layout, 1)
+
+    def _load_main_log_tail(self):
+        """回显 GUI 主进程启动期日志尾部（gui.py 落盘的 config/logs/gui-main.log）"""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            path = os.path.join(root, 'config', 'logs', 'gui-main.log')
+            if not os.path.isfile(path):
+                return
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 8192))
+                tail = f.read().splitlines()
+            lines = [ln for ln in tail[-60:] if ln.strip()]
+            if lines:
+                lines.insert(0, '── 主进程启动日志（最近） ──')
+                self.append_console(lines)
+        except Exception:
+            pass
 
     def append_console(self, lines):
         """原控制台输出 → 监控标签（分发器传单条 str，兼容 list）"""
@@ -442,8 +463,9 @@ class HomeInterface(QWidget):
         """
         sr = None
         try:
-            from backend.main import SubtitleRemover
-            # 无控制台（pythonw）时把子进程 stdout/stderr 重定向进队列 → GUI「监控」标签
+            # 无控制台（pythonw）时把子进程 stdout/stderr 重定向进队列 → GUI「监控」标签。
+            # 必须放在 from backend.main import 之前：重依赖（torch/paddle）在导入期就可能
+            # 报错（缺 DLL/缺模块），晚接管道会让 traceback 落进 None 永远不可见。
             if sys.__stdout__ is None:
                 class _QueueConsoleWriter:
                     def __init__(self, q):
@@ -462,6 +484,7 @@ class HomeInterface(QWidget):
                         self._buf = ''
                 sys.stdout = _QueueConsoleWriter(queue)
                 sys.stderr = _QueueConsoleWriter(queue)
+            from backend.main import SubtitleRemover
             sr = SubtitleRemover(video_path, True)
             sr.video_out_path = output_path
             for key in options:
@@ -472,7 +495,10 @@ class HomeInterface(QWidget):
             sr.update_preview_with_comp = lambda *args: SubtitleRemoverRemoteCall.remote_call_update_preview_with_comp(queue, args)
             sr.run()
         except Exception as e:
-            traceback.print_exc()
+            # traceback 完整进「监控」标签（pythonw 下 print_exc 落进 None 会静默丢失）
+            tb_lines = traceback.format_exc().splitlines()
+            for ln in tb_lines:
+                SubtitleRemoverRemoteCall.remote_call_console(queue, ln)
             SubtitleRemoverRemoteCall.remote_call_catch_error(queue, e)
         finally:
             if sr:
@@ -794,6 +820,13 @@ class HomeInterface(QWidget):
     @Slot(object)
     def on_task_error(self, e):
         self.append_output(tr['SubtitleExtractorGUI']['ErrorDuringProcessing'].format(str(e)))
+        # 错误详情同步进「监控」标签（用户排查时第一个看的地方）
+        self.console_signal.emit('❌ ' + tr['SubtitleExtractorGUI']['ErrorDuringProcessing'].format(str(e)))
+        tb = getattr(e, '__traceback__', None)
+        if tb is not None:
+            for ln in traceback.format_exception(type(e), e, tb):
+                for piece in ln.rstrip().splitlines():
+                    self.console_signal.emit(piece)
         if self.current_processing_task_index >= 0:
             self.task_list_component.update_task_status(self.current_processing_task_index, TaskStatus.FAILED)
 

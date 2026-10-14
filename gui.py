@@ -6,6 +6,23 @@
 @desc: 字幕去除器图形化界面（由 PySimpleGUI 改写为 PySide6）
 """
 
+# ── 首启自举钩子：必须在 cv2/torch 等重导入之前 ──────────────────────
+# 注意：不能用 sys.path.insert(0, 'backend/tools') 再 import first_run——
+# backend/tools 下有 concurrent 包，插到最前会遮蔽标准库 concurrent.futures！
+import os as _os
+import sys as _sys
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location(
+    '_first_run_hook',
+    _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'backend', 'tools', 'first_run.py'))
+_mod = _ilu.module_from_spec(_spec) if _spec else None
+if _mod is not None:
+    _spec.loader.exec_module(_mod)
+    _mod.ensure_environment()  # 环境齐备→返回；不齐备→自举后 execv 重启（不返回）
+del _os, _sys, _ilu
+# ─────────────────────────────────────────────────────────────────────
+
 import sys
 import os
 import configparser
@@ -20,11 +37,23 @@ from qfluentwidgets import (FluentWindow, PushButton, Slider, ProgressBar, Plain
                           OptionsValidator, SubtitleLabel, HollowHandleStyle, qconfig, ConfigItem, QConfig,
                           NavigationWidget, NavigationItemPosition, isDarkTheme, InfoBar)
 
-# pythonw（无控制台）下 stdout/stderr 为 None，接管避免 print 报错
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+# pythonw（无控制台）下 stdout/stderr 为 None：接管到日志文件（可排查启动期错误），
+# 文件尾部会在主界面「监控」标签回显；打开失败再退回 devnull
+if sys.stdout is None or sys.stderr is None:
+    try:
+        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'logs')
+        os.makedirs(_log_dir, exist_ok=True)
+        _log_file = open(os.path.join(_log_dir, 'gui-main.log'), 'a', buffering=1,
+                         encoding='utf-8', errors='replace')
+        if sys.stdout is None:
+            sys.stdout = _log_file
+        if sys.stderr is None:
+            sys.stderr = _log_file
+    except Exception:
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
 from qframelesswindow.utils import getSystemAccentColor
 from backend.config import config, tr, VERSION
