@@ -374,6 +374,7 @@ test*_no_sub*.mp4
 /backend/tools/train/release_model/
 inference.onnx
 /config/config.json
+/config/tasks.json
 
 # QPT 组装的嵌入式 Python 解释器（巨大，不入库）
 /python/

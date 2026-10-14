@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import sys
 import cv2
 import time
@@ -21,7 +22,7 @@ from backend.config import config, tr
 from backend.tools.constant import InpaintMode
 from backend.tools.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from backend.tools.process_manager import ProcessManager
-from backend.tools.common_tools import get_readable_path, is_image_file, read_image
+from backend.tools.common_tools import get_readable_path, is_image_file, read_image, SUBPROCESS_CREATION_FLAGS
 
 
 class _SegmentResult:
@@ -39,6 +40,7 @@ class HomeInterface(QWidget):
     toggle_buttons_signal = Signal(bool)  # True=显示运行按钮, False=显示停止按钮
     task_status_signal = Signal(int, object)  # (task_index, TaskStatus)
     select_task_signal = Signal(int)  # task_index
+    task_output_path_signal = Signal(int, str)  # (task_index, output_path)
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("HomeInterface")
@@ -79,7 +81,11 @@ class HomeInterface(QWidget):
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
         self.task_status_signal.connect(lambda idx, status: self.task_list_component.update_task_status(idx, status))
+        self.task_output_path_signal.connect(self.on_task_output_path)
         self.select_task_signal.connect(self.task_list_component.select_task)
+
+        # 启动时恢复上次的任务队列（config/tasks.json；中断/未完成任务恢复为待运行，不自动开跑）
+        self.task_list_component.load_tasks(logger=self.append_output)
 
     def __init_widgets(self):
         """创建主页面"""
@@ -308,6 +314,11 @@ class HomeInterface(QWidget):
         self.run_button.setVisible(show_run)
         self.stop_button.setVisible(not show_run)
 
+    @Slot(int, str)
+    def on_task_output_path(self, index, output_path):
+        """worker 线程任务完成后经信号回填输出路径（GUI 线程落库 + 持久化）"""
+        self.task_list_component.set_task_output_path(index, output_path)
+
     def run_button_clicked(self):
         if not self.task_list_component.get_pending_tasks():
             self.append_output(tr['SubtitleExtractorGUI']['OpenVideoFirst'])
@@ -378,8 +389,8 @@ class HomeInterface(QWidget):
                             task_obj = self.task_list_component.get_task(self.current_processing_task_index)
                             if process.exitcode == 0 and task_obj and task_obj.status == TaskStatus.PROCESSING:
                                 self.progress_signal.emit(100, True)
-                                # 任务完成, 更新输出路径为只读
-                                task_obj.output_path = output_path
+                                # 任务完成, 更新输出路径为只读（经信号在 GUI 线程落库+持久化）
+                                self.task_output_path_signal.emit(self.current_processing_task_index, output_path)
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.COMPLETED)
                             else:
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
@@ -598,9 +609,74 @@ class HomeInterface(QWidget):
         if not ok:
             return _SegmentResult(exitcode=1)
         shutil.rmtree(task_dir, ignore_errors=True)  # 段文件与 checkpoint 清理
+        # 成片级残留二遍兜底（与非分段模式的 SubtitleRemover._residue_second_pass 对齐）：
+        # 对 concat+mux 后的成片重跑一次 --residue-only 子进程，成功后原子替换
+        self._residue_second_pass_on_output(output_path, options)
         self._segment_log('[分段] 成片输出：', output_path)
         self.progress_signal.emit(100, True)
         return _SegmentResult(exitcode=0)
+
+    def _residue_second_pass_on_output(self, output_path, options):
+        """分段成片残留二遍兜底。
+
+        对 concat+mux 后的成片以后端子进程重跑残留检测与二修（后端 CLI 契约）：
+
+            python backend/main.py -i <成片路径> -o <二修临时输出>
+                  --inpaint-mode <当前inpaintMode> --residue-only
+
+        退出码 0 且临时输出存在 → 原子替换成片（中文路径经 Python os.replace）；
+        失败仅日志警告、不阻塞、保留原成片。config.residueCheck 关闭时直接跳过。
+        """
+        # config 可能被测试以 SimpleNamespace 替换（缺 residueCheck 时视为关闭）
+        residue_check = getattr(config, 'residueCheck', None)
+        if residue_check is None or not residue_check.value:
+            return False
+        if self._stop_event.is_set():
+            self._segment_log('[分段] 已请求停止，跳过成片残留二遍兜底')
+            return False
+        # 与分段子进程同参的 inpaint 模式（段子进程经 config.json 读取同一配置）；
+        # options 显式携带时优先
+        mode = options.get('inpaint_mode') or config.inpaintMode.value
+        mode_name = getattr(mode, 'value', None) or str(mode)
+        out_dir = os.path.dirname(output_path) or '.'
+        stem = os.path.splitext(os.path.basename(output_path))[0]
+        residue_out = os.path.join(out_dir, f'{stem}_residue_tmp.mp4')
+        # 项目根：ui/home_interface.py 的上两级（与 backend/config.py 读取
+        # config/config.json 的相对 CWD 要求一致）
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cmd = [sys.executable, os.path.join(root, 'backend', 'main.py'),
+               '-i', output_path, '-o', residue_out,
+               '--inpaint-mode', mode_name, '--residue-only']
+        self._segment_log(f'[分段] 成片残留二遍兜底（模式 {mode_name}）…')
+        try:
+            r = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=7200,
+                               creationflags=SUBPROCESS_CREATION_FLAGS)
+        except Exception as e:
+            self._segment_log(f'[分段] 残留二遍兜底未执行（保留原成片）：{e}')
+            return False
+        if r.returncode != 0 or not os.path.exists(residue_out):
+            tail = (r.stderr or r.stdout or '').strip()[-300:]
+            self._segment_log(f'[分段] 残留二遍兜底失败（保留原成片），'
+                              f'退出码 {r.returncode}：{tail}')
+            if os.path.exists(residue_out):
+                try:
+                    os.remove(residue_out)
+                except OSError:
+                    pass
+            return False
+        try:
+            # 二修输出原子替换成片（半成品不会覆盖原成片）
+            os.replace(residue_out, output_path)
+        except OSError as e:
+            self._segment_log(f'[分段] 残留二遍输出替换失败（保留原成片）：{e}')
+            try:
+                os.remove(residue_out)
+            except OSError:
+                pass
+            return False
+        self._segment_log('[分段] 残留二遍兜底完成，成片已更新：', output_path)
+        return True
 
     @Slot()
     def processing_finished(self):
@@ -814,6 +890,8 @@ class HomeInterface(QWidget):
             # 等待 worker 线程结束（最多5秒）
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=5)
+            # 兜底持久化：任务增删/状态变化已即时落盘，此处覆盖选项变更等遗漏
+            self.task_list_component.save_tasks()
 
             # 断开信号连接
             self.progress_signal.disconnect(self.update_progress)
