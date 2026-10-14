@@ -41,19 +41,16 @@ class VideoDisplayComponent(QWidget):
         self.screen_width = screen.width()
         self.screen_height = screen.height()
         
-        # 设置视频预览区域大小（根据屏幕宽度动态调整）
-        self.video_preview_width = 960
-        self.video_preview_height = self.video_preview_width * 9 // 16
+        # 视频预览区域：初始 640x360（与 ratio_container 构造尺寸一致），
+        # 视频加载/窗口缩放后按「视频宽高比 + 窗口宽度」contain 自适应（update_preview_size）
+        self.video_preview_width = 640
+        self.video_preview_height = 360
         # 预览区自适应窗口：尺寸变化防抖后通知外层重渲染
         self._pending_width = self.video_preview_width
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(150)
         self._resize_timer.timeout.connect(lambda: self.size_changed.emit(self._pending_width))
-        if self.screen_width // 2 < 960:
-            self.video_preview_width = 640
-            self.video_preview_height = self.video_preview_width * 9 // 16
-            
         # 视频相关参数
         self.frame_width = None
         self.frame_height = None
@@ -139,22 +136,34 @@ class VideoDisplayComponent(QWidget):
         ratio_layout.setContentsMargins(0, 0, 0, 0)
         ratio_layout.addWidget(self.video_display)
 
-        # 设置固定的宽高比
-        ratio_container.setFixedHeight(ratio_container.width() * 9 // 16)
-        ratio_container.setMinimumWidth(640)
+        # 设置固定的宽高比：初始 16:9（视频加载后按实际宽高比自适应重排，
+        # 见 set_video_parameters → update_preview_size）
+        ratio_container.setFixedSize(640, 360)
 
         # 添加到布局
         black_layout.addWidget(ratio_container)
 
         # 添加一个事件过滤器来处理大小变化
         class RatioEventFilter(QObject):
+            def __init__(self, owner):
+                super().__init__()
+                self._owner = owner
+
             def eventFilter(self, obj, event):
                 if event.type() == QEvent.Resize:
-                    obj.setFixedHeight(obj.width() * 9 // 16)
+                    # 容器比例随视频宽高比自适应（旧实现硬编码 16:9，导致竖屏/4:3
+                    # 的 1080 视频在预览里缩成小条）。此处守护 update_preview_size
+                    # 算出的目标尺寸，防止布局漂移破坏容器几何；尺寸已对齐时不动作
+                    # （避免 setFixedSize 递归触发 Resize）。
+                    w = self._owner.video_preview_width
+                    h = self._owner.video_preview_height
+                    if obj.width() != w or obj.height() != h:
+                        obj.setFixedSize(w, h)
                 return False
 
-        ratio_filter = RatioEventFilter(ratio_container)
-        ratio_container.installEventFilter(ratio_filter)
+        # 注意：过滤器必须由组件持有引用，否则被 GC 后失效（PySide6 陷阱）
+        self._ratio_filter = RatioEventFilter(self)
+        ratio_container.installEventFilter(self._ratio_filter)
 
         # 预览标签尺寸变化（如窗口布局重排、比例容器高度跟进）时，若 pixmap 与
         # 控件尺寸不一致，按新尺寸重渲染当前帧——否则 setScaledContents 会把旧
@@ -250,17 +259,27 @@ class VideoDisplayComponent(QWidget):
             self._resize_timer.start()
 
     def update_preview_size(self, width):
-        """按窗口宽度更新预览尺寸；尺寸有实质变化返回 True。
-        下限 640；上限 960 对齐原版观感，窗口更宽时不再无限撑宽预览。"""
-        width = max(640, min(width, 960))
-        height = width * 9 // 16
-        if abs(width - self.video_preview_width) < 40:
+        """预览容器按「视频宽高比 + 窗口可用宽度」contain 自适应（旧实现固定 16:9，
+        竖屏/4:3 等比例视频会被缩成中间一小条）。
+
+        横向预算 [640, 960]；纵向预算上限 640（竖屏不无限撑高布局）。
+        视频按自身比例 contain 进预算框，容器尺寸=渲染尺寸（视频铺满预览框，
+        不再有 letterbox 黑条——黑边仅出现在容器比例与视频不一致的过渡态）。
+        尺寸无实质变化返回 False（跳过重渲染）。
+        """
+        budget = max(640, min(width, 960))
+        f_w = self.frame_width or 16
+        f_h = self.frame_height or 9
+        scale = min(budget / f_w, 640 / f_h)
+        w = max(1, int(round(f_w * scale)))
+        h = max(1, int(round(f_h * scale)))
+        if (w, h) == (self.video_preview_width, self.video_preview_height):
             return False
-        self.video_preview_width = width
-        self.video_preview_height = height
-        self.video_display.setMinimumSize(640, 360)
-        self.ratio_container.setFixedHeight(height)
-        self.black_container.setFixedWidth(width + 4)
+        self.video_preview_width = w
+        self.video_preview_height = h
+        self.video_display.setMinimumSize(min(640, w), min(360, h))
+        self.ratio_container.setFixedSize(w, h)
+        self.black_container.setFixedWidth(w + 4)
         return True
 
     def update_video_display(self, frame, draw_selection=True):
@@ -755,12 +774,25 @@ class VideoDisplayComponent(QWidget):
         self.video_display.setCursor(Qt.ArrowCursor)
     
     def set_video_parameters(self, frame_width, frame_height, fps=30):
-        """设置视频参数（原图尺寸）。
+        """设置视频参数（原图尺寸），并按视频宽高比重排预览容器使其自适应
+        （竖屏 1080x1920 / 4:3 / 超宽均铺满预览框，不再固定 16:9 容器）。
         letterbox 几何（渲染矩形/偏移/缩放）在每次渲染时按控件实际尺寸计算，
         随 update_video_display 更新，坐标映射始终与当前显示一致。"""
+        aspect_changed = (frame_width, frame_height) != (self.frame_width, self.frame_height)
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.fps = fps
+        if aspect_changed and frame_width > 0 and frame_height > 0:
+            self._reflow_preview()
+
+    def _reflow_preview(self):
+        """按当前视频宽高比重排预览容器（加载新视频时免防抖阈值立即生效）。
+        显式同步 video_display 几何：load_video 在 set_video_parameters 后立即渲染首帧，
+        嵌套布局异步生效来不及——否则首帧按旧控件尺寸渲染（1080 竖屏首帧缩成小条）。
+        布局随后会按容器新尺寸重申同一几何，此处提前 resize 无副作用。"""
+        budget = self.width() - 24 if self.width() > 344 else self.video_preview_width
+        self.update_preview_size(max(640, budget))
+        self.video_display.resize(self.video_preview_width, self.video_preview_height)
     
     def get_selection_coordinates(self):
         """获取选择框坐标（原图像素）"""
