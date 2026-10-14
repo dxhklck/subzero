@@ -30,58 +30,72 @@ PYTHON_DEPS = [
 # 每源: {'url':...} 直存 | {'url':..., 'zip_member':...} 解压 | {'url':..., 'parts':[...]} 拼接
 # 分片文件(*_1.pt 等)是历史分发残留，运行时不需要，不检查。
 MS_BASE = 'https://modelscope.cn/models/dxhklck/subzero-models/resolve/master/'
-# Release 权重源跟随 backend/config.py 的 VERSION 自动升级，避免版本漂移指向旧 Release
+# GitHub Release 兜底源：先试当前版本，404 自动落到权重分发页 v1.0.0
+# （fix_weights 的逐源切换机制原生支持；权重实际挂载于 v1.0.0 Release，9 资产已验证可达）
 from backend.config import VERSION as _APP_VERSION  # noqa: E402
-RELEASE_BASE = f'https://github.com/dxhklck/subzero/releases/download/v{_APP_VERSION}/'
+_GH_RELEASES = [f'v{_APP_VERSION}', 'v1.0.0']
+
+
+def _gh(name):
+    """同名资产的多版本候选 URL 列表（当前版本 → 权重分发页）"""
+    return [f'https://github.com/dxhklck/subzero/releases/download/{v}/{name}'
+            for v in _GH_RELEASES]
+def _gh_one(name, **extra):
+    """同名 Release 资产的多版本候选源（当前版本 → 权重分发页 v1.0.0）"""
+    return [{'url': f'https://github.com/dxhklck/subzero/releases/download/{v}/{name}', **extra}
+            for v in _GH_RELEASES]
+
+
 WEIGHT_MANIFEST = [
     # 字幕检测（PP-OCRv5 server / fast）
     {'path': 'V5/ch_det/inference.pdiparams', 'min_mb': 80,
      'sha256': '183146fe9d9910352f68482f623bcbbb9fa7b9e8fa1463b9ad288cef00524d2d',
      'sources': [{'url': MS_BASE + 'models/V5/ch_det/inference.pdiparams'},
-                 {'url': RELEASE_BASE + 'V5_ch_det_inference.pdiparams'}]},
+                 *_gh_one('V5_ch_det_inference.pdiparams')]},
     {'path': 'V5/ch_det_fast/inference.pdiparams', 'min_mb': 4,
      'sha256': 'afa1820cb16c1fd0dad589d0f8b389139061c1ef6d68019685fd07be997dda5b',
      'sources': [{'url': MS_BASE + 'models/V5/ch_det_fast/inference.pdiparams'},
-                 {'url': RELEASE_BASE + 'V5_ch_det_fast_inference.pdiparams'}]},
+                 *_gh_one('V5_ch_det_fast_inference.pdiparams')]},
     # 修复算法权重
     {'path': 'big-lama/big-lama.pt', 'min_mb': 190,
      'sha256': '7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c',
      'sources': [{'url': MS_BASE + 'models/big-lama/big-lama.pt'},
-                 {'url': RELEASE_BASE + 'big-lama.pt'}]},
+                 *_gh_one('big-lama.pt')]},
     {'path': 'sttn-auto/infer_model.pth', 'min_mb': 60,
      'sha256': 'c8408c9dd1300bd7000ea3a81b8236db89d9c0f185837781e38283c1e464675b',
      'sources': [{'url': MS_BASE + 'models/sttn-auto/infer_model.pth'},
-                 {'url': RELEASE_BASE + 'sttn-auto_infer_model.pth'}]},
+                 *_gh_one('sttn-auto_infer_model.pth')]},
     {'path': 'sttn-det/sttn.pth', 'min_mb': 60,
      'sha256': '25b0c2c30042d82efd1893bd42ec726764262d94115393a1718f8d65d2a7817b',
      'sources': [{'url': MS_BASE + 'models/sttn-det/sttn.pth'},
-                 {'url': RELEASE_BASE + 'sttn-det_sttn.pth'}]},
+                 *_gh_one('sttn-det_sttn.pth')]},
     {'path': 'minimax-remover/transformer/diffusion_pytorch_model.safetensors', 'min_mb': 2100,
      'sha256': 'a379d98432970f614befb260357153edcd01a99748cf7f6dabe1a230c159b213',
      'sources': [{'url': MS_BASE + 'models/minimax-remover/transformer/diffusion_pytorch_model.safetensors'},
-                 {'url': RELEASE_BASE + 'minimax_transformer.safetensors.part1',
-                  'parts': ['minimax_transformer.safetensors.part1', 'minimax_transformer.safetensors.part2']}]},
+                 *_gh_one('minimax_transformer.safetensors.part1',
+                          parts=['minimax_transformer.safetensors.part1',
+                                 'minimax_transformer.safetensors.part2'])]},
     {'path': 'minimax-remover/transformer/config.json', 'min_mb': 0,
      'sha256': '7d218c1d52a04e9e4f0e89ca72c9743daa408177e3bdccde90de1334801f8f77',
      'sources': [{'url': MS_BASE + 'models/minimax-remover/configs/transformer_config.json'},
-                 {'url': RELEASE_BASE + 'minimax_configs.zip', 'zip_member': 'transformer_config.json'}]},
+                 *_gh_one('minimax_configs.zip', zip_member='transformer_config.json')]},
     {'path': 'minimax-remover/vae/diffusion_pytorch_model.safetensors', 'min_mb': 480,
      'sha256': 'd6e524b3fffede1787a74e81b30976dce5400c4439ba64222168e607ed19e793',
      'sources': [{'url': MS_BASE + 'models/minimax-remover/vae/diffusion_pytorch_model.safetensors'},
-                 {'url': RELEASE_BASE + 'minimax_vae_model.safetensors'}]},
+                 *_gh_one('minimax_vae_model.safetensors')]},
     {'path': 'minimax-remover/vae/config.json', 'min_mb': 0,
      'sha256': 'f0c1cc1d7decb5badc384f54691746a27a9aeff49f7ebca974e583389342d527',
      'sources': [{'url': MS_BASE + 'models/minimax-remover/configs/vae_config.json'},
-                 {'url': RELEASE_BASE + 'minimax_configs.zip', 'zip_member': 'vae_config.json'}]},
+                 *_gh_one('minimax_configs.zip', zip_member='vae_config.json')]},
     {'path': 'minimax-remover/scheduler/scheduler_config.json', 'min_mb': 0,
      'sha256': '3fed2abbd9bbc301a74db01947198057ec5049808910dccab320925bf27bea6e',
      'sources': [{'url': MS_BASE + 'models/minimax-remover/configs/scheduler_config.json'},
-                 {'url': RELEASE_BASE + 'minimax_configs.zip', 'zip_member': 'scheduler_config.json'}]},
+                 *_gh_one('minimax_configs.zip', zip_member='scheduler_config.json')]},
     # ffmpeg（Windows）：zip 下载后解压 ffmpeg.exe 到位
     {'path': 'backend/ffmpeg/win_x64/ffmpeg.exe', 'min_mb': 100, 'base': 'project',
      'sha256': None,
      'sources': [{'url': MS_BASE + 'ffmpeg/win_x64/ffmpeg-win_x64.zip', 'zip_member': 'ffmpeg.exe'},
-                 {'url': RELEASE_BASE + 'ffmpeg-win_x64.zip', 'zip_member': 'ffmpeg.exe'}]},
+                 *_gh_one('ffmpeg-win_x64.zip', zip_member='ffmpeg.exe')]},
 ]
 
 
