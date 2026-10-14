@@ -26,14 +26,12 @@ Highlights:
 - **Long-video segmented processing with resume**: videos longer than a configurable length (default 600 s) are processed in segments; an interrupted or closed task automatically resumes from the last finished segment when re-run (per-segment checkpoints, parameter-hash guarded); optional segment overlap frames (default 2) remove boundary seams
 - **Task list persistence**: the queue is saved locally and restored on relaunch; unfinished tasks are marked "resumable" and never auto-start
 - **CLI mode**: subtitle areas, time ranges, frame ranges (segments/overlap) and residue-only second pass for scripted batch processing (see below)
-- **GPU monitor**: live VRAM (with per-task peak), GPU utilization, RAM and processing speed in the status bar
-- **A/B wipe slider**: drag the split line to compare original vs. inpainted frames during processing
+- **GPU monitor**: live VRAM and RAM usage above the processing card (thin progress bars + dynamic values)
 - **Letterbox preview**: any aspect ratio is shown at its native ratio with black bars; selection coordinates map precisely back to original pixels
-- **Performance presets**: one-click 480p / 720p / 1080p / 4K parameter sets
 - **Light/Dark theme** (or follow system), teal accent
 - **Drag & drop task queue**: drop one or many video files, track name / progress / status
 - **Weight integrity scan**: model weights are verified (existence + size) at startup; if antivirus silently quarantined `.pt` files you get an immediate warning with one-click repair
-- **Zero console windows**: everything runs in the GUI, logs included
+- **Zero console windows**: double-click launch shows no console window; the processing subprocess's raw console output (including tqdm) streams live into the in-app **Monitor** tab, with key events mirrored in the formatted **Log** tab
 
 ## Hardware Requirements
 
@@ -51,6 +49,7 @@ Highlights:
 1. Extract to a path containing **only ASCII characters** (non-ASCII paths break PaddleOCR model loading)
 2. If your antivirus quarantined `.pt/.pth` files under `backend/models/`, add an exclusion for the folder and re-extract
 3. Run `启动视频字幕擦除-GUI无黑窗.exe`
+4. To see full startup-stage logs (environment check / version check), launch `启动视频字幕擦除.bat` (console mode) instead
 
 ### From source
 
