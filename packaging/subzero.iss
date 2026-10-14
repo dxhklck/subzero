@@ -42,6 +42,7 @@ Name: "{app}\config"
 [Files]
 ; pyd 编译发行目录（build_pyd.py 产物：53 个 .pyd + stub/first_run/scenedetect 保留 .py）
 Source: "pyd-dist\gui.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "pyd-dist\gui_main.cp313-win_amd64.pyd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README_en.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -61,3 +62,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; 无痕卸载：清掉运行期间生成的文件（首启 pip 装的重依赖在 runtime\Lib\site-packages、
+; 下载的模型权重、用户配置），最后兜底删除整个安装目录
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\backend\models"
+Type: filesandordirs; Name: "{app}\backend\ffmpeg"
+Type: filesandordirs; Name: "{app}\config"
+Type: filesandordirs; Name: "{app}"
