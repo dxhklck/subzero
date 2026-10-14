@@ -76,7 +76,7 @@ def format_report(ok_list, missing_list, mismatch_list):
     if not total_bad:
         return f'权重完整性扫描：{len(ok_list)} 项全部通过'
     lines = [f'权重完整性扫描：{len(ok_list)} 项正常，{total_bad} 项异常'
-             '（可能被杀毒软件隔离/截断，可在 设置-环境自检 一键修复）']
+             '（可能被杀毒软件隔离/截断，请按 使用教程 手动下载补齐）']
     groups = {}
     for m in missing_list:
         groups.setdefault(_group_of(m['path']), []).append(('missing', m))
