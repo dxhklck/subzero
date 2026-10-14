@@ -138,11 +138,14 @@ class Config(QConfig):
     getSttnMaxLoadNum = lambda self: max(self.sttnMaxLoadNum.value, self.sttnNeighborStride.value * self.sttnReferenceLength.value)
 
     # 以下参数仅适用MINIMAX算法时，才生效
-    # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（81=4*20+1）
-    # 主要是速度参数：块越大固定开销（VAE编解码/调度）摊越薄。A/B 实测（0.30MP条带）：
-    # 61帧比25帧快13%而峰值仅多0.3GB——块大小对显存峰值影响很小（峰值由条带分辨率主导）。
+    # MiniMax-Remover（Wan2.1-1.3B DiT）每次送入的帧数，必须为 4k+1（121=4*30+1）
+    # 主要是速度参数：块越大固定开销（VAE编解码/调度）摊越薄。720p 全流程基准（2026-10-14，
+    # test2.mp4 240帧含检测/加载）：41→61→81→121 耗时 133→126→124→120s（端到端快约一成、
+    # 推理本身约一成五），显存峰值恒定约14.4GB——峰值由条带分辨率主导，与块大小无关；
+    # 且 61/81/121 输出逐像素一致（≥61帧即单批次，41是唯一触发多批次的档位）。
+    # 6步仅再快2.2%但质量下降、12步慢7.5%，故步数维持8；块间重叠8保留（长视频防接缝）。
     # _fit_chunk_to_vram 按条带分辨率校验显存：典型条带原样保留，超预算时收缩或提示降 ProcessWidth
-    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 41, RangeValidator(5, 121))
+    minimaxMaxLoadNum = RangeConfigItem("MiniMax", "MaxLoadNum", 121, RangeValidator(5, 121))
     # 去噪步数：A/B 实测（720p全帧）12→8 步仅慢 13% 时省 13%、与12步画质肉眼无差异（最大像素差18/255）；
     # 480p 等小分辨率下步数近似线性影响速度。8 为画质/速度平衡点，追求极限画质可设 12
     minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 12))

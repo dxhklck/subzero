@@ -195,6 +195,16 @@ def load_tasks_file(path=None):
     return tasks, warnings
 
 
+class _ClickableLabel(QLabel):
+    """可点击标签：任务队列持久化状态行（点击打开队列文件所在文件夹）"""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class TaskProgressCell(QWidget):
     """进度·状态 单元格：上行「百分比 + 状态」，下行进度条（方案1 卡片样式）"""
 
@@ -210,8 +220,11 @@ class TaskProgressCell(QWidget):
         self.pct_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
         self.status_label = QLabel()
         self.status_label.setStyleSheet("font-size:12px;")
+        self.resume_label = QLabel("")
+        self.resume_label.setStyleSheet("font-size:11px; color:#A9A8A0;")
         top.addWidget(self.pct_label)
         top.addStretch(1)
+        top.addWidget(self.resume_label)
         top.addWidget(self.status_label)
         lay.addLayout(top)
         self.bar = QProgressBar()
@@ -243,6 +256,13 @@ class TaskProgressCell(QWidget):
         self.status_label.setText(status.value)
         self._status_color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
         self._render_status()
+
+    def set_resume(self, text, tooltip=""):
+        """续跑角标（空串清除）；tooltip 挂 segment_info 的完整续跑说明"""
+        self.resume_label.setText(text or "")
+        self.resume_label.setToolTip(tooltip or "")
+        self.resume_label.setStyleSheet(
+            f"font-size:11px; color:{'#D98E04' if text else '#A9A8A0'};")
 
 @dataclass
 class Task:
@@ -336,9 +356,11 @@ class TaskListComponent(QWidget):
         # 持久化：写锁（GUI 线程与 worker 线程均可能触发保存）+ 上次落盘内容（去重基线）
         self._save_lock = threading.Lock()
         self._last_saved_blob = None
-        
+        self._last_save_time = None  # 最近一次成功保存的时刻（状态行显示）
+
         # 创建布局
         self.__init_widgets()
+        self._update_queue_status()
         
     def __init_widgets(self):
         """初始化组件"""
@@ -354,6 +376,14 @@ class TaskListComponent(QWidget):
         header.addWidget(title)
         header.addStretch(1)
         layout.addLayout(header)
+
+        # 任务队列持久化状态行（功能入口：点击打开队列文件所在文件夹）
+        self.queue_status = _ClickableLabel('', self)
+        self.queue_status.setStyleSheet(
+            "color:#A9A8A0; font-size:11px; padding:0 10px 3px 10px;")
+        self.queue_status.setCursor(Qt.PointingHandCursor)
+        self.queue_status.clicked.connect(self._open_queue_dir)
+        layout.addWidget(self.queue_status)
 
         # 创建表格：名称 | 进度·状态（卡片式单元格）
         self.table = TableWidget(self)
@@ -465,6 +495,13 @@ class TaskListComponent(QWidget):
         cell = self.table.cellWidget(row, 1)
         cell.set_progress(task.progress)
         cell.set_status(task.status)
+        # 续跑角标：分段任务且有可续跑 checkpoint 时显示短文本，完整说明挂 tooltip
+        info = getattr(task, 'segment_info', None)
+        if info and info.get('can_resume') and info.get('total_segments'):
+            cell.set_resume(
+                tr['TaskList']['QueueResumeChip'].format(
+                    info.get('done_segments', 0), info.get('total_segments', 0)),
+                info.get('chip_text', ''))
 
     def update_task_progress(self, index, progress):
         """更新任务进度
@@ -497,6 +534,16 @@ class TaskListComponent(QWidget):
             cell = self.table.cellWidget(index, 1)
             if cell:
                 cell.set_status(status)
+                # 续跑角标随状态刷新：仅待处理态保留（处理中/已完成/失败均清除）
+                info = self.tasks[index].segment_info
+                if (status == TaskStatus.PENDING and info
+                        and info.get('can_resume') and info.get('total_segments')):
+                    cell.set_resume(
+                        tr['TaskList']['QueueResumeChip'].format(
+                            info.get('done_segments', 0), info.get('total_segments', 0)),
+                        info.get('chip_text', ''))
+                else:
+                    cell.set_resume('')
             # 选中当前行（保持原有行为）
             self.table.selectRow(index)
             self.save_tasks()
@@ -719,10 +766,35 @@ class TaskListComponent(QWidget):
                     return False
                 save_tasks_file(self.tasks, path)
                 self._last_saved_blob = key
+                self._last_save_time = datetime.now().strftime('%H:%M:%S')
+                self._update_queue_status()
                 return True
             except Exception as e:
                 print(f'[任务持久化] 保存失败: {e}')
                 return False
+
+    def _update_queue_status(self):
+        """刷新任务队列持久化状态行：自动保存说明 + 任务/可续跑计数 + 最近保存时刻"""
+        tl = tr['TaskList']
+        n = len(self.tasks)
+        resumable = sum(1 for t in self.tasks
+                        if t.segment_info and t.segment_info.get('can_resume'))
+        text = tl['QueueAutoSave']
+        if n:
+            text += ' · ' + tl['QueueTasksCount'].format(n)
+            if resumable:
+                text += ' · ' + tl['QueueResumeCount'].format(resumable)
+            if self._last_save_time:
+                text += ' · ' + tl['QueueSavedAt'].format(self._last_save_time)
+        self.queue_status.setText(text)
+        self.queue_status.setToolTip(tl['QueueOpenTip'])
+
+    def _open_queue_dir(self):
+        """状态行入口：打开任务队列文件（config/tasks.json）所在文件夹"""
+        try:
+            show_in_file_manager(os.path.dirname(TASKS_FILE))
+        except Exception as e:
+            print(f'[任务持久化] 打开文件夹失败: {e}')
 
     def load_tasks(self, path=None, logger=None):
         """启动时从 config/tasks.json 恢复任务队列。
@@ -765,6 +837,7 @@ class TaskListComponent(QWidget):
         self._last_saved_blob = (os.path.abspath(path or TASKS_FILE),
                                  json.dumps([t.to_dict() for t in self.tasks],
                                             ensure_ascii=False, sort_keys=True))
+        self._update_queue_status()
         return restored
 
     def set_task_output_path(self, index, output_path):

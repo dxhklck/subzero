@@ -12,14 +12,13 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWid
 from PySide6.QtCore import Slot, QRect, Signal, Qt
 from PySide6 import QtWidgets
 from datetime import datetime
-from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon,
-                            CaptionLabel)
+from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.task_list_component import TaskListComponent, TaskStatus, TaskOptions
 from ui.component.gpu_monitor_bar import GpuMonitorBar
 from ui.component.compact_rows import CompactComboRow
 from ui.icon.my_fluent_icon import MyFluentIcon
-from backend.config import config, tr, VERSION
+from backend.config import config, tr
 from backend.tools.constant import InpaintMode
 from backend.tools.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from backend.tools.process_manager import ProcessManager
@@ -208,12 +207,6 @@ class HomeInterface(QWidget):
 
         outer_layout.addLayout(main_layout, 1)
 
-        # 底部常驻版本号（与窗口标题/设置页版权行一致，单一来源 VERSION）
-        version_label = CaptionLabel(f'净影 SubZero v{VERSION}', self)
-        version_label.setAlignment(Qt.AlignCenter)
-        version_label.setStyleSheet('color: gray; font-size: 11px; padding: 2px;')
-        outer_layout.addWidget(version_label)
-    
     def append_console(self, lines):
         """原控制台输出 → 监控标签（分发器传单条 str，兼容 list）"""
         if isinstance(lines, str):

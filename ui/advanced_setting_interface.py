@@ -185,9 +185,8 @@ class AdvancedSettingInterface(ScrollArea):
     def _build_general_group(self):
         """通用（页面最底部）：并入外观与关于。
         行1：界面语言 | 硬件加速 | 视频分段时长 | 启动检查更新
-        行2：段间重叠帧数（单独一行，四列占位）
-        行3：应用主题 | 保存目录 | 环境自检 | 关于·检查更新
-        行4：项目链接
+        行2：应用主题 | 环境自检 | 保存目录（跨两列）
+        行3（末行）：段间重叠帧数 | 项目链接 | 版权·版本（跨两列）
         """
         gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
@@ -217,12 +216,6 @@ class AdvancedSettingInterface(ScrollArea):
         vbox.addWidget(CompactParamRow(self.lang_row, self.hw_row,
                                        self.segment_row, self.update_row, columns=4))
 
-        # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
-        self.segment_overlap_row = CompactRangeRow(
-            config.segmentOverlapFrames, gui['SegmentOverlap'],
-            gui['SegmentOverlapDesc'], icon=FluentIcon.LINK, parent=card)
-        vbox.addWidget(CompactParamRow(self.segment_overlap_row, columns=4))
-
         # 四列网格：主题 | 环境自检 | 保存目录（跨两列，路径中段省略，悬停看全路径）
         self.theme_row = CompactComboRow(
             config.appTheme, st['AppTheme'], st['AppThemeDesc'],
@@ -241,6 +234,11 @@ class AdvancedSettingInterface(ScrollArea):
         vbox.addWidget(CompactParamRow(self.theme_row, self.env_row,
                                        (self.save_dir_row, 2), columns=4))
 
+        # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
+        self.segment_overlap_row = CompactRangeRow(
+            config.segmentOverlapFrames, gui['SegmentOverlap'],
+            gui['SegmentOverlapDesc'], icon=FluentIcon.LINK, parent=card)
+
         # 关于并入：版权与版本直接作为行标题显示（原 tooltip 内容），按钮即检查更新
         self.copyright_row = CompactActionRow(
             st['CopyrightDesc'].format(VERSION), st['CopyrightDesc'].format(VERSION),
@@ -255,9 +253,12 @@ class AdvancedSettingInterface(ScrollArea):
                 icon=FluentIcon.GITHUB, parent=card)
             self.project_row.add_button(st['ProjectLinkOpen'],
                                         on_click=lambda: QDesktopServices.openUrl(QUrl(PROJECT_HOME_URL)))
-            vbox.addWidget(CompactParamRow(self.copyright_row, self.project_row, columns=2))
+            # 末行四列：段间重叠帧数 | 项目链接 | 版权·版本（跨两列）
+            vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.project_row,
+                                           (self.copyright_row, 2), columns=4))
         else:
-            vbox.addWidget(CompactParamRow(self.copyright_row, columns=2))
+            vbox.addWidget(CompactParamRow(self.segment_overlap_row,
+                                           (self.copyright_row, 2), columns=4))
 
     def _update_save_dir_display(self):
         """保存目录行内显示当前文件夹；整行 tooltip 同步为实际路径"""
