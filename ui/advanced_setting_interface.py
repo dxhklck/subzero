@@ -400,11 +400,14 @@ class AdvancedSettingInterface(ScrollArea):
 
     def on_version_info_fetched(self, success, ignore=False):
         if success:
+            # 优先用更新清单里的国内直链（魔搭 version.json）；GitHub API 端点无直链，回退 Releases 页
+            dl = self.version_manager.get_download_url()
+            target = dl or PROJECT_RELEASES_URL
             self.show_message_box(
                 tr["Setting"]["UpdatesAvailableTitle"],
                 tr["Setting"]["UpdatesAvailableDesc"].format(self.version_manager.lastest_version),
                 True,
-                lambda: QDesktopServices.openUrl(QUrl(PROJECT_RELEASES_URL))
+                lambda: QDesktopServices.openUrl(QUrl(target))
             )
         elif not ignore:
             self.show_message_box(
