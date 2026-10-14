@@ -645,7 +645,14 @@ class SubtitleRemover:
         old_size = config.subtitleDetectProcessSize.value
         try:
             config.subtitleDetectProcessSize.value = 960
-            detector = SubtitleDetect(self.video_temp_file.name, self.sub_areas)
+            # 敏感检测参数：残留多为笔画碎边（对比度低、得分低），默认 box_thresh=0.6
+            # 会漏——特别是描边/艺术字字幕的动画片。降低门槛 + 加大框扩张：
+            # box_thresh 0.6→0.3（碎边也能成框）、thresh 0.3→0.2、unclip 1.5→2.0
+            # （框外扩约1/3，盖住描边残留）。误检由 _overlaps_first_pass 与
+            # 高瘦过滤双保险约束，代价只是对已修复区域多做一次小面积 LAMA。
+            detector = SubtitleDetect(
+                self.video_temp_file.name, self.sub_areas,
+                det_params={'thresh': 0.2, 'box_thresh': 0.3, 'unclip_ratio': 2.0})
             sub_list = detector.find_subtitle_frame_no()
         finally:
             config.subtitleDetectProcessSize.value = old_size

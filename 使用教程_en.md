@@ -86,11 +86,21 @@ python backend/main.py -i video.mp4 -o output.mp4   # CLI
 
 Main window: task queue, video preview (letterbox, native aspect ratio with black bars), and Monitor/Log tabs.
 
+### 2.0 Launch options
+
+- `启动视频字幕擦除.bat`: runs with a console window (logs go to both the console and the Monitor)
+- `启动视频字幕擦除-GUI无黑窗.exe`: **single-window mode** — no console, all logs inside the app (recommended for daily use)
+- The Monitor shows identical content either way; on startup an environment banner (version / Python / GPU / CUDA) is printed once
+
 ### 2.1 Task queue
 
 - **Add**: pick files via the button, or drag one/multiple videos into the queue.
-- **Persistence**: the queue is saved locally and restored on relaunch; the status line shows "Queue auto-saved · N tasks · M resumable · saved at time" — click it to open the queue file's folder.
-- **Resume badge**: unfinished segmented tasks show "⏸ resumable k/n" (if parameters changed, it says so instead). Restored tasks never auto-start — press Run manually.
+- **Persistence**: the queue is saved locally and restored on relaunch; the status line shows "Queue auto-saved · N tasks · M resumable · queue ~X left · saved at time" — click it to open the queue file's folder.
+- **Resume badge**: unfinished segmented tasks show "⏸ resumable k/n".
+- **Params-changed badge**: after changing the algorithm/area/etc., resume is refused and the card shows "⛔ params changed" — right-click "Delete old segment progress & reset" (confirmation lists the folder and segment progress) to start fresh, no manual folder hunting.
+- **Timing & estimates**: running tasks show "elapsed mm:ss / est. mm:ss" (extrapolated from the task's own speed once progress ≥3%, otherwise from historical speed; `--` when no estimate is possible); pending tasks show "Est. ~mm:ss"; completed/failed tasks show "Took mm:ss". After the first finished task, estimates keep calibrating to your machine.
+- **No-overwrite output**: if the output already exists (e.g. a previous result is still locked), a numbered copy is saved instead (`_no_sub_2.mp4`, `_3`, …) — old results are never overwritten.
+- **Failure triage**: on failure the Monitor tab holds the full traceback; a "崩溃报告_<name>_<timestamp>.txt" (environment + main-process log tail + traceback) is written next to the output; right-click a task → open the output folder.
 - **Subtitle area**: select a task and draw rectangles on the preview (multiple allowed); with no selection the app auto-detects full screen. Areas are stored in original-pixel coordinates and follow task selection.
 - **Time range (AB sections)**: mark ranges on the slider to process only those parts.
 
@@ -98,12 +108,11 @@ Main window: task queue, video preview (letterbox, native aspect ratio with blac
 
 | Algorithm | Traits | Use case |
 |---|---|---|
-| STTN-auto (default) | Fully automatic, fastest | Batch processing |
-| MiniMax-Remover | Strip-crop inpainting, best quality/speed balance | **Recommended** |
+| Auto routing (recommended) | Picks per interval by frame difference: LAMA (static, fast) vs MiniMax (motion, quality) | Mixed-content long videos |
+| STTN-auto | Fully automatic, fastest | Batch processing |
+| MiniMax-Remover | Strip-crop inpainting, best quality/speed balance | Motion / anime |
 | LAMA | High quality on static backgrounds | Static scenes / images |
 | OpenCV | Classical, no large model | Quick checks |
-
-AUTO mode routes per interval by frame difference: LAMA (static) vs MiniMax (motion).
 
 ### 2.3 Settings reference
 
@@ -129,7 +138,7 @@ AUTO mode routes per interval by frame difference: LAMA (static) vs MiniMax (mot
 | Detection sample step | 0 = smart | OCR every N frames; 0 adapts by frame difference |
 | Detection process size | 720 | Resolution cap for the detection stage (0–960); larger = more accurate, slower |
 | AUTO static threshold | 1 | Frame difference below this routes to LAMA |
-| Residue second pass | On | After the first pass, re-detect leftovers and repair them automatically |
+| Residue second pass | On | After the first pass, re-detect leftovers and repair them automatically. The second pass automatically uses more sensitive detection parameters (box threshold 0.6→0.3, box expansion 1.5→2.0, at 960px resolution for an independent catch), so fragment leftovers of outlined/stylized subtitles (common in anime) are detected too; false positives are constrained by requiring overlap with first-pass regions |
 
 **MiniMax-Remover**
 
@@ -156,6 +165,13 @@ AUTO mode routes per interval by frame difference: LAMA (static) vs MiniMax (mot
 - 720p MiniMax: ~0.5 s/frame (strip cropping, ~7× faster than full-frame)
 - 480p 522 frames: STTN 25s / OpenCV 34s / LAMA 48s / MiniMax ~1 s/frame
 - Peak VRAM is dominated by strip resolution; for 4K lower ProcessWidth to 1280–1920
+
+### 2.5 Monitor tab (a terminal)
+
+- **The Monitor is a terminal**: all raw output from detection/inpainting streams into the Monitor tab — progress bars refresh in place (never piling up), and `[Route]` routing decisions, `[Residue]` repair logs and tqdm progress are all visible line by line
+- Each launch is a fresh session (only the environment banner); starting a new task clears it and scrolls from the top
+- Right-click menu: copy selection / copy all / export to `config/logs/` / clear
+- The "Log" tab is a formatted summary for quick browsing; use "Monitor" for troubleshooting
 
 ---
 
@@ -215,9 +231,12 @@ python backend/main.py -i first_pass.mp4 -o final.mp4 --residue-only
 |---|---|
 | Startup error `RuntimeError: ... big-lama.pt errno 2` | Weights missing or quarantined by antivirus. Add an AV exclusion, then re-download per section 1.4 |
 | CUDA out of memory | Switch to STTN-auto; or lower MiniMax ProcessWidth; for 4K use ProcessWidth 1280–1920 |
-| A segmented task was interrupted | Re-run the same task — it resumes from the segment checkpoint automatically. **Changed parameters refuse to resume**; delete the `<name>_no_sub_segments/` folder next to the output to start fresh |
+| A segmented task was interrupted | Re-run the same task — it resumes from the segment checkpoint automatically. **Changed parameters refuse to resume** and the card shows "⛔ params changed" — right-click "Delete old segment progress & reset" (with confirmation) to start fresh, safer than deleting folders manually |
+| Output file locked / write failed | The app already works around this: an existing output is saved as `_no_sub_2.mp4` etc. instead of overwriting; if a leftover python subprocess from the last run still holds the GPU, kill the extra process |
+| Anime subtitles leave fragments | The residue second pass already uses sensitive detection parameters; if residue remains, raise MiniMax "Iterations" (6→8~12) and "StripPadding" (128→160+); for vertical/scrolling staff lists, manually select the whole strip |
 | Subtitles not fully removed | Increase "Area deviation pixels"; make sure the selection covers everything; keep residue second pass on; switch to MiniMax/LAMA |
 | Ghosting at segment boundaries | Increase "Segment overlap frames" (2→4) and timeline expansion frames |
+| Task failed / crash | Check the traceback in the Monitor tab; a "崩溃报告_<name>_<timestamp>.txt" (environment + log tail + traceback) sits next to the output — attach it when reporting issues |
 | CLI produces an empty output | Check `--frame-end` > `--frame-start` and that the time range is valid (the app exits with an explicit error) |
 
 ---

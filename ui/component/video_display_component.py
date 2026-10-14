@@ -45,6 +45,10 @@ class VideoDisplayComponent(QWidget):
         # 视频加载/窗口缩放后按「视频宽高比 + 窗口宽度」contain 自适应（update_preview_size）
         self.video_preview_width = 640
         self.video_preview_height = 360
+        # 纵向预算上限的宿主注入点：callable -> 像素。竖屏视频的预览高度受
+        # 「窗口实际可用高度」约束（写死 640 会在矮窗口把日志卡挤出可视区，
+        # 高窗口又白白留黑边），由 HomeInterface 注入实时高度预算
+        self.preview_height_budget = None
         # 预览区自适应窗口：尺寸变化防抖后通知外层重渲染
         self._pending_width = self.video_preview_width
         self._resize_timer = QTimer(self)
@@ -257,20 +261,36 @@ class VideoDisplayComponent(QWidget):
         if w > 320 and abs(w - self.video_preview_width) >= 40:
             self._pending_width = w
             self._resize_timer.start()
+            return
+        # 纵向重排触发：本组件可用高度（扣除滑块容器 ~38px）与当前预览高度
+        # 差距过大时，说明窗口高度预算变了（竖屏预览高度完全由它决定），
+        # 防抖后重排——预览高度会重新贴合可用高度，不溢出也不浪费
+        avail_h = self.height() - 38
+        if avail_h > 240 and abs(avail_h - self.video_preview_height) >= 40:
+            self._pending_width = max(self._pending_width, self.video_preview_width)
+            self._resize_timer.start()
 
     def update_preview_size(self, width):
         """预览容器按「视频宽高比 + 窗口可用宽度」contain 自适应（旧实现固定 16:9，
         竖屏/4:3 等比例视频会被缩成中间一小条）。
 
-        横向预算 [640, 960]；纵向预算上限 640（竖屏不无限撑高布局）。
+        横向预算 [640, 960]；纵向预算优先取宿主注入的可用高度
+        （preview_height_budget，随窗口高度实时变化），未注入时退回 640 上限。
         视频按自身比例 contain 进预算框，容器尺寸=渲染尺寸（视频铺满预览框，
         不再有 letterbox 黑条——黑边仅出现在容器比例与视频不一致的过渡态）。
         尺寸无实质变化返回 False（跳过重渲染）。
         """
         budget = max(640, min(width, 960))
+        if self.preview_height_budget is not None:
+            try:
+                budget_h = max(260, int(self.preview_height_budget()))
+            except Exception:
+                budget_h = 640
+        else:
+            budget_h = 640
         f_w = self.frame_width or 16
         f_h = self.frame_height or 9
-        scale = min(budget / f_w, 640 / f_h)
+        scale = min(budget / f_w, budget_h / f_h)
         w = max(1, int(round(f_w * scale)))
         h = max(1, int(round(f_h * scale)))
         if (w, h) == (self.video_preview_width, self.video_preview_height):
@@ -359,11 +379,11 @@ class VideoDisplayComponent(QWidget):
         orig = (disp - offset) / scale；黑边区域钳制到图像边缘，
         保证选区不会落到 letterbox 黑边区。"""
         if not self.render_scale or self.frame_width is None:
-            return (0.0, 0.0)
-        ox = (float(x) - self.render_offset_x) / self.render_scale
-        oy = (float(y) - self.render_offset_y) / self.render_scale
-        ox = max(0.0, min(float(self.frame_width), ox))
-        oy = max(0.0, min(float(self.frame_height), oy))
+            return (0, 0)
+        ox = int(round((float(x) - self.render_offset_x) / self.render_scale))
+        oy = int(round((float(y) - self.render_offset_y) / self.render_scale))
+        ox = max(0, min(int(self.frame_width), ox))
+        oy = max(0, min(int(self.frame_height), oy))
         return (ox, oy)
 
     def original_to_display(self, ox, oy):
@@ -642,13 +662,13 @@ class VideoDisplayComponent(QWidget):
             else:
                 # 调整选择框大小（原图像素坐标，最小边距 1px）
                 if "left" in self.resize_edge:
-                    xmin = min(xmax - 1.0, orig_x)
+                    xmin = min(xmax - 1, orig_x)
                 if "right" in self.resize_edge:
-                    xmax = max(xmin + 1.0, orig_x)
+                    xmax = max(xmin + 1, orig_x)
                 if "top" in self.resize_edge:
-                    ymin = min(ymax - 1.0, orig_y)
+                    ymin = min(ymax - 1, orig_y)
                 if "bottom" in self.resize_edge:
-                    ymax = max(ymin + 1.0, orig_y)
+                    ymax = max(ymin + 1, orig_y)
                 
                 # 确保选择框在图像有效范围内
                 xmin = max(0, min(xmin, self.frame_width))
@@ -827,11 +847,12 @@ class VideoDisplayComponent(QWidget):
             try:
                 parts = area.split(",")
                 ymin, ymax, xmin, xmax = map(float, parts)
-                # 比率 → 原图像素，并钳制在有效范围内
-                ymin = max(0.0, min(1.0, ymin)) * self.frame_height
-                ymax = max(0.0, min(1.0, ymax)) * self.frame_height
-                xmin = max(0.0, min(1.0, xmin)) * self.frame_width
-                xmax = max(0.0, min(1.0, xmax)) * self.frame_width
+                # 比率 → 原图像素（取整，选区坐标必须是整数——下游 cv2.rectangle
+                # 不接受 float），并钳制在有效范围内
+                ymin = int(round(max(0.0, min(1.0, ymin)) * self.frame_height))
+                ymax = int(round(max(0.0, min(1.0, ymax)) * self.frame_height))
+                xmin = int(round(max(0.0, min(1.0, xmin)) * self.frame_width))
+                xmax = int(round(max(0.0, min(1.0, xmax)) * self.frame_width))
                 self.selection_rects.append((ymin, ymax, xmin, xmax))
             except ValueError:
                 continue

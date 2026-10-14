@@ -103,6 +103,21 @@ def build_plan(total_frames: int, segment_frames: int,
     return plan
 
 
+def _canonicalize(v: Any) -> Any:
+    """哈希前规范化：整数值的 float 视为 int（如 81.0 与 81 等价），
+    递归处理 list/tuple/dict。防止同一参数的 int/float 序列化差异
+    （如选区坐标修复前后）造成假性"参数已变更"。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, (list, tuple)):
+        return [_canonicalize(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _canonicalize(x) for k, x in v.items()}
+    return v
+
+
 def params_hash(params: Dict[str, Any]) -> str:
     """对所有影响输出像素的任务参数做稳定 SHA-256。
 
@@ -110,7 +125,7 @@ def params_hash(params: Dict[str, Any]) -> str:
     （改变邻帧模型的上下文即改变输出像素），由调用方放入 params 参与哈希。
     """
     relevant = {
-        k: params[k]
+        k: _canonicalize(params[k])
         for k in sorted(params)
         if k not in ("video_path", "output_path", "task_dir")
     }

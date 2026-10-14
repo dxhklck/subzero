@@ -8,21 +8,114 @@ import torch
 import threading
 import multiprocessing
 import traceback
+from pathlib import Path
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
 from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer
+from PySide6.QtGui import QTextCursor
 from PySide6 import QtWidgets
 from datetime import datetime
 from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
 from ui.component.video_display_component import VideoDisplayComponent
-from ui.component.task_list_component import TaskListComponent, TaskStatus, TaskOptions
+from ui.component.task_list_component import (TaskListComponent, TaskStatus, TaskOptions,
+                                              resolve_output_path)
 from ui.component.gpu_monitor_bar import GpuMonitorBar
 from ui.component.compact_rows import CompactComboRow
 from ui.icon.my_fluent_icon import MyFluentIcon
-from backend.config import config, tr
+from backend.config import config, tr, VERSION
 from backend.tools.constant import InpaintMode
 from backend.tools.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from backend.tools.process_manager import ProcessManager
 from backend.tools.common_tools import get_readable_path, is_image_file, read_image, SUBPROCESS_CREATION_FLAGS
+
+
+def write_crash_report(video_path, output_path, tb_text):
+    """子进程崩溃自报告：环境信息 + gui-main.log 尾部 + traceback 落盘。
+
+    写到输出文件同目录：崩溃报告_<视频名>_<时间戳>.txt。任何单项采集失败
+    都不阻断（报告本身降级也要落盘）。返回报告路径。
+    """
+    import platform
+    lines = []
+    sep = '=' * 60
+    lines.append(sep)
+    lines.append(f'净影 SubZero 崩溃报告 v{VERSION}')
+    lines.append(f'时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+    lines.append(sep)
+
+    lines.append('\n[输入输出]')
+    lines.append(f'输入视频: {video_path}')
+    lines.append(f'输出文件: {output_path}')
+
+    lines.append('\n[运行环境]')
+    try:
+        lines.append(f'操作系统: {platform.platform()}')
+    except Exception:
+        pass
+    try:
+        lines.append(f'Python: {platform.python_version()} ({sys.executable})')
+    except Exception:
+        pass
+
+    lines.append('\n[GPU / 加速]')
+    try:
+        if torch.cuda.is_available():
+            props = torch.device_properties(0) if hasattr(torch, 'device_properties') else None
+            name = torch.cuda.get_device_name(0)
+            lines.append(f'torch: {torch.__version__} · CUDA 可用')
+            lines.append(f'显卡: {name}')
+            if props is not None:
+                lines.append(f'显存: {props.total_memory / 1024 ** 3:.1f} GB')
+            lines.append(f'CUDA(torch): {torch.version.cuda}')
+        else:
+            lines.append(f'torch: {torch.__version__} · CUDA 不可用（CPU 模式）')
+    except Exception as e:
+        lines.append(f'torch 信息采集失败: {e}')
+    # paddle 仅在已导入时读取（避免为采信息触发 CUDA 初始化，破坏崩溃现场）
+    paddle = sys.modules.get('paddle')
+    if paddle is not None:
+        try:
+            lines.append(f'paddle: {paddle.__version__} · '
+                         f'CUDA编译: {paddle.is_compiled_with_cuda()}')
+        except Exception:
+            pass
+
+    lines.append('\n[关键配置]')
+    for key in ('inpaintMode', 'subtitleDetectMode', 'residueCheck',
+                'segmentSeconds', 'segmentOverlapFrames'):
+        try:
+            lines.append(f'{key}: {getattr(config, key).value}')
+        except Exception:
+            pass
+
+    lines.append('\n[主进程日志尾部 (config/logs/gui-main.log)]')
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_path = os.path.join(root, 'config', 'logs', 'gui-main.log')
+        if os.path.isfile(log_path):
+            with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 16384))
+                tail = f.read().splitlines()
+            lines.extend(tail[-80:])
+        else:
+            lines.append('（日志文件不存在）')
+    except Exception as e:
+        lines.append(f'日志读取失败: {e}')
+
+    lines.append('\n[Traceback]')
+    lines.append(tb_text.rstrip())
+    lines.append(sep)
+
+    stem = Path(video_path).stem
+    save_dir = os.path.dirname(output_path) or '.'
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    report_path = os.path.abspath(
+        os.path.join(save_dir, f'崩溃报告_{stem}_{stamp}.txt'))
+    os.makedirs(save_dir, exist_ok=True)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    return report_path
 
 
 class _SegmentResult:
@@ -74,6 +167,8 @@ class HomeInterface(QWidget):
         # 处理速度 EMA 计算用
         self._speed_last = None  # (time, progress_total)
         self._speed_ema = 0.0
+        # 监控标签终端渲染：上一行是否为进度条重绘行（\x01 前缀），用于原地替换
+        self._last_console_is_bar = False
 
         self.__init_widgets()
         self.progress_signal.connect(self.update_progress)
@@ -82,8 +177,9 @@ class HomeInterface(QWidget):
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
-        # 主进程启动期日志（gui.py 落盘的 gui-main.log）回显到监控标签
-        QTimer.singleShot(0, self._load_main_log_tail)
+        # 启动环境横幅：绘世式开机信息。监控即终端——每次启动都是全新会话，
+        # 不回显上次会话的 gui-main.log 尾部（旧数据残留）
+        self._emit_startup_banner()
         self.task_progress_signal.connect(self.task_list_component.update_task_progress)
         self.task_option_signal.connect(self.task_list_component.update_task_option)
         self.task_status_signal.connect(lambda idx, status: self.task_list_component.update_task_status(idx, status))
@@ -108,6 +204,11 @@ class HomeInterface(QWidget):
         
         # 创建视频显示组件
         self.video_display_component = VideoDisplayComponent(self)
+        # 竖屏预览高度预算：本窗口内容高 − 输出卡最小高(200) − 主布局边距(24)
+        # − 组件内滑块容器(38) − 布局间距(~16)，随窗口缩放实时取值，
+        # 使竖屏/4:3 视频的预览高度贴合实际可用空间（不再写死 640 上限）
+        self.video_display_component.preview_height_budget = (
+            lambda: self.height() - 278)
         self.video_display_component.ab_sections_changed.connect(self.ab_sections_changed)
         self.video_display_component.selections_changed.connect(self.selections_changed)
         self.video_display_component.size_changed.connect(self._on_preview_resized)
@@ -121,7 +222,7 @@ class HomeInterface(QWidget):
         
         # 输出文本区域
         self.output_text = TextEdit()
-        self.output_text.setMinimumHeight(150)
+        self.output_text.setMinimumHeight(200)
         self.output_text.setReadOnly(True)
         self.output_text.document().setDocumentMargin(10)        
         # 连接滚动条值变化信号
@@ -138,11 +239,15 @@ class HomeInterface(QWidget):
 
         self.console_text = QPlainTextEdit()
         self.console_text.setReadOnly(True)
+        self.console_text.setMinimumHeight(200)
         self.console_text.setMaximumBlockCount(5000)
         self.console_text.setStyleSheet(
             "QPlainTextEdit { background:#101010; color:#C8C8C8;"
             "font-family:'Consolas'; font-size:11px; border:none; }")
         self.log_tabs.addTab(self.console_text, tr["Setting"]["MonitorTab"])
+        # 默认展示「监控」：黑色终端面板即主控制台（对齐绘世/秋叶启动器的形态，
+        # 环境横幅 + 处理过程的全部原始输出都在这里流过）
+        self.log_tabs.setCurrentWidget(self.console_text)
         output_layout.addWidget(self.log_tabs)
         output_container.setLayout(output_layout)
         left_layout.addWidget(output_container)
@@ -213,31 +318,52 @@ class HomeInterface(QWidget):
 
         outer_layout.addLayout(main_layout, 1)
 
-    def _load_main_log_tail(self):
-        """回显 GUI 主进程启动期日志尾部（gui.py 落盘的 config/logs/gui-main.log）"""
+    def _emit_startup_banner(self):
+        """启动环境横幅 → 监控标签。
+
+        对齐绘世/秋叶启动器的开机信息：窗口一打开就能确认版本、GPU 与
+        加速状态，处理过程的原始输出随后在同一边滚动。只读 torch 的
+        已初始化状态，不主动 import paddle（避免拖慢启动）。"""
+        lines = ['── 净影 · 主控制台 ──']
         try:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            path = os.path.join(root, 'config', 'logs', 'gui-main.log')
-            if not os.path.isfile(path):
-                return
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(0, size - 8192))
-                tail = f.read().splitlines()
-            lines = [ln for ln in tail[-60:] if ln.strip()]
-            if lines:
-                lines.insert(0, '── 主进程启动日志（最近） ──')
-                self.append_console(lines)
+            lines.append(f'版本 v{VERSION} · Python {sys.version.split()[0]}')
         except Exception:
             pass
+        try:
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                lines.append(f'GPU：{props.name}（{props.total_memory / 1024 ** 3:.0f}GB）· CUDA 加速可用')
+            else:
+                lines.append('GPU：未检测到 CUDA 设备，将回退 CPU 推理（速度显著下降）')
+        except Exception:
+            lines.append('GPU：检测失败')
+        lines.append('检测 / 修复过程的全部原始输出（含进度条与路由决策）将在本页滚动；「日志」标签为格式化摘要')
+        self.append_console(lines)
 
     def append_console(self, lines):
-        """原控制台输出 → 监控标签（分发器传单条 str，兼容 list）"""
+        """原控制台输出 → 监控标签（分发器传单条 str，兼容 list）。
+
+        终端语义渲染：带 \\x01 前缀的是 tqdm 重绘行（worker 端 \\r 边界标记）。
+        上一行是重绘行时，无论本条是重绘还是整行（tqdm 收尾 100%\\n、
+        tqdm.write 消息），终端里都覆盖在同一物理行上 → 原地替换而非追加。
+        """
         if isinstance(lines, str):
             lines = [lines]
         for line in lines:
-            self.console_text.appendPlainText(line)
+            is_bar = line.startswith('\x01')
+            text = line[1:] if is_bar else line
+            if self._last_console_is_bar:
+                # 上一行是进度条重绘（同一物理行）→ 原地替换（终端 \r 语义）。
+                # 选择必须锚定块内文本（End → StartOfBlock）：BlockUnderCursor
+                # 会连带前面的段落分隔符一起选中，每次替换都吞并上一行，
+                # 连续几次重绘就把监控里其他数据全部吃掉
+                cursor = QTextCursor(self.console_text.document())
+                cursor.movePosition(QTextCursor.End)
+                cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
+                cursor.insertText(text)
+            else:
+                self.console_text.appendPlainText(text)
+            self._last_console_is_bar = is_bar
         sb = self.console_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -405,9 +531,14 @@ class HomeInterface(QWidget):
                             self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.PROCESSING)
                             # SUB_AREAS 在组件内即按原图像素坐标存储，无需二次转换，直接下发
                             options = dict(task_item.options)
-                            # 清理缓存, 使用动态路径
-                            task_item.output_path = None
+                            # 输出同名不覆盖：上次输出可能仍被残留的 python 子进程
+                            # 占用（合并后进程退出/句柄释放有延迟），且不应覆盖旧成果；
+                            # 存在同名输出时加序号另存（_no_sub_2.mp4、_3…）
+                            task_item.output_path = resolve_output_path(task_item.path)
                             output_path = task_item.output_path
+                            # 上一次运行的兜底子进程可能仍活着（占用旧成片与 GPU），
+                            # 启动新任务前先清理，避免句柄占用与显存拖慢
+                            self._terminate_stale_residue_process()
                             process = self.run_task_with_segments(task_item.path, output_path, options)
 
                             # 检查是否在处理过程中被停止
@@ -463,27 +594,71 @@ class HomeInterface(QWidget):
         """
         sr = None
         try:
-            # 无控制台（pythonw）时把子进程 stdout/stderr 重定向进队列 → GUI「监控」标签。
-            # 必须放在 from backend.main import 之前：重依赖（torch/paddle）在导入期就可能
-            # 报错（缺 DLL/缺模块），晚接管道会让 traceback 落进 None 永远不可见。
-            if sys.__stdout__ is None:
-                class _QueueConsoleWriter:
-                    def __init__(self, q):
-                        self._q = q
-                        self._buf = ''
-                    def write(self, s):
-                        self._buf += s
-                        # \n 与 \r 都作为行界（tqdm 进度条用 \r 刷新）
-                        for sep in ('\n', '\r'):
-                            while sep in self._buf:
-                                line, self._buf = self._buf.split(sep, 1)
-                                if line.strip():
-                                    SubtitleRemoverRemoteCall.remote_call_console(self._q, line.strip())
-                    def flush(self):
-                        # tqdm 每次 write 后都调 flush——半行直接丢弃，只在 \n/\r 边界出整行
-                        self._buf = ''
-                sys.stdout = _QueueConsoleWriter(queue)
-                sys.stderr = _QueueConsoleWriter(queue)
+            # 子进程原始输出统一进「监控」标签（监控内容与黑窗终端保持一致）：
+            # 有控制台（bat/exe 启动）时 Tee——原始内容同时写控制台与队列；
+            # 无控制台（pythonw）时仅写队列。
+            # 必须放在 from backend.main import 之前：tqdm 在导入期捕获 sys.stderr，
+            # 且重依赖（torch/paddle）导入期就可能报错，晚接管道会让输出/traceback
+            # 绕过监控或落进 None 永远不可见。
+            class _QueueConsoleWriter:
+                """子进程 stdout/stderr → 控制台镜像 + 监控队列。
+
+                终端语义逐字符处理：\\r 开始原地重绘（tqdm 进度条）、\\n 结束整行。
+                重绘行加 \\x01 前缀发队列，GUI 端据此前缀「替换上一行」而非追加——
+                监控里呈现与终端一致的进度条动画（旧实现按 \\n 优先拆行，
+                会把 \\r 重绘粘进上一行、且每帧重绘都堆成新行，进度条无法呈现）。
+                """
+                BAR_MARK = '\x01'
+                # tqdm 用 _supports_unicode(fp) 探测 fp.encoding 决定进度条字符：
+                # 无此属性时回退 ASCII '#'。声明 UTF-8 让进度条用实心方块 █
+                encoding = 'utf-8'
+
+                def __init__(self, q, original):
+                    self._q = q
+                    self._original = original
+                    self._cur = []  # 当前行字符缓冲（跨 write 调用保持，半行不丢）
+
+                def write(self, s):
+                    if self._original is not None:
+                        try:
+                            self._original.write(s)
+                            self._original.flush()
+                        except Exception:
+                            pass  # 控制台编码异常不影响监控链路
+                    for ch in s:
+                        if ch == '\r':
+                            # \r：当前行作为「重绘行」发出（tqdm 每次刷新触发）
+                            text = ''.join(self._cur).strip()
+                            self._cur = []
+                            if text:
+                                SubtitleRemoverRemoteCall.remote_call_console(
+                                    self._q, self.BAR_MARK + text)
+                        elif ch == '\n':
+                            # \n：当前行作为「整行」发出
+                            text = ''.join(self._cur).strip()
+                            self._cur = []
+                            if text:
+                                SubtitleRemoverRemoteCall.remote_call_console(self._q, text)
+                        else:
+                            self._cur.append(ch)
+                    return len(s)
+
+                def flush(self):
+                    # 半行留在 _cur 等待 \r/\n 边界（tqdm 每次 write 后都调 flush，
+                    # 若在此清空会丢掉进度条的当前帧）
+                    if self._original is not None:
+                        try:
+                            self._original.flush()
+                        except Exception:
+                            pass
+
+                def isatty(self):
+                    try:
+                        return bool(self._original is not None and self._original.isatty())
+                    except Exception:
+                        return False
+            sys.stdout = _QueueConsoleWriter(queue, sys.__stdout__)
+            sys.stderr = _QueueConsoleWriter(queue, sys.__stderr__)
             from backend.main import SubtitleRemover
             sr = SubtitleRemover(video_path, True)
             sr.video_out_path = output_path
@@ -496,9 +671,16 @@ class HomeInterface(QWidget):
             sr.run()
         except Exception as e:
             # traceback 完整进「监控」标签（pythonw 下 print_exc 落进 None 会静默丢失）
-            tb_lines = traceback.format_exc().splitlines()
-            for ln in tb_lines:
+            tb = traceback.format_exc()
+            for ln in tb.splitlines():
                 SubtitleRemoverRemoteCall.remote_call_console(queue, ln)
+            # 崩溃自报告：环境 + 日志尾部 + traceback 落盘到输出目录旁，客户报障一次说清
+            try:
+                report = write_crash_report(video_path, output_path, tb)
+                SubtitleRemoverRemoteCall.remote_call_console(
+                    queue, f'[崩溃报告] 已保存: {report}')
+            except Exception:
+                pass
             SubtitleRemoverRemoteCall.remote_call_catch_error(queue, e)
         finally:
             if sr:
@@ -685,18 +867,51 @@ class HomeInterface(QWidget):
         cmd = [sys.executable, os.path.join(root, 'backend', 'main.py'),
                '-i', output_path, '-o', residue_out,
                '--inpaint-mode', mode_name, '--residue-only']
-        self._segment_log(f'[分段] 成片残留二遍兜底（模式 {mode_name}）…')
+        log_path = os.path.join(out_dir, f'{stem}_residue_tmp.log')
+        self._segment_log(f'[分段] 成片残留二遍兜底（模式 {mode_name}）… '
+                          f'实时日志：{os.path.basename(log_path)}')
+        t0 = time.time()
+        stopped = False
+        proc = None
         try:
-            r = subprocess.run(cmd, cwd=root, stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=7200,
-                               creationflags=SUBPROCESS_CREATION_FLAGS)
+            with open(log_path, 'w', encoding='utf-8') as log_f:
+                proc = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL,
+                                        stdout=log_f, stderr=subprocess.STDOUT,
+                                        creationflags=SUBPROCESS_CREATION_FLAGS)
+                self._residue_process = proc
+                # 可中断等待：每秒检查一次停止信号与超时，不再死等 2 小时。
+                # 子进程全程以读方式打开成片，终止后句柄即刻释放
+                while True:
+                    try:
+                        proc.wait(timeout=1.0)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if self._stop_event.is_set():
+                        self._segment_log('[分段] 已请求停止，终止残留兜底子进程')
+                        self._kill_process(proc)
+                        stopped = True
+                        break
+                    if time.time() - t0 > 7200:
+                        self._segment_log('[分段] 残留兜底超时（2h），终止子进程')
+                        self._kill_process(proc)
+                        break
         except Exception as e:
             self._segment_log(f'[分段] 残留二遍兜底未执行（保留原成片）：{e}')
             return False
-        if r.returncode != 0 or not os.path.exists(residue_out):
-            tail = (r.stderr or r.stdout or '').strip()[-300:]
-            self._segment_log(f'[分段] 残留二遍兜底失败（保留原成片），'
-                              f'退出码 {r.returncode}：{tail}')
+        finally:
+            self._residue_process = None
+        if stopped or proc.returncode != 0 or not os.path.exists(residue_out):
+            # 失败/停止时从日志文件取尾部，帮助定位卡住原因
+            tail = ''
+            try:
+                with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+                    tail = ''.join(f.readlines()[-15:]).strip()[-500:]
+            except OSError:
+                pass
+            reason = '已停止' if stopped else f'退出码 {proc.returncode}'
+            self._segment_log(f'[分段] 残留二遍兜底失败（保留原成片），{reason}。'
+                              f'日志尾部：\n{tail}')
             if os.path.exists(residue_out):
                 try:
                     os.remove(residue_out)
@@ -713,8 +928,35 @@ class HomeInterface(QWidget):
             except OSError:
                 pass
             return False
+        try:
+            os.remove(log_path)  # 成功即清日志，失败保留供排查
+        except OSError:
+            pass
         self._segment_log('[分段] 残留二遍兜底完成，成片已更新：', output_path)
         return True
+
+    @staticmethod
+    def _kill_process(proc):
+        """终止子进程：先 terminate，10 秒未退再强杀，确保句柄释放"""
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
+        except Exception:
+            pass
+
+    def _terminate_stale_residue_process(self):
+        """新任务启动前清理上一次残留的兜底子进程：它以读方式打开着旧成片，
+        进程退出/句柄释放有延迟，不清理会持续占用 GPU 与文件"""
+        proc = getattr(self, '_residue_process', None)
+        if proc is not None and proc.poll() is None:
+            self._segment_log('[分段] 清理上次残留的兜底子进程（仍在运行）')
+            self._kill_process(proc)
+        self._residue_process = None
 
     @Slot()
     def processing_finished(self):
@@ -808,10 +1050,11 @@ class HomeInterface(QWidget):
             if len(subtitle_areas) > 0:
                 if frame_ori is frame_comp:
                     frame_ori = frame_ori.copy()
-                # SUB_AREAS 为原图像素坐标，直接在原图上绘制
+                # SUB_AREAS 为原图像素坐标，直接在原图上绘制（取整防 float 坐标）
                 for rect in subtitle_areas:
                     ymin, ymax, xmin, xmax = rect
-                    cv2.rectangle(frame_ori, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+                    cv2.rectangle(frame_ori, (int(xmin), int(ymin)),
+                                  (int(xmax), int(ymax)), (0, 255, 0), 2)
         preview_frame = cv2.hconcat([frame_ori, frame_comp])
         # contain 适配 + 黑边由显示组件完成
         self.video_display_component.update_video_display(preview_frame, draw_selection=False)

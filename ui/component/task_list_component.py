@@ -1,5 +1,7 @@
 import os
 import json
+import time
+import shutil
 import threading
 from pathlib import Path
 from enum import Enum, unique
@@ -9,8 +11,8 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
                                QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl
-from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig
+from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer
+from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox
 from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent
 from showinfm import show_in_file_manager
 
@@ -29,6 +31,32 @@ class TaskStatus(Enum):
 class TaskOptions(Enum):
     AB_SECTIONS = "ab_sections"
     SUB_AREAS = "sub_areas"
+
+
+def resolve_output_path(video_path: str) -> str:
+    """解析任务输出路径；同名输出已存在时不覆盖，追加序号另存。
+
+    背景：上次运行的输出可能仍被残留的 python 子进程占用（Windows 下无法
+    覆盖正被打开的文件导致本次任务失败），且直接覆盖会销毁上次的成果。
+    规则：
+      <stem>_no_sub.mp4        首选（同名不存在时）
+      <stem>_no_sub_2.mp4 ...  已存在则序号依次递增
+    """
+    save_directory = (os.path.dirname(video_path)
+                      if not config.saveDirectory.value else config.saveDirectory.value)
+    stem = Path(video_path).stem
+    if is_image_file(video_path):
+        base = os.path.abspath(os.path.join(
+            save_directory, f'{stem}_no_sub{Path(video_path).suffix}'))
+    else:
+        base = os.path.abspath(os.path.join(save_directory, f'{stem}_no_sub.mp4'))
+    if not os.path.exists(base):
+        return base
+    root, ext = os.path.splitext(base)
+    n = 2
+    while os.path.exists(f'{root}_{n}{ext}'):
+        n += 1
+    return f'{root}_{n}{ext}'
 
 # 允许拖入的媒体扩展名
 _DROP_EXTS = ('.mp4', '.flv', '.wmv', '.avi', '.mkv', '.mov', '.ts', '.webm',
@@ -211,7 +239,13 @@ class _ClickableLabel(QLabel):
 
 
 class TaskProgressCell(QWidget):
-    """进度·状态 单元格：上行「百分比 + 状态」，下行进度条（方案1 卡片样式）"""
+    """进度·状态 单元格：上行「百分比 + 时间 + 状态」，下行进度条（卡片样式）
+
+    内容变化时发 content_changed 信号——外层据此对「进度·状态」列
+    resizeColumnToContents，列宽始终贴合内容（时间文本变长不被截断）。
+    """
+
+    content_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -223,11 +257,14 @@ class TaskProgressCell(QWidget):
         top.setSpacing(6)
         self.pct_label = QLabel("0%")
         self.pct_label.setStyleSheet("font-size:12px; font-family:'Consolas';")
+        self.time_label = QLabel("")
+        self.time_label.setStyleSheet("font-size:11px; font-family:'Consolas';")
         self.status_label = QLabel()
         self.status_label.setStyleSheet("font-size:12px;")
         self.resume_label = QLabel("")
         self.resume_label.setStyleSheet("font-size:11px; color:#A9A8A0;")
         top.addWidget(self.pct_label)
+        top.addWidget(self.time_label)
         top.addStretch(1)
         top.addWidget(self.resume_label)
         top.addWidget(self.status_label)
@@ -239,15 +276,21 @@ class TaskProgressCell(QWidget):
         self.bar.setFixedHeight(5)
         self._status_color = "#A9A8A0"
         self._status_text = ""
+        self._time_text = ""
+        self._pct_text = "0%"
         self._apply_theme()
         qconfig.themeChanged.connect(self._apply_theme)
 
     def _apply_theme(self):
         track = "rgba(255,255,255,0.10)" if isDarkTheme() else "rgba(0,0,0,0.10)"
+        # 时间标签颜色随主题：暗色用亮灰，浅色用深灰，两种主题下都可读
+        time_color = "#C9C8C0" if isDarkTheme() else "#6B6A63"
         self.bar.setStyleSheet(f"""
             QProgressBar {{ background: {track}; border: none; border-radius: 2px; }}
             QProgressBar::chunk {{ background: #1D9E75; border-radius: 2px; }}
         """)
+        self.time_label.setStyleSheet(
+            f"font-size:11px; color:{time_color}; font-family:'Consolas';")
         self._render_status()
 
     def _render_status(self):
@@ -255,12 +298,19 @@ class TaskProgressCell(QWidget):
 
     def set_progress(self, value):
         self.bar.setValue(max(0, min(100, int(value))))
-        self.pct_label.setText(f"{int(value)}%")
+        text = f"{int(value)}%"
+        if text != self._pct_text:
+            self._pct_text = text
+            self.pct_label.setText(text)
+            self.content_changed.emit()
 
     def set_status(self, status: TaskStatus):
-        self.status_label.setText(status.value)
-        self._status_color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
-        self._render_status()
+        if self._status_text != status.value:
+            self._status_text = status.value
+            self.status_label.setText(status.value)
+            self._status_color = _STATUS_COLORS.get(status.name.lower(), "#A9A8A0")
+            self._render_status()
+            self.content_changed.emit()
 
     def set_resume(self, text, tooltip=""):
         """续跑角标（空串清除）；tooltip 挂 segment_info 的完整续跑说明"""
@@ -268,6 +318,15 @@ class TaskProgressCell(QWidget):
         self.resume_label.setToolTip(tooltip or "")
         self.resume_label.setStyleSheet(
             f"font-size:11px; color:{'#D98E04' if text else '#A9A8A0'};")
+
+    def set_time(self, text):
+        """时间标签（空串清除）：预计 ~mm:ss / 运行 mm:ss/预计 mm:ss / 用时 mm:ss"""
+        text = text or ""
+        if text != self._time_text:
+            self._time_text = text
+            self.time_label.setText(text)
+            self.time_label.setToolTip(text)
+            self.content_changed.emit()
 
 @dataclass
 class Task:
@@ -280,6 +339,26 @@ class Task:
     _output_path: str = None
     # 分段续跑信息快照（checkpoint 目录/段进度，保存时刷新；非分段任务为 None）
     segment_info: dict = None
+    # 计时：started_at=本次开始处理时刻（epoch 秒，进入 PROCESSING 时记录）；
+    # elapsed=最终用时（完成/失败时定格并持久化；重置任务时清零）
+    started_at: float = None
+    elapsed: float = 0.0
+
+    @cached_property
+    def frame_count(self):
+        """视频总帧数（预估处理时长用）；读取失败/图片任务返回 None"""
+        if self.is_image:
+            return None
+        try:
+            import cv2
+            cap = cv2.VideoCapture(self.path)
+            try:
+                n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            finally:
+                cap.release()
+            return n if n > 0 else None
+        except Exception:
+            return None
 
     @property
     def output_path(self):
@@ -312,6 +391,7 @@ class Task:
             'options': _options_to_json(self.options),
             'output_path': self._output_path,
             'segment_info': self.segment_info,
+            'elapsed': round(float(self.elapsed), 1) if self.elapsed else 0.0,
         }
 
     @classmethod
@@ -340,9 +420,14 @@ class Task:
         segment_info = data.get('segment_info')
         if not isinstance(segment_info, dict):
             segment_info = None
+        try:
+            elapsed = float(data.get('elapsed', 0.0))
+        except (TypeError, ValueError):
+            elapsed = 0.0
         return cls(path=path, name=name, progress=progress, status=status,
                    options=_options_from_json(data.get('options')),
-                   _output_path=output_path, segment_info=segment_info)
+                   _output_path=output_path, segment_info=segment_info,
+                   elapsed=max(0.0, elapsed))
 
 class TaskListComponent(QWidget):
     """任务列表组件"""
@@ -362,6 +447,13 @@ class TaskListComponent(QWidget):
         self._save_lock = threading.Lock()
         self._last_saved_blob = None
         self._last_save_time = None  # 最近一次成功保存的时刻（状态行显示）
+
+        # 计时/预估：历史处理速度 EMA（秒/帧，按完成任务回填）+ 秒级刷新定时器
+        self._sec_per_frame_ema = 0.0
+        self._time_timer = QTimer(self)
+        self._time_timer.setInterval(1000)
+        self._time_timer.timeout.connect(self._tick_time_labels)
+        self._time_timer.start()
 
         # 创建布局
         self.__init_widgets()
@@ -496,8 +588,10 @@ class TaskListComponent(QWidget):
         self.table.setItem(row, 0, item0)
         # 进度·状态卡片单元格
         self.table.setRowHeight(row, 46)
-        self.table.setCellWidget(row, 1, TaskProgressCell())
-        cell = self.table.cellWidget(row, 1)
+        cell = TaskProgressCell()
+        # 百分比/时间/状态任一内容变化 → 列宽贴合内容自适应（时间文本变长不被截断）
+        cell.content_changed.connect(self._fit_progress_column)
+        self.table.setCellWidget(row, 1, cell)
         cell.set_progress(task.progress)
         cell.set_status(task.status)
         # 续跑角标：分段任务且有可续跑 checkpoint 时显示短文本，完整说明挂 tooltip
@@ -507,6 +601,22 @@ class TaskListComponent(QWidget):
                 tr['TaskList']['QueueResumeChip'].format(
                     info.get('done_segments', 0), info.get('total_segments', 0)),
                 info.get('chip_text', ''))
+        elif (info and info.get('total_segments')
+                and not info.get('hash_match', True)):
+            # 参数已变更：旧 checkpoint 与当前参数不一致，续跑必被拒——
+            # 显示「参数已变」角标引导一键清理（右键菜单）
+            cell.set_resume(tr['TaskList']['QueueParamChangedChip'],
+                            info.get('chip_text', ''))
+        # 时间标签：历史用时（完成/失败）或预估总时长（待处理，有速度模型时）
+        self._refresh_time_label(len(self.tasks) - 1)
+
+    def _fit_progress_column(self, *args):
+        """「进度·状态」列宽贴合内容自适应（单元格 content_changed 触发）。
+
+        延迟到事件循环：QLabel 文本刚变时布局 sizeHint 需要一轮重算。
+        列 0（名称）是 Stretch 模式，本列变宽时名称列自动让位。
+        """
+        QTimer.singleShot(0, lambda: self.table.resizeColumnToContents(1))
 
     def update_task_progress(self, index, progress):
         """更新任务进度
@@ -535,23 +645,48 @@ class TaskListComponent(QWidget):
             status: 任务状态
         """
         if 0 <= index < len(self.tasks):
-            self.tasks[index].status = status
+            task = self.tasks[index]
+            task.status = status
+            # 计时：进入 PROCESSING 记起点；完成/失败定格用时；
+            # 回到 PENDING（重置/停止）清零重计
+            if status == TaskStatus.PROCESSING:
+                task.started_at = time.time()
+                task.elapsed = 0.0
+            elif status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+                if task.started_at is not None:
+                    task.elapsed = max(0.0, time.time() - task.started_at)
+                    task.started_at = None
+                # 速度模型回填：完成任务按 秒/帧 更新 EMA，并刷新待处理任务预估
+                if status == TaskStatus.COMPLETED:
+                    self._update_speed_model(task)
+            else:  # PENDING
+                task.started_at = None
+                task.elapsed = 0.0
             cell = self.table.cellWidget(index, 1)
             if cell:
                 cell.set_status(status)
                 # 续跑角标随状态刷新：仅待处理态保留（处理中/已完成/失败均清除）
-                info = self.tasks[index].segment_info
+                info = task.segment_info
                 if (status == TaskStatus.PENDING and info
                         and info.get('can_resume') and info.get('total_segments')):
                     cell.set_resume(
                         tr['TaskList']['QueueResumeChip'].format(
                             info.get('done_segments', 0), info.get('total_segments', 0)),
                         info.get('chip_text', ''))
+                elif (status == TaskStatus.PENDING and info
+                        and info.get('total_segments')
+                        and not info.get('hash_match', True)):
+                    cell.set_resume(tr['TaskList']['QueueParamChangedChip'],
+                                    info.get('chip_text', ''))
                 else:
                     cell.set_resume('')
+                self._refresh_time_label(index)
             # 选中当前行（保持原有行为）
             self.table.selectRow(index)
             self.save_tasks()
+            # 完成后队列速度模型变化 → 其余待处理任务的预估随之刷新
+            if status == TaskStatus.COMPLETED:
+                self._refresh_pending_estimates()
     
     def get_pending_tasks(self):
         """获取所有待处理的任务
@@ -623,11 +758,21 @@ class TaskListComponent(QWidget):
 
             reset_task_status_action = QAction(tr['TaskList']['ResetTaskStatus'], self)
             reset_task_status_action.triggered.connect((lambda: (
-                    self.update_task_status(index.row(), TaskStatus.PENDING), 
+                    self.update_task_status(index.row(), TaskStatus.PENDING),
                     self.update_task_progress(index.row(), 0)
                 )
             ))
             menu.addAction(reset_task_status_action)
+
+            # 删除旧分段进度（参数变更被拒续跑 / 手动清理）：列出目录并二次确认
+            info = self.tasks[index.row()].segment_info
+            task_dir = (info or {}).get('task_dir')
+            if task_dir and os.path.isdir(task_dir):
+                delete_checkpoint_action = QAction(
+                    tr['TaskList']['DeleteCheckpointAction'], self)
+                delete_checkpoint_action.triggered.connect(
+                    lambda: self._delete_checkpoint_and_reset(index.row()))
+                menu.addAction(delete_checkpoint_action)
             
             # 删除任务
             delete_action = QAction(tr['TaskList']['DeleteTask'], self)
@@ -661,6 +806,49 @@ class TaskListComponent(QWidget):
             self.task_deleted.emit(row)
             self.save_tasks()
     
+    def _delete_checkpoint_and_reset(self, row):
+        """删除任务的分段进度目录并重置为待处理（不可恢复，二次确认后执行）。
+
+        用于：参数变更导致续跑被拒（checkpoint 哈希不匹配）、或用户想主动
+        放弃旧分段从头重跑。目录删除走 Python（中文路径安全），删除后
+        segment_info 重新扫描盘上 checkpoint 自然变为 None。
+        """
+        if not (0 <= row < len(self.tasks)):
+            return
+        task = self.tasks[row]
+        info = task.segment_info or {}
+        task_dir = info.get('task_dir')
+        if not task_dir or not os.path.isdir(task_dir):
+            InfoBar.warning(
+                title=tr['TaskList']['Warning'],
+                content=tr['TaskList']['DeleteCheckpointMissing'],
+                parent=self.get_root_parent(), duration=3000)
+            return
+        tl = tr['TaskList']
+        box = MessageBox(
+            tl['DeleteCheckpointTitle'],
+            tl['DeleteCheckpointBody'].format(
+                task.name, info.get('done_segments', 0),
+                info.get('total_segments', 0), task_dir),
+            self.get_root_parent())
+        if not box.exec():
+            return
+        try:
+            shutil.rmtree(task_dir)
+        except OSError as e:
+            InfoBar.error(
+                title=tl['Warning'],
+                content=tl['DeleteCheckpointFailed'].format(e),
+                parent=self.get_root_parent(), duration=5000)
+            return
+        # 重置任务态：状态/进度/角标。save_tasks 会重扫盘上 checkpoint（已删除→None）
+        self.update_task_status(row, TaskStatus.PENDING)
+        self.update_task_progress(row, 0)
+        InfoBar.success(
+            title=tl['DeleteCheckpointDoneTitle'],
+            content=tl['DeleteCheckpointDone'].format(task.name),
+            parent=self.get_root_parent(), duration=4000)
+
     def on_task_clicked(self, index):
         """任务被点击时的处理
         
@@ -782,7 +970,7 @@ class TaskListComponent(QWidget):
                 return False
 
     def _update_queue_status(self):
-        """刷新任务队列持久化状态行：自动保存说明 + 任务/可续跑计数 + 最近保存时刻"""
+        """刷新任务队列持久化状态行：自动保存说明 + 任务/可续跑计数 + 预估剩余 + 最近保存"""
         tl = tr['TaskList']
         n = len(self.tasks)
         resumable = sum(1 for t in self.tasks
@@ -792,6 +980,9 @@ class TaskListComponent(QWidget):
             text += ' · ' + tl['QueueTasksCount'].format(n)
             if resumable:
                 text += ' · ' + tl['QueueResumeCount'].format(resumable)
+            eta, _ = self._queue_eta_seconds()
+            if eta:
+                text += ' · ' + tl['QueueEta'].format(self._fmt_duration(eta))
             if self._last_save_time:
                 text += ' · ' + tl['QueueSavedAt'].format(self._last_save_time)
         self.queue_status.setText(text)
@@ -853,6 +1044,122 @@ class TaskListComponent(QWidget):
         if 0 <= index < len(self.tasks):
             self.tasks[index].output_path = output_path
             self.save_tasks()
+
+    # ------------------------------------------------------------------ #
+    # 计时与时长预估
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _fmt_duration(seconds):
+        """秒 → mm:ss（满 1 小时转 h:mm:ss）"""
+        seconds = max(0, int(round(seconds)))
+        h, rest = divmod(seconds, 3600)
+        m, s = divmod(rest, 60)
+        return f'{h}:{m:02d}:{s:02d}' if h else f'{m:02d}:{s:02d}'
+
+    def _estimate_seconds(self, task):
+        """按历史速度 EMA 预估任务总时长（秒）；无法预估返回 None。
+
+        前提：已有速度模型（EMA>0）且视频帧数可读取。图片任务直接 None。
+        """
+        if self._sec_per_frame_ema <= 0:
+            return None
+        n = task.frame_count
+        if not n:
+            return None
+        return n * self._sec_per_frame_ema
+
+    def _update_speed_model(self, task):
+        """任务完成后用其实际用时/帧数更新速度 EMA（0.3 新样本权重）。"""
+        try:
+            if task.elapsed < 5:
+                return  # 样本过短（极小图/秒完成）不具代表性
+            n = task.frame_count
+            if not n:
+                return
+            new = task.elapsed / n
+            self._sec_per_frame_ema = (new if self._sec_per_frame_ema <= 0
+                                       else 0.3 * new + 0.7 * self._sec_per_frame_ema)
+        except Exception:
+            pass
+
+    def _refresh_time_label(self, index):
+        """刷新单行时间标签（按状态给文案）"""
+        if not (0 <= index < len(self.tasks)):
+            return
+        task = self.tasks[index]
+        cell = self.table.cellWidget(index, 1)
+        if cell is None:
+            return
+        tl = tr['TaskList']
+        text = ''
+        if task.status == TaskStatus.PROCESSING and task.started_at is not None:
+            elapsed = time.time() - task.started_at
+            # 总预估：进度 ≥3% 用本任务实测外推（最准）；
+            # 早期外推不稳则退回历史速度 EMA；均不可得用 -- 占位保持格式可见
+            total = None
+            if task.progress >= 3:
+                total = elapsed * 100.0 / task.progress
+            else:
+                total = self._estimate_seconds(task)
+            text = tl['TimeRunFmt'].format(
+                self._fmt_duration(elapsed),
+                self._fmt_duration(total) if total else '--')
+        elif task.status == TaskStatus.PENDING:
+            est = self._estimate_seconds(task)
+            if est:
+                text = tl['TimeEst'].format(self._fmt_duration(est))
+        elif task.elapsed > 0:
+            text = tl['TimeUsed'].format(self._fmt_duration(task.elapsed))
+        cell.set_time(text)
+
+    def _refresh_pending_estimates(self):
+        """速度模型变化后刷新所有待处理行的预估"""
+        for i, task in enumerate(self.tasks):
+            if task.status == TaskStatus.PENDING:
+                self._refresh_time_label(i)
+
+    def _tick_time_labels(self):
+        """每秒刷新：处理中任务的已用/预计 + 队列状态行的剩余预估"""
+        processing = [i for i, t in enumerate(self.tasks)
+                      if t.status == TaskStatus.PROCESSING]
+        for i in processing:
+            self._refresh_time_label(i)
+        self._update_queue_status()
+
+    def _queue_eta_seconds(self):
+        """队列剩余处理时长预估（秒）：当前任务剩余 + 待处理预估之和。
+
+        Returns:
+            (seconds, known): seconds 为 None 表示完全无法预估
+        """
+        known_total, has_unknown = 0.0, False
+        processing = [(i, t) for i, t in enumerate(self.tasks)
+                      if t.status == TaskStatus.PROCESSING]
+        pending = [(i, t) for i, t in enumerate(self.tasks)
+                   if t.status == TaskStatus.PENDING]
+        if not processing and not pending:
+            return None, True
+        for _, t in processing:
+            if t.started_at is None:
+                has_unknown = True
+                continue
+            elapsed = time.time() - t.started_at
+            if t.progress >= 3:
+                known_total += elapsed * (100.0 - t.progress) / t.progress
+            else:
+                est = self._estimate_seconds(t)
+                if est:
+                    known_total += est
+                else:
+                    has_unknown = True
+        for _, t in pending:
+            est = self._estimate_seconds(t)
+            if est:
+                known_total += est
+            else:
+                has_unknown = True
+        return (None if has_unknown and known_total <= 0 else known_total), not has_unknown
 
     @staticmethod
     def _log_restore(logger, message):

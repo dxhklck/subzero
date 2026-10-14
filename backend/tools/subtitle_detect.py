@@ -22,9 +22,13 @@ class SubtitleDetect:
     # 采样间隔，根据视频帧率在 _init_sample_step 中自适应设置
     SAMPLE_STEP = 3
 
-    def __init__(self, video_path, sub_areas=[]):
+    def __init__(self, video_path, sub_areas=[], det_params=None):
         self.video_path = video_path
         self.sub_areas = sub_areas
+        # DB 后处理可调参数（thresh/box_thresh/unclip_ratio），None 走模型默认。
+        # 残留二遍兜底用更敏感的参数：第一遍修完的残留多为笔画碎边，对比度低、
+        # 检测得分低于默认 box_thresh=0.6 门槛，两遍同参数必然同样漏
+        self.det_params = det_params or {}
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
         # 供 AUTO 路由判定区间运动量用，不影响检测结果
         self.frame_diff_scores = {}
@@ -65,6 +69,7 @@ class SubtitleDetect:
             model_dir=model_config.DET_MODEL_DIR,
             device=device,
             enable_hpi=len(onnx_providers) > 0,
+            **self.det_params,
         )
 
     # 检测模型内部的原生长边钳制值（inference.yml DetResizeForTest resize_long=960）。

@@ -33,15 +33,19 @@ def create_mask(size, coords_list):
     if coords_list:
         for coords in coords_list:
             xmin, xmax, ymin, ymax = coords
+            # 坐标必须是整数（cv2.rectangle 不接受 float；选区经比例换算/
+            # 显示坐标换算可能是浮点），统一四舍五入兜底
+            xmin, xmax = int(round(float(xmin))), int(round(float(xmax)))
+            ymin, ymax = int(round(float(ymin))), int(round(float(ymax)))
             # 为了避免框过小，放大10个像素
-            x1 = xmin - config.subtitleAreaDeviationPixel.value
+            x1 = xmin - int(config.subtitleAreaDeviationPixel.value)
             if x1 < 0:
                 x1 = 0
-            y1 = ymin - config.subtitleAreaDeviationPixel.value
+            y1 = ymin - int(config.subtitleAreaDeviationPixel.value)
             if y1 < 0:
                 y1 = 0
-            x2 = xmax + config.subtitleAreaDeviationPixel.value
-            y2 = ymax + config.subtitleAreaDeviationPixel.value
+            x2 = xmax + int(config.subtitleAreaDeviationPixel.value)
+            y2 = ymax + int(config.subtitleAreaDeviationPixel.value)
             cv2.rectangle(mask, (x1, y1),
                           (x2, y2), (255, 255, 255), thickness=-1)
     return mask

@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/License-Apache%202-red.svg)
 ![python version](https://img.shields.io/badge/Python-3.13-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows-green.svg)
-![version](https://img.shields.io/badge/version-1.1.0-1D9E75.svg)
+![version](https://img.shields.io/badge/version-1.1.2-1D9E75.svg)
 </div>
 
 ---
@@ -19,7 +19,18 @@
 
 SubZero removes hard-burned subtitles from videos: OCR locates the subtitle region and an AI inpainting model fills it in, preserving the original resolution. Available as a GUI app and a CLI, with automatic segmentation for long videos, checkpoint resuming, and a locally persisted task queue.
 
+**New in 1.1.2**:
+
+- **Task timing & estimates**: running tasks show "elapsed / estimated total", pending tasks are estimated from historical speed, and the queue status line shows overall remaining time
+- **Monitor is a terminal**: all raw output from detection/inpainting (including live progress bars and routing decisions) streams into the in-app Monitor tab; the launcher runs a single window with no console
+- **Anime residue fix**: the residue second pass now uses sensitive detection parameters (`box_thresh` 0.6→0.3, box expansion 1.5→2.0), catching fragment leftovers of outlined/stylized subtitles
+- **Crash self-report**: on a subprocess crash, a report file with environment info, log tail and traceback is written next to the output
+- **No-overwrite output**: if an output already exists, a numbered copy is saved instead (`_no_sub_2.mp4`) — old results and running tasks never clash
+- **One-click checkpoint cleanup**: when a parameter change refuses to resume, the task card shows "⛔ params changed" and a right-click deletes the stale progress and resets
+
 > This repository contains source only — **no automatic environment setup or weight downloading is built in**. For installation, weight download links, parameter reference and configuration examples, see the detailed tutorial: **[Tutorial (English)](使用教程_en.md)** · [使用教程 (简体中文)](使用教程.md)
+>
+> Prefer not to set up the environment yourself? Download the installer `净影SubZero-Setup-*.exe` from [GitHub Releases](https://github.com/dxhklck/subzero/releases) (thin install; first launch guides dependency and weight setup).
 
 ## Quick Start
 

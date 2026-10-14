@@ -7,7 +7,7 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
 # 项目版本号
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 # 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
 PROJECT_HOME_URL = "https://github.com/dxhklck/subzero"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
