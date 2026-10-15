@@ -703,8 +703,14 @@ class HomeInterface(QWidget):
             index: 任务索引
             file_path: 文件路径
         """
-        # 加载选中的视频进行预览（load_video 内会复位 B 框与同步播放）
-        self.load_video(file_path)
+        # 处理链路中（worker 存活）→ 保留 A/B 对比布局；用户点选待处理任务 → 单框
+        worker = getattr(self, '_worker_thread', None)
+        processing_active = bool(worker and worker.is_alive())
+        # 加载选中的视频进行预览（load_video 内会复位 B 框与同步播放；
+        # 处理中 keep_compare 保留对比模式，避免 select_task 信号把布局打回单框）
+        self.load_video(file_path, keep_compare=processing_active)
+        if processing_active:
+            self.video_display_component.set_compare_mode(True)
         ab_sections = self.task_list_component.get_task_option(index, TaskOptions.AB_SECTIONS, [])
         self.video_display_component.set_ab_sections(ab_sections)
         selections = self.task_list_component.get_task_option(index, TaskOptions.SUB_AREAS, [])
@@ -817,7 +823,7 @@ class HomeInterface(QWidget):
                             pending_task = pending_tasks[0]
                             # 更新当前处理的任务索引
                             self.current_processing_task_index, task_item = pending_task
-                            if not self.load_video(task_item.path):
+                            if not self.load_video(task_item.path, keep_compare=True):
                                 self.append_log_signal.emit([tr['SubtitleExtractorGUI']['OpenVideoFailed'].format(task_item.path)])
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
                                 continue
@@ -1391,11 +1397,18 @@ class HomeInterface(QWidget):
         if self.current_processing_task_index >= 0:
             self.task_list_component.update_task_status(self.current_processing_task_index, TaskStatus.FAILED)
 
-    def load_video(self, video_path):
+    def load_video(self, video_path, keep_compare=False):
+        """加载视频预览。
+
+        keep_compare=False（用户主动换视频/选中待处理任务）→ 回单框模式
+        （画面按最长边撑满窗口）；keep_compare=True（worker 处理链路加载
+        当前任务）→ 保留当前模式，不打断开始处理时切入的 A/B 对比布局。
+        """
         self.video_path = video_path
-        # 换视频：停止 A/B 同步播放并释放旧结果源，回到单框模式（画面最大化）
+        # 换视频：停止 A/B 同步播放并释放旧结果源
         self._close_compare_output()
-        self.video_display_component.set_compare_mode(False)
+        if not keep_compare:
+            self.video_display_component.set_compare_mode(False)
         with self._video_cap_lock:
             if self.video_cap:
                 self.video_cap.release()
