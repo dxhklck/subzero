@@ -31,21 +31,27 @@ def batch_generator(data, max_batch_size):
 def create_mask(size, coords_list):
     mask = np.zeros(size, dtype="uint8")
     if coords_list:
+        dev = int(config.subtitleAreaDeviationPixel.value)
         for coords in coords_list:
             xmin, xmax, ymin, ymax = coords
             # 坐标必须是整数（cv2.rectangle 不接受 float；选区经比例换算/
             # 显示坐标换算可能是浮点），统一四舍五入兜底
             xmin, xmax = int(round(float(xmin))), int(round(float(xmax)))
             ymin, ymax = int(round(float(ymin))), int(round(float(ymax)))
-            # 为了避免框过小，放大10个像素
-            x1 = xmin - int(config.subtitleAreaDeviationPixel.value)
+            # 横向自适应外扩：描边/艺术字/斜体的笔画横向超出检测框的比例明显高于
+            # 纵向（实测两端残留的形态），按字高 1/3 附加（下限 8px、上限 40px）；
+            # 纵向仍用「字幕区域外扩像素」。行合并/同行掩膜已保证框宽为该行最宽帧，
+            # 此处只补笔画超出框沿的部分
+            h = max(0, ymax - ymin)
+            x_dev = dev + min(40, max(8, h // 3))
+            x1 = xmin - x_dev
             if x1 < 0:
                 x1 = 0
-            y1 = ymin - int(config.subtitleAreaDeviationPixel.value)
+            y1 = ymin - dev
             if y1 < 0:
                 y1 = 0
-            x2 = xmax + int(config.subtitleAreaDeviationPixel.value)
-            y2 = ymax + int(config.subtitleAreaDeviationPixel.value)
+            x2 = xmax + x_dev
+            y2 = ymax + dev
             cv2.rectangle(mask, (x1, y1),
                           (x2, y2), (255, 255, 255), thickness=-1)
     return mask
