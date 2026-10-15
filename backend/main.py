@@ -358,8 +358,38 @@ class SubtitleRemover:
         ranges = expand_frame_ranges(ranges, config.subtitleTimelineBackwardFrameCount.value,
                                      config.subtitleTimelineForwardFrameCount.value)
         ranges = detector.filter_and_merge_intervals(ranges, config.sttnReferenceLength.value)
+        # 相邻区间同行合并（组内同行合并的跨区间补刀）：
+        # 同一条字幕线的检测框逐帧波动（部分帧只检出中段/漏检其中一行）会被
+        # find_continuous_ranges_with_same_mask 按掩膜变化切成多个区间；窄区间的
+        # 静态掩膜盖不住宽帧的两端/另一行（B 框字幕两端残留的根因之一——
+        # _group_interval_masks 的组内同行合并只在区间内部生效，跨区间无效）。
+        # 垂直重叠 >=50%（占较小者高度）且间隔 <=7 帧（±5 外扩后本就相邻）的
+        # 相邻区间合并为一个区间；合并后 _group_interval_masks 的组内同行合并
+        # 会把全区间统一为一张完整行掩膜。
+        # 代价：同位置先后两条字幕间的空档帧会被多修一点背景（数量受 7 帧间隔约束）。
+        def _band(a, b):
+            y0 = y1 = None
+            for f in range(a, b + 1):
+                for bx in sub_list.get(f, []):
+                    y0 = bx[2] if y0 is None else min(y0, bx[2])
+                    y1 = bx[3] if y1 is None else max(y1, bx[3])
+            return (y0, y1) if y0 is not None else None
+
+        i = 0
+        while i < len(ranges) - 1:
+            cur, nxt = ranges[i], ranges[i + 1]
+            if nxt[0] - cur[1] <= 7:
+                b1, b2 = _band(cur[0], cur[1]), _band(nxt[0], nxt[1])
+                if b1 and b2:
+                    ov = min(b1[1], b2[1]) - max(b1[0], b2[0])
+                    h1, h2 = b1[1] - b1[0], b2[1] - b2[0]
+                    if ov > 0 and min(h1, h2) > 0 and ov / min(h1, h2) >= 0.5:
+                        ranges[i] = (cur[0], max(cur[1], nxt[1]))
+                        del ranges[i + 1]
+                        continue  # 合并后与新邻居继续比较
+            i += 1
         if tbar is not None:
-            tbar.write(f'Subtitle filter_and_merge_intervals: {ranges}')
+            tbar.write(f'Subtitle same-line intervals merged: {ranges}')
         lo = max(range_start, frame_start + 1)
         out = {}
         for start, end in ranges:
