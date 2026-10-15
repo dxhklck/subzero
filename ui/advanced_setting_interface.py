@@ -268,6 +268,19 @@ class AdvancedSettingInterface(ScrollArea):
 
     # ---------- 恢复默认 ----------
 
+    def refresh_config_rows(self):
+        """刷新全部参数行的显示（外部改配置后调用，如首页应用参数预设）"""
+        moved_rows = [self.lang_row, self.detect_model_row,
+                      self.residue_row, self.hw_row, self.segment_row,
+                      self.segment_overlap_row,
+                      self.update_row, self.theme_row]
+        all_rows = (self.rows_detect + self.rows_detect_expert +
+                    self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
+                    moved_rows)
+        for row in all_rows:
+            if hasattr(row, 'refresh_row'):
+                row.refresh_row()
+
     def _on_restore_defaults(self):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
