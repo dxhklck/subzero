@@ -590,6 +590,34 @@ class HomeInterface(QWidget):
         ret, frame = self.b_video_cap.read()
         self.video_display_component.set_b_frame(frame if ret else None)
 
+    def _reopen_source_cap(self):
+        """按当前视频重开 A 路源（worker 收尾会释放 video_cap）。
+
+        处理结束后预览拖动、A/B 同步播放都依赖 A 路 cap；旧逻辑只在
+        on_task_output_path 里补开一次，且按钮启用态与真实状态会漂移
+        （按钮亮着但 A 路已释放 → 点播放弹「结果还没有生成」，被用户报障）。
+        """
+        with self._video_cap_lock:
+            if (self.video_cap is None or not self.video_cap.isOpened()) \
+                    and self.video_path and os.path.isfile(self.video_path) \
+                    and not is_image_file(self.video_path):
+                self.video_cap = cv2.VideoCapture(get_readable_path(self.video_path))
+                if not self.video_cap.isOpened():
+                    self.video_cap = None
+        return self.video_cap is not None and self.video_cap.isOpened()
+
+    def _sync_play_button(self):
+        """按 A/B 两路源的实时可用性同步播放按钮启用态（消除「亮着却点不了」）"""
+        ready = (self.video_cap is not None and self.video_cap.isOpened()
+                 and self.b_video_cap is not None and self.b_video_cap.isOpened())
+        self.video_display_component.play_button.setEnabled(ready)
+        return ready
+
+    def _ensure_compare_sources(self):
+        """同步播放前确保 A/B 两路源可用：A 路缺失时自愈重开"""
+        self._reopen_source_cap()
+        return self._sync_play_button()
+
     def _open_compare_output(self, output_path):
         """打开结果视频作为 B 框同步源（当前任务已完成输出）。
 
@@ -625,9 +653,8 @@ class HomeInterface(QWidget):
         self.video_display_component.set_b_frame(frame if ret else None)
         # 有结果源 → 切到 A/B 对比布局（双框同步对比/播放）
         self.video_display_component.set_compare_mode(True)
-        # A 路源就绪才开放同步播放（按钮常驻可见，未就绪置灰）
-        self.video_display_component.play_button.setEnabled(
-            self.video_cap is not None and self.video_cap.isOpened())
+        # A 路源就绪才开放同步播放（按钮常驻可见，启用态按两路实时同步）
+        self._sync_play_button()
         # 就绪提示（仅从「无结果源」新开时提示，避免重复刷屏）
         if not was_open:
             InfoBar.success(
@@ -649,8 +676,8 @@ class HomeInterface(QWidget):
         if self._compare_playing:
             self._stop_compare_play()
             return
-        if not (self.video_cap and self.video_cap.isOpened()
-                and self.b_video_cap and self.b_video_cap.isOpened()):
+        # 起播前自愈：A 路可能已被 worker 收尾释放（按钮亮着但点不了的原因）
+        if not self._ensure_compare_sources():
             InfoBar.warning(
                 title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
                 content=tr['SubtitleExtractorGUI']['CompareNotReady'],
@@ -809,15 +836,8 @@ class HomeInterface(QWidget):
         # 完成的正是当前预览的任务 → 打开结果视频，B 框进入同步对比
         if index == self.task_list_component.get_current_task_index():
             # worker 收尾已释放 A 路视频源（video_cap=None），此处重开：
-            # 否则同步播放按钮的 A 路就绪判定恒为 False——完成后永远无按钮可点
-            # （「完成后没有任何播放按钮」的根因）
-            with self._video_cap_lock:
-                if self.video_cap is None or not self.video_cap.isOpened():
-                    task = self.task_list_component.get_task(index)
-                    if task and os.path.isfile(task.path):
-                        self.video_cap = cv2.VideoCapture(get_readable_path(task.path))
-                        if not self.video_cap.isOpened():
-                            self.video_cap = None
+            # 否则同步播放按钮的 A 路就绪判定恒为 False
+            self._reopen_source_cap()
             self._open_compare_output(output_path)
 
     def run_button_clicked(self):
@@ -1326,6 +1346,9 @@ class HomeInterface(QWidget):
         self.video_slider.setValue(1)
         # 重置当前处理任务索引
         self.current_processing_task_index = -1
+        # worker 收尾已释放 A 路视频源：重开，否则处理后拖动滑块/同步播放全部失效
+        self._reopen_source_cap()
+        self._sync_play_button()
 
     @Slot(int, bool)
     def update_progress(self, progress_total, isFinished):
