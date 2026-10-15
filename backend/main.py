@@ -269,6 +269,28 @@ class SubtitleRemover:
             mid = (groups[i][1] + groups[i + 1][0]) // 2
             groups[i][1] = mid
             groups[i + 1][0] = mid + 1
+        # 同行合并：OCR 对同一条字幕的框宽逐帧波动/部分检出会切出窄组，
+        # 窄组的静态掩膜盖不住其他帧字幕的两端（成片 B 框字幕两端残留的根因）。
+        # 垂直重叠 >=50%（占较小者高度）的相邻组合并为一个跨度组，掩膜取
+        # 全跨度水平并集——同一条字幕线上的帧共用一张完整行掩膜。
+        # 代价：渐进显字等场景早期帧的掩膜偏宽（多修一点背景），换取消灭端部残留。
+        def _vband(coords):
+            return min(c[2] for c in coords), max(c[3] for c in coords)
+
+        i = 0
+        while i < len(groups) - 1:
+            a, b = groups[i], groups[i + 1]
+            ay0, ay1 = _vband(a[2])
+            by0, by1 = _vband(b[2])
+            ov = min(ay1, by1) - max(ay0, by0)
+            ah, bh = ay1 - ay0, by1 - by0
+            if ov > 0 and ah > 0 and bh > 0 and ov / min(ah, bh) >= 0.5:
+                a[1] = b[1]
+                a[2] = list(dict.fromkeys(a[2] + b[2]))
+                a[3] = self._bbox_union([a[3], b[3]])
+                del groups[i + 1]
+            else:
+                i += 1
         # 组内坐标去重（静态字幕每帧同框会重复）
         return [(g[0], g[1], list(dict.fromkeys(g[2]))) for g in groups]
 
