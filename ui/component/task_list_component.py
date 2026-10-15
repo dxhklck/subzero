@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstra
                                QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer
 from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox
-from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent, QPainter, QPen
 from showinfm import show_in_file_manager
 
 from backend.config import config, tr
@@ -328,6 +328,122 @@ class TaskProgressCell(QWidget):
             self.time_label.setToolTip(text)
             self.content_changed.emit()
 
+class _TaskTable(TableWidget):
+    """任务列表表格：支持行拖拽排序（自实现）。
+
+    Qt 的 InternalMove 只移动 item 不同步 tasks 列表和 cellWidget，不可用；
+    这里手动跟踪拖拽：按住左键移动 ≥12px 进入拖拽态，指示线画在目标行的
+    上/下边缘（光标位于目标行上半 → 插到其前，下半 → 插到其后），松开时发
+    row_move_requested(from_row, insert_index) 由组件同步 tasks 列表并重建。
+
+    can_drag 回调为 False 时（如存在处理中任务——索引被运行占用，重排会错位）
+    完全禁用拖拽，鼠标行为与普通表格一致。
+    """
+    row_move_requested = Signal(int, int)  # (from_row, insert_index)
+
+    _DRAG_THRESHOLD = 12  # manhattan 距离阈值，防误触
+    _INDICATOR_COLOR = '#1D9E75'
+
+    def __init__(self, parent=None, can_drag=None):
+        super().__init__(parent)
+        self._can_drag = can_drag or (lambda: False)
+        self._press_row = None
+        self._press_pos = None
+        self._dragging = False
+        self._marker_row = None   # 指示线所在目标行
+        self._marker_after = False  # True=插到目标行之后
+
+    # ---- 拖拽状态机 ----
+
+    def mousePressEvent(self, event):
+        self._reset_drag()
+        if event.button() == Qt.LeftButton and self._can_drag():
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid():
+                self._press_row = index.row()
+                self._press_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_row is not None and (event.buttons() & Qt.LeftButton):
+            pos = event.position().toPoint()
+            if not self._dragging:
+                if (pos - self._press_pos).manhattanLength() >= self._DRAG_THRESHOLD:
+                    self._dragging = True
+            if self._dragging:
+                self._update_marker(pos)
+                self.viewport().update()
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and self._press_row is not None:
+            insert = self._insert_index()
+            self._reset_drag()
+            if insert is not None:
+                self.row_move_requested.emit(self._press_row, insert)
+                event.accept()
+                return
+        self._reset_drag()
+        super().mouseReleaseEvent(event)
+
+    def _update_marker(self, pos):
+        """按光标位置更新指示线：行上半=该行之前，下半=该行之后；表格外贴边"""
+        row = self.rowAt(pos.y())  # ⚠ QTableView.rowAt 收 y，非 QPoint
+        if row < 0:
+            if pos.y() < 0:
+                row, after = 0, False
+            else:
+                row, after = max(0, self.rowCount() - 1), True
+        else:
+            rect = self.visualRect(self.model().index(row, 0))
+            after = pos.y() > rect.center().y()
+        self._marker_row, self._marker_after = row, after
+
+    def _insert_index(self):
+        """指示线边界 → 移除源行后的列表插入下标；原位返回 None"""
+        if self._marker_row is None or self._press_row is None:
+            return None
+        idx = self._marker_row + 1 if self._marker_after else self._marker_row
+        if self._press_row < idx:
+            idx -= 1
+        if idx == self._press_row:
+            return None
+        return idx
+
+    def _reset_drag(self):
+        changed = self._dragging or self._marker_row is not None
+        self._press_row = None
+        self._press_pos = None
+        self._dragging = False
+        self._marker_row = None
+        self._marker_after = False
+        if changed:
+            self.viewport().update()
+
+    # ---- 指示线绘制 ----
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not (self._dragging and self._marker_row is not None):
+            return
+        index = self.model().index(self._marker_row, 0)
+        rect = self.visualRect(index)
+        if not rect.isValid():
+            return
+        painter = QPainter(self.viewport())
+        pen = QPen(QColor(self._INDICATOR_COLOR), 3)
+        painter.setPen(pen)
+        y = rect.bottom() if self._marker_after else rect.top()
+        painter.drawLine(rect.left(), y, rect.right(), y)
+        # 端点圆点：指示线更醒目
+        painter.setBrush(QColor(self._INDICATOR_COLOR))
+        painter.drawEllipse(rect.left() + 1, y - 3, 6, 6)
+        painter.drawEllipse(rect.right() - 7, y - 3, 6, 6)
+        painter.end()
+
+
 @dataclass
 class Task:
     path: str
@@ -435,6 +551,7 @@ class TaskListComponent(QWidget):
     # 定义信号
     task_selected = Signal(int, str)  # 任务被选中时发出信号，参数为任务索引和视频路径
     task_deleted = Signal(int)  # 任务被删除时发出信号，参数为任务索引
+    task_moved = Signal(int, int)  # 拖拽重排：任务从 from_row 移动到 insert_index
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -482,8 +599,13 @@ class TaskListComponent(QWidget):
         self.queue_status.clicked.connect(self._open_queue_dir)
         layout.addWidget(self.queue_status)
 
-        # 创建表格：名称 | 进度·状态（卡片式单元格）
-        self.table = TableWidget(self)
+        # 创建表格：名称 | 进度·状态（卡片式单元格）；支持行拖拽排序
+        self.table = _TaskTable(
+            self,
+            # 有任务处理中时禁止拖拽：运行中任务的索引被 worker 占用，重排会错位
+            can_drag=lambda: not any(t.status == TaskStatus.PROCESSING
+                                     for t in self.tasks))
+        self.table.row_move_requested.connect(self.move_task)
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels([tr['TaskList']['Name'],
                                               f"{tr['TaskList']['Progress']} · {tr['TaskList']['Status']}"])
@@ -764,6 +886,15 @@ class TaskListComponent(QWidget):
             ))
             menu.addAction(reset_task_status_action)
 
+            # 失败任务：直达错误现场（崩溃报告文件/输出目录）
+            if self.tasks[index.row()].status == TaskStatus.FAILED:
+                report = self._find_crash_report(self.tasks[index.row()])
+                if report is not None:
+                    err_action = QAction(tr['TaskList']['OpenErrorLogLocation'], self)
+                    err_action.triggered.connect(
+                        lambda checked, p=report: self.open_file_location(p))
+                    menu.addAction(err_action)
+
             # 删除旧分段进度（参数变更被拒续跑 / 手动清理）：列出目录并二次确认
             info = self.tasks[index.row()].segment_info
             task_dir = (info or {}).get('task_dir')
@@ -805,6 +936,60 @@ class TaskListComponent(QWidget):
             # 发出任务删除信号
             self.task_deleted.emit(row)
             self.save_tasks()
+
+    def move_task(self, from_row, insert_index):
+        """拖拽重排：把 from_row 的任务移动到 insert_index（同步表格/索引/持久化）。
+
+        insert_index 为「移除源行后」的列表插入位置（0..n，n=追加到末尾）；
+        任务最终落位 final_row = min(insert_index, n-1)。表格整表重建——
+        单元格内含进度/状态/角标/时间，整行重建最可靠。
+        """
+        n = len(self.tasks)
+        if not (0 <= from_row < n) or not (0 <= insert_index <= n):
+            return
+        if insert_index == from_row or insert_index == from_row + 1:
+            return  # 原位
+        task = self.tasks.pop(from_row)
+        final_row = min(insert_index, len(self.tasks))
+        self.tasks.insert(final_row, task)
+
+        def _shift(i):
+            if i == from_row:
+                return final_row
+            if from_row < i <= final_row:
+                return i - 1
+            if final_row <= i < from_row:
+                return i + 1
+            return i
+        self.current_task_index = _shift(self.current_task_index)
+
+        self.table.setRowCount(0)
+        for t in self.tasks:
+            self._add_task_row(t)
+        self.table.selectRow(final_row)
+        self.task_moved.emit(from_row, final_row)
+        self.save_tasks()
+
+    def _find_crash_report(self, task):
+        """定位失败任务的错误现场：优先最新崩溃报告文件，退回输出目录。
+
+        崩溃报告由 write_crash_report 落在输出文件同目录（文件名含时间戳）。
+        返回 None 表示输出目录不存在（无法直达）。
+        """
+        base = task.output_path or task.path
+        out_dir = os.path.dirname(base)
+        if not out_dir or not os.path.isdir(out_dir):
+            return None
+        try:
+            reports = [f for f in os.listdir(out_dir)
+                       if f.startswith('崩溃报告_') and f.endswith('.txt')]
+            if reports:
+                reports.sort(key=lambda f: os.path.getmtime(os.path.join(out_dir, f)),
+                             reverse=True)
+                return os.path.join(out_dir, reports[0])
+        except OSError:
+            pass
+        return out_dir
     
     def _delete_checkpoint_and_reset(self, row):
         """删除任务的分段进度目录并重置为待处理（不可恢复，二次确认后执行）。

@@ -9,12 +9,14 @@ import threading
 import multiprocessing
 import traceback
 from pathlib import Path
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget, QPlainTextEdit
+from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget,
+                               QPlainTextEdit, QMenu)
 from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QTextCursor, QAction
 from PySide6 import QtWidgets
 from datetime import datetime
-from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon)
+from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon,
+                            InfoBar)
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.task_list_component import (TaskListComponent, TaskStatus, TaskOptions,
                                               resolve_output_path)
@@ -136,6 +138,7 @@ class HomeInterface(QWidget):
     task_output_path_signal = Signal(int, str)  # (task_index, output_path)
     task_progress_signal = Signal(int, int)  # (task_index, progress)——worker 线程更新任务卡片用
     task_option_signal = Signal(int, object, object)  # (task_index, TaskOptions, value)
+    clear_console_signal = Signal(str)  # 新任务开始清空监控（参数=任务名，worker 线程经信号触发）
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("HomeInterface")
@@ -174,6 +177,7 @@ class HomeInterface(QWidget):
         self.progress_signal.connect(self.update_progress)
         self.append_log_signal.connect(self.append_log)
         self.console_signal.connect(self.append_console)
+        self.clear_console_signal.connect(self._on_new_task_console)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
@@ -245,6 +249,9 @@ class HomeInterface(QWidget):
             "QPlainTextEdit { background:#101010; color:#C8C8C8;"
             "font-family:'Consolas'; font-size:11px; border:none; }")
         self.log_tabs.addTab(self.console_text, tr["Setting"]["MonitorTab"])
+        # 监控右键菜单：复制/导出/清空（终端等价操作）
+        self.console_text.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.console_text.customContextMenuRequested.connect(self._show_console_menu)
         # 默认展示「监控」：黑色终端面板即主控制台（对齐绘世/秋叶启动器的形态，
         # 环境横幅 + 处理过程的全部原始输出都在这里流过）
         self.log_tabs.setCurrentWidget(self.console_text)
@@ -370,6 +377,81 @@ class HomeInterface(QWidget):
     def on_scroll_change(self, value):
         """监控滚动条位置变化（日志自动滚动常开，无需额外处理）"""
         pass
+
+    # ------------------------------------------------------------------ #
+    # 监控即终端：新任务清空 + 右键复制/导出/清空
+    # ------------------------------------------------------------------ #
+
+    @Slot(str)
+    def _on_new_task_console(self, task_name):
+        """新任务开始（worker 经信号触发，不碰 Qt 控件）：清空监控打分隔行。
+
+        监控即终端——每个任务是全新会话，上一任务的进度条/检测输出不再残留；
+        启动横幅只在启动时打一次，这里补一行任务分隔保持上下文可读。
+        """
+        self.console_text.clear()
+        self._last_console_is_bar = False
+        self.append_console(tr['Setting']['ConsoleNewTaskSep'].format(task_name))
+
+    def _show_console_menu(self, pos):
+        """监控右键菜单：复制选中 / 复制全部 / 导出日志 / 清空"""
+        menu = QMenu(self)
+        has_selection = self.console_text.textCursor().hasSelection()
+
+        copy_sel = QAction(tr['Setting']['ConsoleCopySel'], self)
+        copy_sel.setEnabled(has_selection)
+        copy_sel.triggered.connect(self.console_text.copy)
+        menu.addAction(copy_sel)
+
+        copy_all = QAction(tr['Setting']['ConsoleCopyAll'], self)
+        copy_all.triggered.connect(lambda: QtWidgets.QApplication.clipboard().setText(
+            self.console_text.toPlainText()))
+        menu.addAction(copy_all)
+
+        export = QAction(tr['Setting']['ConsoleExport'], self)
+        export.triggered.connect(self._export_console)
+        menu.addAction(export)
+
+        menu.addSeparator()
+
+        clear = QAction(tr['Setting']['ConsoleClear'], self)
+        clear.triggered.connect(self._clear_console)
+        menu.addAction(clear)
+
+        menu.exec_(self.console_text.viewport().mapToGlobal(pos))
+
+    def _clear_console(self):
+        """手动清空监控（复位进度条重绘状态）"""
+        self.console_text.clear()
+        self._last_console_is_bar = False
+
+    def _export_console(self):
+        """导出监控全文到 config/logs/console_export_时间戳.txt（等价黑窗回放）"""
+        text = self.console_text.toPlainText()
+        if not text.strip():
+            InfoBar.warning(
+                title=tr['Setting']['MonitorTab'],
+                content=tr['Setting']['ConsoleExportEmpty'],
+                parent=self.window(), duration=3000)
+            return
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        logs_dir = os.path.join(root, 'config', 'logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        path = os.path.join(
+            logs_dir, f'console_export_{datetime.now():%Y%m%d_%H%M%S}.txt')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        except OSError as e:
+            InfoBar.error(
+                title=tr['Setting']['MonitorTab'],
+                content=tr['Setting']['ConsoleExportFailed'].format(e),
+                parent=self.window(), duration=5000)
+            return
+        InfoBar.success(
+            title=tr['Setting']['MonitorTab'],
+            content=tr['Setting']['ConsoleExportDone'].format(path),
+            parent=self.window(), duration=5000)
 
     
     def slider_changed(self, value):
@@ -507,6 +589,9 @@ class HomeInterface(QWidget):
                                 self.append_log_signal.emit([tr['SubtitleExtractorGUI']['OpenVideoFailed'].format(task_item.path)])
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
                                 continue
+
+                            # 新任务开始：清空监控（监控即终端，每任务全新会话）
+                            self.clear_console_signal.emit(task_item.name)
 
                             # 获取字幕区域坐标，未选择则使用全屏
                             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
