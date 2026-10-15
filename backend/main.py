@@ -1,4 +1,5 @@
 import gc
+import queue
 import torch
 import shutil
 import traceback
@@ -8,6 +9,7 @@ from pathlib import Path
 import threading
 import cv2
 import sys
+from collections import deque
 from functools import cached_property
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -325,60 +327,156 @@ class SubtitleRemover:
         return kept_idx, dup_map
 
     def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
-        sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
-        sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
-        self._collect_first_pass_regions(sub_list)
-        if len(sub_list) == 0:
-            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
-        continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
-        tbar.write(f"Subtitle detected: {continuous_frame_no_list}")
-        continuous_frame_no_list = expand_frame_ranges(continuous_frame_no_list, config.subtitleTimelineBackwardFrameCount.value, config.subtitleTimelineForwardFrameCount.value)
-        tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
-        continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
-        tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
-        # AUTO路由需要在删除检测器前取出帧差分数
-        motion_scores = sub_detector.frame_diff_scores if route else None
-        del sub_detector
-        gc.collect()
-        start_end_map = dict()
+        """字幕检测与去除的调度入口。
+
+        pipelineChunkFrames 决定形态：
+        - 0（关闭流水线）：全片检测完成后才开始去除，检测阶段修复资源空转（旧行为，
+          作为兜底路径保留，出问题可一键回退）；
+        - >0：按该帧数切块做流水线——检测线程产出一块，去除线程立刻消费一块，
+          两者并行，整体耗时 ≈ max(检测, 修复) 而非二者之和。
+        """
         frame_end = self.frame_end if self.frame_end is not None else self.frame_count
-        for start, end in continuous_frame_no_list:
-            # 确保区间不超出视频总帧数（分段时同时钳制到段尾），否则会导致
-            # FramePrefetcher 哨兵被内循环消费后外层死锁；
-            # 起点同时钳制到段首（帧号体系为 1-based 标签，段内首帧 = frame_start+1），
-            # 否则向前外扩跨段边界时整段区间匹配不到、原帧直接写出（字幕漏除）
-            start_end_map[max(start, self.frame_start + 1)] = min(end, frame_end)
-        # 段间重叠：frame_write_start 之前的帧只作上下文（送模型、不写入、不计进度）；
-        # 未注入时等于 frame_start，行为与旧版完全一致
+        chunk = int(config.pipelineChunkFrames.value or 0)
+        if chunk <= 0 or (frame_end - self.frame_start) <= chunk:
+            return self._video_inpaint_whole(tbar, model, batch_size, route)
+        return self._video_inpaint_pipelined(tbar, model, batch_size, route, frame_end, chunk)
+
+    def _plan_intervals(self, detector, sub_list, frame_start, range_start, range_end, tbar=None):
+        """检测结果 → 「区间起点 -> 区间终点」映射（连续同掩膜 → 时间线外扩 → 短区间合并）。
+
+        边界钳制（分块正确性关键）：
+        - 起点钳到 max(range_start, frame_start+1)：区间跨块时必须在**本块首帧**重新
+          起键，否则键落在块之前，本块帧匹配不到 → 字幕原样写出（漏除）；
+        - 终点钳到 range_end：读帧必须严格按块计数，不得跨块读走下一块的帧
+          （否则后续块逐帧错位，整片撕裂）。
+        """
+        if not sub_list:
+            return {}
+        ranges = detector.find_continuous_ranges_with_same_mask(sub_list)
+        if tbar is not None:
+            tbar.write(f'Subtitle detected: {ranges}')
+        ranges = expand_frame_ranges(ranges, config.subtitleTimelineBackwardFrameCount.value,
+                                     config.subtitleTimelineForwardFrameCount.value)
+        ranges = detector.filter_and_merge_intervals(ranges, config.sttnReferenceLength.value)
+        if tbar is not None:
+            tbar.write(f'Subtitle filter_and_merge_intervals: {ranges}')
+        lo = max(range_start, frame_start + 1)
+        out = {}
+        for start, end in ranges:
+            key = max(start, lo)
+            val = min(end, range_end)
+            if val < key:
+                continue
+            out[key] = val
+        return out
+
+    def _video_inpaint_pipelined(self, tbar, model, batch_size, route, frame_end, chunk):
+        """边检测边去除：检测线程（生产者）按块产出 interval 计划，
+        主线程（消费者）按块读帧、修复、写盘，两者重叠。
+
+        预取深度 2 块（用户定版语义）：先检测出 2 块再启动去除，之后消费者持续
+        消费、生产者最多领先 2 块——既不逐块起停浪费算力，也不让修复等太久。
+        跨块字幕区间会被自然切开（各块用本块帧的掩膜），逐帧不重不漏。
+        """
         write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
-        current_frame_index = self.frame_start
+        depth = 2                       # 预取深度（块）
+        task_queue = queue.Queue(maxsize=depth)
+        stop_event = threading.Event()
+        state = {'detected': 0, 'error': None}
+        # 检测器只在生产者线程内使用（paddle 推理句柄不做跨线程共享）
+        detector = SubtitleDetect(self.video_path, self.sub_areas)
+
+        def producer():
+            try:
+                cursor = self.frame_start + 1
+                while cursor <= frame_end and not stop_event.is_set():
+                    c_end = min(frame_end, cursor + chunk - 1)
+                    sub_list = detector.find_subtitle_frame_no(frame_start=cursor - 1,
+                                                               frame_end=c_end, sub_remover=self)
+                    self._collect_first_pass_regions(sub_list)
+                    state['detected'] += len(sub_list)
+                    start_end_map = self._plan_intervals(detector, sub_list, self.frame_start,
+                                                         cursor, c_end, tbar)
+                    motion = dict(detector.frame_diff_scores) if route else None
+                    detector.frame_diff_scores.clear()  # 逐块取走，避免全程累积
+                    task_queue.put((cursor, c_end, start_end_map, sub_list, motion))
+                    cursor = c_end + 1
+            except BaseException as e:  # 异常必须回传主线程，否则消费者会阻塞在 get()
+                state['error'] = e
+            finally:
+                task_queue.put(None)    # 哨兵：无论成败都要放行消费者
+
+        worker = threading.Thread(target=producer, daemon=True)
+        worker.start()
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
-        # 使用帧预读取，I/O 与推理重叠；段帧数作为预读取上限（读满即停）
         reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
-        while True:
+        pending = deque()
+        finished = False
+        # 预取：先攒够 depth 块（不足则以生产者结束为准）再开始去除
+        while len(pending) < depth and not finished:
+            item = task_queue.get()
+            if item is None:
+                finished = True
+            else:
+                pending.append(item)
+        try:
+            while True:
+                if not pending:
+                    if finished:
+                        break
+                    item = task_queue.get()
+                    if item is None:
+                        break
+                    pending.append(item)
+                if state['error'] is not None:
+                    break
+                c_start, c_end, cur_map, cur_sub, motion = pending.popleft()
+                self._process_range(reader, c_start, c_end, cur_map, cur_sub, tbar,
+                                    model, batch_size, route, motion, write_start)
+        finally:
+            reader.stop()
+            stop_event.set()
+            worker.join(timeout=10)
+        if state['error'] is not None:
+            raise state['error']
+        if state['detected'] == 0:
+            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
+
+    def _process_range(self, reader, range_start, range_end, start_end_map, sub_list, tbar,
+                       model=None, batch_size=None, route=False, motion_scores=None, write_start=None):
+        """处理帧号区间 [range_start, range_end]（1-based 全局帧号）：
+
+        区间外的帧直接写原帧；命中区间起点的帧连续读到区间尾，按帧间 bbox 变化
+        分组掩膜后修复写出。整片模式下一次覆盖全片；流水线模式下按块调用，
+        每块严格读取自己的帧数（不得跨块，否则后续块逐帧错位）。
+        """
+        if write_start is None:
+            write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
+        current_frame_index = range_start - 1
+        while current_frame_index < range_end:
             ret, frame = reader.read()
-            # 如果读取到为，则结束
+            # 如果读取视频帧失败（视频读到最后一帧）
             if not ret:
-                break
+                return
             current_frame_index += 1
             # 判断当前帧号是不是字幕区间开始, 如果不是，则直接写
             if current_frame_index not in start_end_map.keys():
                 # 段首重叠帧（全局帧号 <= write_start）只作上下文，不写入
                 if current_frame_index > write_start:
                     self.video_writer.write(frame)
-                    # self.append_output(f'write frame: {current_frame_index}')
                     self.update_progress(tbar, increment=1)
                     self.update_preview_with_comp(frame, frame)
             # 如果是区间开始，则找到尾巴
             else:
                 start_frame_index = current_frame_index
-                end_frame_index = start_end_map[current_frame_index]
+                # 终点严格钳在本块内：跨块的区间由下一块接着处理（各自用本块掩膜）
+                end_frame_index = min(start_end_map[current_frame_index], range_end)
                 tbar.write(f'processing frame {start_frame_index} to {end_frame_index}')
                 # 用于存储需要去字幕的视频帧
                 frames_need_inpaint = list()
                 frames_need_inpaint.append(frame)
-                # 接着往下读，直到读取到尾巴
-                for j in range(end_frame_index - start_frame_index):
+                # 接着往下读，直到读取到尾巴（不得超过本块末帧）
+                while current_frame_index < end_frame_index:
                     ret, frame = reader.read()
                     if not ret:
                         break
@@ -451,6 +549,40 @@ class SubtitleRemover:
                         if g_start + i > write_start:
                             self.video_writer.write(rep)
                             self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
+
+    def _video_inpaint_whole(self, tbar, model=None, batch_size=None, route=False):
+        sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
+        sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self._collect_first_pass_regions(sub_list)
+        if len(sub_list) == 0:
+            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
+        continuous_frame_no_list = sub_detector.find_continuous_ranges_with_same_mask(sub_list)
+        tbar.write(f"Subtitle detected: {continuous_frame_no_list}")
+        continuous_frame_no_list = expand_frame_ranges(continuous_frame_no_list, config.subtitleTimelineBackwardFrameCount.value, config.subtitleTimelineForwardFrameCount.value)
+        tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
+        continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
+        tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
+        # AUTO路由需要在删除检测器前取出帧差分数
+        motion_scores = sub_detector.frame_diff_scores if route else None
+        del sub_detector
+        gc.collect()
+        start_end_map = dict()
+        frame_end = self.frame_end if self.frame_end is not None else self.frame_count
+        for start, end in continuous_frame_no_list:
+            # 确保区间不超出视频总帧数（分段时同时钳制到段尾），否则会导致
+            # FramePrefetcher 哨兵被内循环消费后外层死锁；
+            # 起点同时钳制到段首（帧号体系为 1-based 标签，段内首帧 = frame_start+1），
+            # 否则向前外扩跨段边界时整段区间匹配不到、原帧直接写出（字幕漏除）
+            start_end_map[max(start, self.frame_start + 1)] = min(end, frame_end)
+        # 段间重叠：frame_write_start 之前的帧只作上下文（送模型、不写入、不计进度）；
+        # 未注入时等于 frame_start，行为与旧版完全一致
+        write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
+        current_frame_index = self.frame_start
+        self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
+        # 使用帧预读取，I/O 与推理重叠；段帧数作为预读取上限（读满即停）
+        reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
+        self._process_range(reader, self.frame_start + 1, frame_end, start_end_map, sub_list,
+                            tbar, model, batch_size, route, motion_scores, write_start)
         reader.stop()
 
     def run(self):

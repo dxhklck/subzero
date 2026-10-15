@@ -143,13 +143,23 @@ class SubtitleDetect:
                             break
         return temp_list
 
-    def find_subtitle_frame_no(self, sub_remover=None):
+    def find_subtitle_frame_no(self, sub_remover=None, frame_start=None, frame_end=None):
+        """采样检测帧窗口内的字幕。
+
+        frame_start/frame_end 显式指定窗口（流水线分块检测用）；
+        未指定时沿用 sub_remover.frame_start/frame_end（原行为）。
+        帧号体系：窗口为 1-based 的 (frame_start, frame_end]。
+        """
         video_cap = cv2.VideoCapture(get_readable_path(self.video_path))
         frame_count = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
         # 分段帧范围（与 SubtitleRemover.frame_start/frame_end 对齐）：
         # 检测只在段范围内进行，帧号保持全局绝对值（掩膜/路由按全局帧号一致）
-        frame_start = int(getattr(sub_remover, 'frame_start', 0) or 0) if sub_remover else 0
-        frame_end = int(getattr(sub_remover, 'frame_end', 0) or 0) if sub_remover else 0
+        if frame_start is None:
+            frame_start = int(getattr(sub_remover, 'frame_start', 0) or 0) if sub_remover else 0
+        if frame_end is None:
+            frame_end = int(getattr(sub_remover, 'frame_end', 0) or 0) if sub_remover else 0
+        frame_start = int(frame_start or 0)
+        frame_end = int(frame_end or 0)
         if frame_end <= 0:
             frame_end = int(frame_count)
         seg_total = max(1, frame_end - frame_start)
