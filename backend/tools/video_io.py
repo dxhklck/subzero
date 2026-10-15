@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .ffmpeg_cli import FFmpegCLI
+from .video_encoder import resolve_h264_encoder
 from .common_tools import SUBPROCESS_CREATION_FLAGS
 
 
@@ -71,17 +72,21 @@ class FramePrefetcher:
 
 class FFmpegVideoWriter:
     """
-    通过 FFmpeg 管道写入帧，使用 libx264 编码。
+    通过 FFmpeg 管道写入帧，使用 H.264 编码。
+    编码器由 video_encoder 按本机实测解析（硬件优先：NVENC→QSV→AMF，
+    纯 CPU 机器保底 libx264 veryfast，与旧行为一致），探测结果进程内缓存，
+    保证同一次运行的所有 writer（主流程/残留二遍/分段）编码器一致
+    （分段 concat 的 -c copy 以此为前提）。
     接口兼容 cv2.VideoWriter（write/release）。
     """
 
-    def __init__(self, output_path, fps, size):
+    def __init__(self, output_path, fps, size, encoder_override=None):
         w, h = size
-        # fps 读不到（0/负值）时 libx264 会以 -r 0 拒绝或产出坏文件；回退 25 保底
+        # fps 读不到（0/负值）时编码器会以 -r 0 拒绝或产出坏文件；回退 25 保底
         if not fps or fps <= 0:
             fps = 25.0
-        # veryfast + crf 20：相较 fast + crf 18 编码快约一倍、文件小约25%，
-        # 对字幕擦除输出（非母版）画质损失可忽略；极限画质可改回 fast/18
+        encoder, enc_params = resolve_h264_encoder(encoder_override)
+        self.encoder = encoder  # 实际使用的编码器（上层日志/排查用）
         cmd = [
             FFmpegCLI.instance().ffmpeg_path,
             '-y',
@@ -91,10 +96,9 @@ class FFmpegVideoWriter:
             '-pix_fmt', 'bgr24',
             '-r', str(fps),
             '-i', '-',
-            '-c:v', 'libx264',
+            '-c:v', encoder,
+            *enc_params,
             '-pix_fmt', 'yuv420p',
-            '-crf', '20',
-            '-preset', 'veryfast',
             '-loglevel', 'error',
             output_path
         ]

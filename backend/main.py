@@ -29,7 +29,8 @@ from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
-from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter
+from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter, resolve_h264_encoder
+from backend.tools.constant import EncoderMode
 import tempfile
 import multiprocessing
 import time
@@ -90,9 +91,10 @@ class SubtitleRemover:
         self.frame_width = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         # 创建视频临时对象，windows下delete=True会有permission denied的报错
         self.video_temp_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
-        # 创建视频写对象（使用 FFmpeg libx264 编码，比 mp4v 质量更好、文件更小）
+        # 创建视频写对象（H.264 硬件编码优先，video_encoder 按本机实测探测，失败自动降级）
         try:
-            self.video_writer = FFmpegVideoWriter(get_readable_path(self.video_temp_file.name), self.fps, self.size)
+            self.video_writer = FFmpegVideoWriter(get_readable_path(self.video_temp_file.name), self.fps, self.size,
+                                                  encoder_override=config.videoEncoder.value)
         except Exception:
             self.video_writer = cv2.VideoWriter(get_readable_path(self.video_temp_file.name), cv2.VideoWriter_fourcc(*'mp4v'), self.fps, self.size)
         self.video_out_path = os.path.abspath(os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub.mp4'))
@@ -914,6 +916,11 @@ class SubtitleRemover:
         providers = ", ".join(self.hardware_accelerator.onnx_providers)
         providers_str = f", {providers}" if providers else ""
         self.append_output(tr['Main']['SubtitleDetectionModel'].format(f"{detect_mode_name} ({detect_device}{providers_str})"))
+        # 实际生效的视频编码器（探测结果或用户强制指定），排查「编码慢/画质」类反馈时看这行
+        enc_name, _ = resolve_h264_encoder(getattr(config.videoEncoder, 'value', None))
+        enc_values = [m.value for m in EncoderMode]
+        enc_disp = list(tr['VideoEncoder'].values())[enc_values.index(enc_name)] if enc_name in enc_values else enc_name
+        self.append_output(tr['Main']['EncoderSelected'].format(enc_disp))
         # 有 N 卡但 Paddle GPU 走不了（驱动过旧 / 显卡架构不被当前 paddle 覆盖 / CUDA DLL 异常）时，
         # 在日志窗口给出原因与建议，避免用户误以为字幕检测坏了
         fallback_reason = self.hardware_accelerator.paddle_cuda_fallback_reason
@@ -1061,7 +1068,8 @@ class SubtitleRemover:
         new_temp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
         new_temp.close()
         try:
-            writer = FFmpegVideoWriter(get_readable_path(new_temp.name), self.fps, self.size)
+            writer = FFmpegVideoWriter(get_readable_path(new_temp.name), self.fps, self.size,
+                                       encoder_override=config.videoEncoder.value)
         except Exception:
             writer = cv2.VideoWriter(get_readable_path(new_temp.name), cv2.VideoWriter_fourcc(*'mp4v'),
                                      self.fps, self.size)

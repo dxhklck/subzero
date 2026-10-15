@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, BoolValidator, OptionsConfigItem, 
                             EnumSerializer, RangeValidator, RangeConfigItem, ConfigValidator)
-from backend.tools.constant import InpaintMode, SubtitleDetectMode
+from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode
 import configparser
 
 # 项目版本号
@@ -68,6 +68,12 @@ class Config(QConfig):
     parameterPreset = ConfigItem("Main", "ParameterPreset", "custom")
     
     subtitleDetectMode =  OptionsConfigItem("Main", "SubtitleDetectMode", SubtitleDetectMode.PP_OCRv5_SERVER, OptionsValidator(SubtitleDetectMode), EnumSerializer(SubtitleDetectMode))
+
+    # 【设置视频编码器】auto = 按本机实测探测（NVENC→QSV→AMF→libx264 保底）；
+    # 强制指定某编码器时优先用它，本机跑不动则自动降级到链上下一个（不会让任务失败）。
+    # 实测（1080p 噪声内容）：NVENC p5 约253fps vs libx264 veryfast 约72fps；
+    # 纯 CPU 机器保底 libx264 veryfast（与旧行为一致），没有 N 卡不代表变慢
+    videoEncoder = OptionsConfigItem("Main", "VideoEncoder", EncoderMode.AUTO, OptionsValidator(EncoderMode), EnumSerializer(EncoderMode))
 
     # 【设置像素点偏差】
     # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)

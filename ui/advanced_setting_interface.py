@@ -263,6 +263,16 @@ class AdvancedSettingInterface(ScrollArea):
                                        self.pipeline_prefetch_row, self.repair_workers_row,
                                        columns=4))
 
+        # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
+        # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
+        self.encoder_row = CompactComboRow(
+            config.videoEncoder, gui['VideoEncoder'], gui['VideoEncoderDesc'],
+            texts=[list(tr['VideoEncoder'].values())[i]
+                   for i, _ in enumerate(config.videoEncoder.validator.options)],
+            values=list(config.videoEncoder.validator.options),
+            icon=FluentIcon.VIDEO, parent=card)
+        vbox.addWidget(CompactParamRow(self.encoder_row, columns=4))
+
     def _build_about_group(self):
         """关于卡：信息类内容集中展示（从通用组抽出）。
 
@@ -327,7 +337,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.repair_workers_row,
-                      self.update_row, self.theme_row]
+                      self.update_row, self.theme_row, self.encoder_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
                     moved_rows)
@@ -341,7 +351,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.repair_workers_row,
-                      self.update_row, self.theme_row]
+                      self.update_row, self.theme_row, self.encoder_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \
             len(moved_rows)
