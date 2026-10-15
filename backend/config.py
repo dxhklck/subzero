@@ -108,6 +108,12 @@ class Config(QConfig):
     # 更大 = 起步更晚、缓冲更深（检测抖动大/修复极快时可适当调大）。
     # 仅当 pipelineChunkFrames > 0 时生效；不影响输出（与整片路径逐帧一致）
     pipelinePrefetchChunks = RangeConfigItem("Main", "PipelinePrefetchChunks", 2, RangeValidator(1, 5))
+    # 修复线程数：并发生成不同块的修复任务（检测线程之外再加的修复并行度）。
+    # 可无参克隆的模型（LAMA/OpenCV）每线程一份实例真并行；不可克隆的模型
+    # （MiniMax/STTN，显存翻倍或构造需参）共享实例加锁自动串行化（正确性优先，
+    # 此时仅保留块间读帧/写盘重叠）。MiniMax 全片时两线程会退化为串行推理。
+    # 1 = 关闭修复并行（原行为）
+    repairWorkers = RangeConfigItem("Main", "RepairWorkers", 2, RangeValidator(1, 4))
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修

@@ -254,10 +254,14 @@ class AdvancedSettingInterface(ScrollArea):
             config.pipelinePrefetchChunks, gui['PipelinePrefetchChunks'],
             gui['PipelinePrefetchChunksDesc'], icon=FluentIcon.UPDATE, parent=card)
 
-        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数
+        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数 | 修复线程数
         # （信息类行已抽到「关于」卡：版权·版本 / 关键参数速览 / 项目链接 / 流水线说明）
+        self.repair_workers_row = CompactRangeRow(
+            config.repairWorkers, gui['RepairWorkers'],
+            gui['RepairWorkersDesc'], icon=FluentIcon.PEOPLE, parent=card)
         vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.pipeline_chunk_row,
-                                       self.pipeline_prefetch_row, columns=4))
+                                       self.pipeline_prefetch_row, self.repair_workers_row,
+                                       columns=4))
 
     def _build_about_group(self):
         """关于卡：信息类内容集中展示（从通用组抽出）。
@@ -322,7 +326,7 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row,
+                      self.pipeline_prefetch_row, self.repair_workers_row,
                       self.update_row, self.theme_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
@@ -336,7 +340,7 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row,
+                      self.pipeline_prefetch_row, self.repair_workers_row,
                       self.update_row, self.theme_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \
