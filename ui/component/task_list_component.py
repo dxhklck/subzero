@@ -2,7 +2,6 @@ import os
 import json
 import time
 import shutil
-import threading
 from pathlib import Path
 from enum import Enum, unique
 from dataclasses import dataclass
@@ -10,9 +9,10 @@ from functools import cached_property
 from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
-                               QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
+                               QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy,
+                               QFileDialog)
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer, QRect, QPoint
-from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox
+from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox, ToolButton
 from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent, QPainter, QPen
 from showinfm import show_in_file_manager
 
@@ -70,14 +70,17 @@ _STATUS_COLORS = {
 }
 
 # ------------------------------------------------------------------ #
-# 任务队列持久化（config/tasks.json）
+# 任务队列手动快照管理（快照文件格式与旧 config/tasks.json 完全兼容）
 # ------------------------------------------------------------------ #
 
 #: 项目根目录（按本文件位置定位，不依赖 CWD）：ui/component/ -> 项目根
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-#: 任务队列持久化文件（与 config.json 同目录）
+#: 旧任务队列持久化文件（v1.x 自动保存/自动恢复已移除；存量文件仍可手动加载）
 TASKS_FILE = os.path.join(_PROJECT_ROOT, 'config', 'tasks.json')
+
+#: 快照默认保存目录（保存/加载对话框的起始位置）
+SNAPSHOTS_DIR = os.path.join(_PROJECT_ROOT, 'config', 'snapshots')
 
 #: 持久化结构版本（不兼容变更时递增）
 TASKS_VERSION = 1
@@ -359,11 +362,19 @@ class _TaskTable(TableWidget):
 
     def mousePressEvent(self, event):
         self._reset_drag()
-        if event.button() == Qt.LeftButton and self._can_drag():
-            index = self.indexAt(event.position().toPoint())
-            if index.isValid():
-                self._press_row = index.row()
-                self._press_pos = event.position().toPoint()
+        # 重排消歧（多选共存）：仅「无修饰键 + 按下已选中的唯一行」才进入
+        # 重排状态机；其余按压（Ctrl/Shift 点选、未选中行/空白处拖拽框选）
+        # 交回 Qt 默认行为（范围选择/橡皮筋框选）。语义：先点选要移动的任务，
+        # 再拖它重排；未选中行上直接拖 = 框选。
+        if (event.button() == Qt.LeftButton and self._can_drag()
+                and not (event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier
+                                              | Qt.AltModifier))):
+            sel = self.selectionModel().selectedRows() if self.selectionModel() else []
+            if len(sel) == 1:
+                index = self.indexAt(event.position().toPoint())
+                if index.isValid() and index.row() == sel[0].row():
+                    self._press_row = index.row()
+                    self._press_pos = event.position().toPoint()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -602,6 +613,7 @@ class TaskListComponent(QWidget):
     task_selected = Signal(int, str)  # 任务被选中时发出信号，参数为任务索引和视频路径
     task_deleted = Signal(int)  # 任务被删除时发出信号，参数为任务索引
     task_moved = Signal(int, int)  # 拖拽重排：任务从 from_row 移动到 insert_index
+    snapshot_log = Signal(str)  # 快照加载过程日志（GUI 线程接到监控输出）
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -610,10 +622,8 @@ class TaskListComponent(QWidget):
         # 初始化变量
         self.tasks = []  # 存储任务列表
         self.current_task_index = -1  # 当前选中的任务索引
-        # 持久化：写锁（GUI 线程与 worker 线程均可能触发保存）+ 上次落盘内容（去重基线）
-        self._save_lock = threading.Lock()
-        self._last_saved_blob = None
-        self._last_save_time = None  # 最近一次成功保存的时刻（状态行显示）
+        # 快照管理：最近一次手动保存快照的时刻（状态行显示）
+        self._last_snapshot_time = None
 
         # 计时/预估：历史处理速度 EMA（秒/帧，按完成任务回填）+ 秒级刷新定时器
         self._sec_per_frame_ema = 0.0
@@ -632,13 +642,23 @@ class TaskListComponent(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 面板标题行
+        # 面板标题行：标题 + 手动快照按钮（保存/加载）
         header = QHBoxLayout()
         header.setContentsMargins(10, 8, 10, 4)
         title = QLabel(tr['TaskList']['Name'])
         title.setStyleSheet("font-size:12px; font-weight:500;")
         header.addWidget(title)
         header.addStretch(1)
+
+        self.snapshot_save_btn = ToolButton(FluentIcon.SAVE, self)
+        self.snapshot_save_btn.setToolTip(tr['TaskList']['SnapshotSaveTip'])
+        self.snapshot_save_btn.clicked.connect(self.save_snapshot_dialog)
+        header.addWidget(self.snapshot_save_btn)
+
+        self.snapshot_load_btn = ToolButton(FluentIcon.FOLDER, self)
+        self.snapshot_load_btn.setToolTip(tr['TaskList']['SnapshotLoadTip'])
+        self.snapshot_load_btn.clicked.connect(self.load_snapshot_dialog)
+        header.addWidget(self.snapshot_load_btn)
         layout.addLayout(header)
 
         # 任务队列持久化状态行（功能入口：点击打开队列文件所在文件夹）
@@ -671,7 +691,10 @@ class TaskListComponent(QWidget):
         header_view.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 进度·状态列自适应
 
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # 多选：Ctrl/Shift 点选 + 未选中行/空白处拖拽扫选行区间（QTableView 原生
+        # ExtendedSelection 行为）。与行拖拽重排的冲突在 _TaskTable.mousePressEvent
+        # 消歧：仅「无修饰键按下已选中的唯一行」才重排，其余交回 Qt 扫选
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
         # 卡片列表形态（去二维表格感）：隐藏行号列与表头——
@@ -907,73 +930,128 @@ class TaskListComponent(QWidget):
                 return idx
         return -1  # 没找到返回-1
         
+    def _selected_rows(self):
+        """当前多选的行号（升序）；无选择返回空列表"""
+        if self.table.selectionModel() is None:
+            return []
+        return sorted({i.row() for i in self.table.selectionModel().selectedRows()})
+
     def show_context_menu(self, pos):
-        """显示右键菜单
-        
+        """显示右键菜单：多选 → 批量操作；单选/未命中行 → 原有单项操作
+
         Args:
             pos: 鼠标位置
         """
         index = self.table.indexAt(pos)
-        if index.isValid():
-            menu = QMenu(self)
-            
-            # 打开视频文件位置
-            open_video_location_action = QAction(tr['TaskList']['OpenSourceVideoLocation'], self)
-            open_video_location_action.triggered.connect(lambda: self.open_file_location(self.tasks[index.row()].path))
-            menu.addAction(open_video_location_action)
-            
-            # 打开目标文件位置
-            def open_target_location():
-                task = self.tasks[index.row()]
-                path = task.output_path
-                if task.status != TaskStatus.COMPLETED:
-                    InfoBar.warning(
-                        title=tr['TaskList']['Warning'],
-                        content=tr['TaskList']['TargetFileNotFound'],
-                        parent=self.get_root_parent(),
-                        duration=3000
-                    )
-                    return
-                self.open_file_location(path)
-            open_target_location_action = QAction(tr['TaskList']['OpenTargetVideoLocation'], self)
-            open_target_location_action.triggered.connect(open_target_location)
-            menu.addAction(open_target_location_action)
+        if not index.isValid():
+            return
+        rows = self._selected_rows()
+        if index.row() not in rows:
+            rows = [index.row()]
+        if len(rows) >= 2:
+            self._show_batch_menu(rows, pos)
+        else:
+            self._show_single_menu(index.row(), pos)
 
-            reset_task_status_action = QAction(tr['TaskList']['ResetTaskStatus'], self)
-            reset_task_status_action.triggered.connect((lambda: (
-                    self.update_task_status(index.row(), TaskStatus.PENDING),
-                    self.update_task_progress(index.row(), 0)
+    def _show_batch_menu(self, rows, pos):
+        """批量操作菜单：打开源文件位置 / 重置状态 / 删除（带确认）"""
+        tl = tr['TaskList']
+        menu = QMenu(self)
+
+        open_video_location_action = QAction(tl['OpenSourceVideoLocation'], self)
+        open_video_location_action.triggered.connect(
+            lambda: [self.open_file_location(self.tasks[r].path) for r in rows])
+        menu.addAction(open_video_location_action)
+
+        reset_action = QAction(tl['BatchReset'].format(len(rows)), self)
+        reset_action.triggered.connect(
+            lambda: [self._reset_task(r) for r in rows])
+        menu.addAction(reset_action)
+
+        menu.addSeparator()
+        delete_action = QAction(tl['BatchDelete'].format(len(rows)), self)
+        delete_action.triggered.connect(lambda: self.delete_tasks(rows))
+        menu.addAction(delete_action)
+
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _show_single_menu(self, row, pos):
+        """单项右键菜单（原有逻辑，行为不变）"""
+        menu = QMenu(self)
+
+        # 打开视频文件位置
+        open_video_location_action = QAction(tr['TaskList']['OpenSourceVideoLocation'], self)
+        open_video_location_action.triggered.connect(lambda: self.open_file_location(self.tasks[row].path))
+        menu.addAction(open_video_location_action)
+
+        # 打开目标文件位置
+        def open_target_location():
+            task = self.tasks[row]
+            path = task.output_path
+            if task.status != TaskStatus.COMPLETED:
+                InfoBar.warning(
+                    title=tr['TaskList']['Warning'],
+                    content=tr['TaskList']['TargetFileNotFound'],
+                    parent=self.get_root_parent(),
+                    duration=3000
                 )
-            ))
-            menu.addAction(reset_task_status_action)
+                return
+            self.open_file_location(path)
+        open_target_location_action = QAction(tr['TaskList']['OpenTargetVideoLocation'], self)
+        open_target_location_action.triggered.connect(open_target_location)
+        menu.addAction(open_target_location_action)
 
-            # 失败任务：直达错误现场（崩溃报告文件/输出目录）
-            if self.tasks[index.row()].status == TaskStatus.FAILED:
-                report = self._find_crash_report(self.tasks[index.row()])
-                if report is not None:
-                    err_action = QAction(tr['TaskList']['OpenErrorLogLocation'], self)
-                    err_action.triggered.connect(
-                        lambda checked, p=report: self.open_file_location(p))
-                    menu.addAction(err_action)
+        reset_task_status_action = QAction(tr['TaskList']['ResetTaskStatus'], self)
+        reset_task_status_action.triggered.connect(lambda: self._reset_task(row))
+        menu.addAction(reset_task_status_action)
 
-            # 删除旧分段进度（参数变更被拒续跑 / 手动清理）：列出目录并二次确认
-            info = self.tasks[index.row()].segment_info
-            task_dir = (info or {}).get('task_dir')
-            if task_dir and os.path.isdir(task_dir):
-                delete_checkpoint_action = QAction(
-                    tr['TaskList']['DeleteCheckpointAction'], self)
-                delete_checkpoint_action.triggered.connect(
-                    lambda: self._delete_checkpoint_and_reset(index.row()))
-                menu.addAction(delete_checkpoint_action)
-            
-            # 删除任务
-            delete_action = QAction(tr['TaskList']['DeleteTask'], self)
-            delete_action.triggered.connect(lambda: self.delete_task(index.row()))
-            menu.addAction(delete_action)
-            
-            # 显示菜单
-            menu.exec_(self.table.viewport().mapToGlobal(pos))
-    
+        # 失败任务：直达错误现场（崩溃报告文件/输出目录）
+        if self.tasks[row].status == TaskStatus.FAILED:
+            report = self._find_crash_report(self.tasks[row])
+            if report is not None:
+                err_action = QAction(tr['TaskList']['OpenErrorLogLocation'], self)
+                err_action.triggered.connect(
+                    lambda checked, p=report: self.open_file_location(p))
+                menu.addAction(err_action)
+
+        # 删除旧分段进度（参数变更被拒续跑 / 手动清理）：列出目录并二次确认
+        info = self.tasks[row].segment_info
+        task_dir = (info or {}).get('task_dir')
+        if task_dir and os.path.isdir(task_dir):
+            delete_checkpoint_action = QAction(
+                tr['TaskList']['DeleteCheckpointAction'], self)
+            delete_checkpoint_action.triggered.connect(
+                lambda: self._delete_checkpoint_and_reset(row))
+            menu.addAction(delete_checkpoint_action)
+
+        # 删除任务
+        delete_action = QAction(tr['TaskList']['DeleteTask'], self)
+        delete_action.triggered.connect(lambda: self.delete_task(row))
+        menu.addAction(delete_action)
+
+        # 显示菜单
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def _reset_task(self, row):
+        """重置单个任务状态与进度（单项菜单与批量重置共用）"""
+        self.update_task_status(row, TaskStatus.PENDING)
+        self.update_task_progress(row, 0)
+
+    def delete_tasks(self, rows):
+        """批量删除任务（倒序逐行删除保证索引不错位；>1 行先二次确认）"""
+        tl = tr['TaskList']
+        rows = sorted({r for r in rows if 0 <= r < len(self.tasks)}, reverse=True)
+        if not rows:
+            return
+        if len(rows) > 1:
+            box = MessageBox(tl['BatchDeleteTitle'],
+                             tl['BatchDeleteBody'].format(len(rows)),
+                             self.get_root_parent())
+            if not box.exec():
+                return
+        for row in rows:
+            self.delete_task(row)
+
     def delete_task(self, row):
         """删除任务
         
@@ -1190,38 +1268,29 @@ class TaskListComponent(QWidget):
     # ------------------------------------------------------------------ #
 
     def save_tasks(self, path=None):
-        """持久化任务队列到 config/tasks.json。
+        """刷新任务队列状态（快照模式：不再自动落盘；path 参数仅为兼容旧签名）。
 
-        内容去重（无变更不落盘）+ 原子写（.tmp + os.replace）；
-        保存前按盘上 checkpoint 刷新分段续跑信息；失败仅打印警告不崩。
+        v1.x 的「自动保存到 tasks.json + 启动自动恢复」机制已移除，任务队列
+        改由用户通过「保存快照 / 加载快照」手动管理。此方法保留原调用点
+        （增删任务/移动/选项变更处）并只做两件事：按盘上 checkpoint 刷新
+        分段续跑信息 + 刷新状态行。
         """
-        with self._save_lock:
-            try:
-                # 分段续跑信息以盘上 checkpoint 为准刷新（无 checkpoint 的任务为 None）
-                for task in self.tasks:
-                    task.segment_info = collect_segment_info(task)
-                blob = json.dumps([t.to_dict() for t in self.tasks],
-                                  ensure_ascii=False, sort_keys=True)
-                # 去重基线含路径：同内容同路径才跳过（测试/多路径场景不误跳过）
-                key = (os.path.abspath(path or TASKS_FILE), blob)
-                if key == self._last_saved_blob:
-                    return False
-                save_tasks_file(self.tasks, path)
-                self._last_saved_blob = key
-                self._last_save_time = datetime.now().strftime('%H:%M:%S')
-                self._update_queue_status()
-                return True
-            except Exception as e:
-                print(f'[任务持久化] 保存失败: {e}')
-                return False
+        try:
+            for task in self.tasks:
+                task.segment_info = collect_segment_info(task)
+            self._update_queue_status()
+            return True
+        except Exception as e:
+            print(f'[任务持久化] 刷新失败: {e}')
+            return False
 
     def _update_queue_status(self):
-        """刷新任务队列持久化状态行：自动保存说明 + 任务/可续跑计数 + 预估剩余 + 最近保存"""
+        """刷新任务队列状态行：快照模式说明 + 任务/可续跑计数 + 预估剩余 + 最近快照"""
         tl = tr['TaskList']
         n = len(self.tasks)
         resumable = sum(1 for t in self.tasks
                         if t.segment_info and t.segment_info.get('can_resume'))
-        text = tl['QueueAutoSave']
+        text = tl['QueueSnapshotHint']
         if n:
             text += ' · ' + tl['QueueTasksCount'].format(n)
             if resumable:
@@ -1229,29 +1298,114 @@ class TaskListComponent(QWidget):
             eta, _ = self._queue_eta_seconds()
             if eta:
                 text += ' · ' + tl['QueueEta'].format(self._fmt_duration(eta))
-            if self._last_save_time:
-                text += ' · ' + tl['QueueSavedAt'].format(self._last_save_time)
+            if self._last_snapshot_time:
+                text += ' · ' + tl['QueueSavedAt'].format(self._last_snapshot_time)
         self.queue_status.setText(text)
-        self.queue_status.setToolTip(tl['QueueOpenTip'])
+        self.queue_status.setToolTip(tl['QueueSnapshotTip'])
 
     def _open_queue_dir(self):
-        """状态行入口：打开任务队列文件（config/tasks.json）所在文件夹"""
+        """状态行入口：打开快照目录（不存在则打开 config 目录）"""
         try:
-            show_in_file_manager(os.path.dirname(TASKS_FILE))
+            target = SNAPSHOTS_DIR if os.path.isdir(SNAPSHOTS_DIR) else os.path.dirname(TASKS_FILE)
+            show_in_file_manager(target)
         except Exception as e:
             print(f'[任务持久化] 打开文件夹失败: {e}')
 
-    def load_tasks(self, path=None, logger=None):
-        """启动时从 config/tasks.json 恢复任务队列。
+    # ------------------------------------------------------------------ #
+    # 手动快照：保存 / 加载
+    # ------------------------------------------------------------------ #
+
+    def save_snapshot(self, path):
+        """手动保存当前任务队列为快照文件（格式与旧 tasks.json 兼容）。
+
+        返回写入路径；失败抛异常（对话框层捕获提示）。"""
+        for task in self.tasks:
+            task.segment_info = collect_segment_info(task)
+        save_tasks_file(self.tasks, path)
+        self._last_snapshot_time = datetime.now().strftime('%H:%M:%S')
+        self._update_queue_status()
+        return path
+
+    def save_snapshot_dialog(self):
+        """「保存快照」按钮：选择路径写入当前任务队列（格式与旧 tasks.json 兼容）"""
+        tl = tr['TaskList']
+        if not self.tasks:
+            InfoBar.warning(title=tl['SnapshotSave'], content=tl['SnapshotEmpty'],
+                            parent=self.get_root_parent(), duration=3000)
+            return
+        for task in self.tasks:
+            task.segment_info = collect_segment_info(task)
+        try:
+            os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
+        except OSError:
+            pass
+        suggested = os.path.join(
+            SNAPSHOTS_DIR, f'任务快照_{datetime.now():%Y%m%d_%H%M%S}.json')
+        path, _ = QFileDialog.getSaveFileName(
+            self, tl['SnapshotSave'], suggested, 'JSON (*.json);;All Files (*.*)')
+        if not path:
+            return
+        try:
+            self.save_snapshot(path)
+        except OSError as e:
+            InfoBar.error(title=tl['SnapshotSave'],
+                          content=tl['SnapshotSaveFailed'].format(e),
+                          parent=self.get_root_parent(), duration=5000)
+            return
+        self._last_snapshot_time = datetime.now().strftime('%H:%M:%S')
+        self._update_queue_status()
+        InfoBar.success(title=tl['SnapshotSave'],
+                        content=tl['SnapshotSaved'].format(path),
+                        parent=self.get_root_parent(), duration=4000)
+
+    def load_snapshot_dialog(self):
+        """「加载快照」按钮：选择快照文件替换当前任务列表"""
+        tl = tr['TaskList']
+        if any(t.status == TaskStatus.PROCESSING for t in self.tasks):
+            InfoBar.warning(title=tl['SnapshotLoad'], content=tl['SnapshotBusy'],
+                            parent=self.get_root_parent(), duration=3000)
+            return
+        start_dir = SNAPSHOTS_DIR if os.path.isdir(SNAPSHOTS_DIR) else os.path.dirname(TASKS_FILE)
+        path, _ = QFileDialog.getOpenFileName(
+            self, tl['SnapshotLoad'], start_dir, 'JSON (*.json);;All Files (*.*)')
+        if not path:
+            return
+        if self.tasks:
+            box = MessageBox(tl['SnapshotReplaceTitle'],
+                             tl['SnapshotReplaceBody'].format(len(self.tasks)),
+                             self.get_root_parent())
+            if not box.exec():
+                return
+        try:
+            restored, warnings = self.load_snapshot(path)
+        except Exception as e:
+            InfoBar.error(title=tl['SnapshotLoad'],
+                          content=tl['SnapshotLoadFailed'].format(e),
+                          parent=self.get_root_parent(), duration=5000)
+            return
+        for w in warnings:
+            self.snapshot_log.emit(f'[快照加载] {w}')
+        if restored:
+            self.select_task(0)
+        InfoBar.success(title=tl['SnapshotLoad'],
+                        content=tl['SnapshotLoaded'].format(restored),
+                        parent=self.get_root_parent(), duration=4000)
+
+    def load_snapshot(self, path):
+        """从快照文件恢复任务队列（替换当前列表）。
 
         - 上次运行中（PROCESSING）/失败（FAILED）的任务恢复为待运行态，
           不自动开跑（安全优先；分段任务点运行即走既有断点续接）；
         - 分段任务的续跑信息对接 segmenter.derive_resume_info 刷新；
         - 文件损坏/字段缺失时逐条降级跳过，不崩。
+        Returns:
+            (restored_count, warnings)
         """
         tasks, warnings = load_tasks_file(path)
-        for w in warnings:
-            self._log_restore(logger, f'[任务恢复] {w}')
+        # 整表替换：不发逐条 task_deleted（调用方保证不在处理中）
+        self.table.setRowCount(0)
+        self.tasks = []
+        self.current_task_index = -1
         restored = 0
         resumable = 0
         for task in tasks:
@@ -1262,28 +1416,24 @@ class TaskListComponent(QWidget):
             if info is not None:
                 task.segment_info = info
             if not os.path.isfile(task.path):
-                self._log_restore(logger, f'[任务恢复] {task.name} → {task.status.value}'
-                                          f'（源文件不存在，可能已被移动或删除）')
+                self.snapshot_log.emit(f'[快照加载] {task.name} → {task.status.value}'
+                                       f'（源文件不存在，可能已被移动或删除）')
             else:
-                msg = f'[任务恢复] {task.name} → {task.status.value}'
+                msg = f'[快照加载] {task.name} → {task.status.value}'
                 if info is not None and info.get('chip_text'):
                     msg += f' · {info["chip_text"]}'
                     if info.get('can_resume'):
                         resumable += 1
-                self._log_restore(logger, msg)
+                self.snapshot_log.emit(msg)
             self.tasks.append(task)
             self._add_task_row(task)
             restored += 1
         if restored:
-            self._log_restore(logger, f'[任务恢复] 共恢复 {restored} 个任务'
-                                      f'（{resumable} 个分段任务可断点续跑）；'
-                                      f'不会自动开始运行，点击「开始处理」后启动')
-        # 以载入内容为去重基线：无变更时不重复落盘
-        self._last_saved_blob = (os.path.abspath(path or TASKS_FILE),
-                                 json.dumps([t.to_dict() for t in self.tasks],
-                                            ensure_ascii=False, sort_keys=True))
+            self.snapshot_log.emit(f'[快照加载] 共加载 {restored} 个任务'
+                                   f'（{resumable} 个分段任务可断点续跑）；'
+                                   f'不会自动开始运行，点击「开始处理」后启动')
         self._update_queue_status()
-        return restored
+        return restored, warnings
 
     def set_task_output_path(self, index, output_path):
         """设置任务输出路径（任务完成后落库并触发持久化）"""
@@ -1406,14 +1556,3 @@ class TaskListComponent(QWidget):
             else:
                 has_unknown = True
         return (None if has_unknown and known_total <= 0 else known_total), not has_unknown
-
-    @staticmethod
-    def _log_restore(logger, message):
-        """恢复日志输出（无 logger 时退化为 print）"""
-        if logger is not None:
-            try:
-                logger(message)
-                return
-            except Exception:
-                pass
-        print(message)

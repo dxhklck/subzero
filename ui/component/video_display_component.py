@@ -1,9 +1,9 @@
 import cv2
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QMenu
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QMenu, QBoxLayout, QLabel
 from PySide6.QtCore import Qt, Signal, QRect, QRectF, QObject, QEvent, QTimer
 from PySide6.QtGui import QAction, QShortcut, QCursor
-from PySide6 import QtCore, QtWidgets, QtGui 
-from qfluentwidgets import qconfig, CardWidget, HollowHandleStyle
+from PySide6 import QtCore, QtWidgets, QtGui
+from qfluentwidgets import qconfig, CardWidget, HollowHandleStyle, ToolButton, FluentIcon
 
 from backend.config import config, tr
 
@@ -45,6 +45,12 @@ class VideoDisplayComponent(QWidget):
         # 视频加载/窗口缩放后按「视频宽高比 + 窗口宽度」contain 自适应（update_preview_size）
         self.video_preview_width = 640
         self.video_preview_height = 360
+        # A/B 双框各自的尺寸（video_preview_* 是 A+B 总占位；两框按方向切分）
+        self._a_box_size = (640, 178)
+        self._b_box_size = (640, 178)
+        self._orientation = 'landscape'  # 布局方向：landscape=上下排 / portrait=左右排
+        # A/B 双框间距（总占位扣除，避免窗口尺寸跳变）
+        self._box_spacing = 4
         # 纵向预算上限的宿主注入点：callable -> 像素。竖屏视频的预览高度受
         # 「窗口实际可用高度」约束（写死 640 会在矮窗口把日志卡挤出可视区，
         # 高窗口又白白留黑边），由 HomeInterface 注入实时高度预算
@@ -68,6 +74,7 @@ class VideoDisplayComponent(QWidget):
         self.render_offset_y = 0
         self.render_scale = 0.0  # render_width / frame_width（等比，纵横一致）
         self._current_frame = None  # 最近一次渲染的原始帧（控件尺寸变化时按新尺寸重渲染）
+        self._current_b_frame = None  # B 框最近一次渲染的结果帧
 
         self.__init_widgets()
         self.__init_shotcuts()
@@ -133,25 +140,58 @@ class VideoDisplayComponent(QWidget):
         
         # 视频预览区域
         self.video_display.setObjectName('videoDisplay')
-        # black_layout.addWidget(self.video_display, 0, Qt.AlignCenter)
-        # 创建一个容器来保持比例
+        # 创建一个容器来保持比例（A 框：源视频，含字幕框选）
         self.ratio_container = ratio_container = QWidget()
         ratio_layout = QVBoxLayout(ratio_container)
         ratio_layout.setContentsMargins(0, 0, 0, 0)
         ratio_layout.addWidget(self.video_display)
 
+        # B 框：处理结果（处理中实时预览 / 完成后同步播放对比）
+        self.b_video_display = QtWidgets.QLabel()
+        self.b_video_display.setStyleSheet("background-color: black;")
+        self.b_video_display.setMinimumSize(240, 135)
+        self.b_video_display.setScaledContents(True)
+        self.b_video_display.setAlignment(Qt.AlignCenter)
+
+        self.b_ratio_container = QWidget()
+        b_ratio_layout = QVBoxLayout(self.b_ratio_container)
+        b_ratio_layout.setContentsMargins(0, 0, 0, 0)
+        b_ratio_layout.addWidget(self.b_video_display)
+
+        # B 框占位提示（无结果帧时显示；有帧即隐藏）
+        self.b_placeholder = QLabel(
+            tr['SubtitleExtractorGUI']['ComparePlaceholder'], self.b_ratio_container)
+        self.b_placeholder.setAlignment(Qt.AlignCenter)
+        self.b_placeholder.setWordWrap(True)
+        self.b_placeholder.setStyleSheet(
+            "color:#9A9A9A; background-color:rgba(0,0,0,0); font-size:12px; padding:8px;")
+        self.b_placeholder.setGeometry(0, 0, *self._b_box_size)
+        self.b_placeholder.raise_()
+
+        # A/B 双框容器：方向按视频宽高比在 update_preview_size 里切换
+        # （横屏上下排 / 竖屏左右排）；总占位不变，窗口不因布局跳变
+        self.boxes_widget = QWidget()
+        self.boxes_layout = QBoxLayout(QBoxLayout.TopToBottom)
+        self.boxes_layout.setContentsMargins(0, 0, 0, 0)
+        self.boxes_layout.setSpacing(self._box_spacing)
+        self.boxes_layout.addWidget(ratio_container)
+        self.boxes_layout.addWidget(self.b_ratio_container)
+        self.boxes_widget.setLayout(self.boxes_layout)
+
         # 设置固定的宽高比：初始 16:9（视频加载后按实际宽高比自适应重排，
         # 见 set_video_parameters → update_preview_size）
-        ratio_container.setFixedSize(640, 360)
+        ratio_container.setFixedSize(*self._a_box_size)
+        self.b_ratio_container.setFixedSize(*self._b_box_size)
 
         # 添加到布局
-        black_layout.addWidget(ratio_container)
+        black_layout.addWidget(self.boxes_widget)
 
         # 添加一个事件过滤器来处理大小变化
         class RatioEventFilter(QObject):
-            def __init__(self, owner):
+            def __init__(self, owner, get_size):
                 super().__init__()
                 self._owner = owner
+                self._get_size = get_size  # callable -> (w, h)
 
             def eventFilter(self, obj, event):
                 if event.type() == QEvent.Resize:
@@ -159,15 +199,31 @@ class VideoDisplayComponent(QWidget):
                     # 的 1080 视频在预览里缩成小条）。此处守护 update_preview_size
                     # 算出的目标尺寸，防止布局漂移破坏容器几何；尺寸已对齐时不动作
                     # （避免 setFixedSize 递归触发 Resize）。
-                    w = self._owner.video_preview_width
-                    h = self._owner.video_preview_height
+                    w, h = self._get_size()
                     if obj.width() != w or obj.height() != h:
                         obj.setFixedSize(w, h)
                 return False
 
         # 注意：过滤器必须由组件持有引用，否则被 GC 后失效（PySide6 陷阱）
-        self._ratio_filter = RatioEventFilter(self)
+        self._ratio_filter = RatioEventFilter(self, lambda: self._a_box_size)
         ratio_container.installEventFilter(self._ratio_filter)
+        self._b_ratio_filter = RatioEventFilter(self, lambda: self._b_box_size)
+        self.b_ratio_container.installEventFilter(self._b_ratio_filter)
+
+        # B 框尺寸变化（窗口缩放/布局重排）时重渲染当前结果帧
+        class BLabelResizeEventFilter(QObject):
+            def __init__(self, owner):
+                super().__init__()
+                self._owner = owner
+
+            def eventFilter(self, obj, event):
+                if (event.type() == QEvent.Resize
+                        and self._owner._current_b_frame is not None):
+                    self._owner._render_frame_b(self._owner._current_b_frame)
+                return False
+
+        self._b_label_resize_filter = BLabelResizeEventFilter(self)
+        self.b_video_display.installEventFilter(self._b_label_resize_filter)
 
         # 预览标签尺寸变化（如窗口布局重排、比例容器高度跟进）时，若 pixmap 与
         # 控件尺寸不一致，按新尺寸重渲染当前帧——否则 setScaledContents 会把旧
@@ -190,11 +246,19 @@ class VideoDisplayComponent(QWidget):
         self.label_resize_filter = LabelResizeEventFilter(self)
         self.video_display.installEventFilter(self.label_resize_filter)
 
-        # 进度条和滑块容器
+        # 进度条和滑块容器（含 A/B 同步播放按钮：有结果源时由宿主显示）
         control_container = QWidget(self)
         control_layout = QVBoxLayout()
         control_layout.setContentsMargins(8, 8, 8, 8)
-        control_layout.addWidget(self.video_slider)
+        slider_row = QHBoxLayout()
+        slider_row.setSpacing(8)
+        self.play_button = ToolButton(FluentIcon.PLAY, self)
+        self.play_button.setFixedSize(28, 28)
+        self.play_button.setToolTip(tr['SubtitleExtractorGUI']['ComparePlayTip'])
+        self.play_button.setVisible(False)
+        slider_row.addWidget(self.video_slider, 1)
+        slider_row.addWidget(self.play_button)
+        control_layout.addLayout(slider_row)
         
         control_container.setLayout(control_layout)
         control_container.setStyleSheet("""
@@ -274,11 +338,15 @@ class VideoDisplayComponent(QWidget):
         """预览容器按「视频宽高比 + 窗口可用宽度」contain 自适应（旧实现固定 16:9，
         竖屏/4:3 等比例视频会被缩成中间一小条）。
 
+        A/B 双框布局：先按预算算出与单框时代一致的总占位 (w, h)——窗口尺寸
+        不因双框而跳变；再按视频方向切分给 A/B 两框：
+        - 横屏视频（宽>=高）：上下排列，两框共享总宽、各占总高一半；
+        - 竖屏视频（宽<高）：左右排列，两框共享总高、各占总宽一半。
+        帧在各框内按 contain 等比缩放（letterbox 黑边居中）。
+
         横向预算 [640, 960]；纵向预算优先取宿主注入的可用高度
         （preview_height_budget，随窗口高度实时变化），未注入时退回 640 上限。
-        视频按自身比例 contain 进预算框，容器尺寸=渲染尺寸（视频铺满预览框，
-        不再有 letterbox 黑条——黑边仅出现在容器比例与视频不一致的过渡态）。
-        尺寸无实质变化返回 False（跳过重渲染）。
+        尺寸与方向均无实质变化返回 False（跳过重排）。
         """
         budget = max(640, min(width, 960))
         if self.preview_height_budget is not None:
@@ -293,12 +361,28 @@ class VideoDisplayComponent(QWidget):
         scale = min(budget / f_w, budget_h / f_h)
         w = max(1, int(round(f_w * scale)))
         h = max(1, int(round(f_h * scale)))
-        if (w, h) == (self.video_preview_width, self.video_preview_height):
+        landscape = f_w >= f_h
+        if (w, h) == (self.video_preview_width, self.video_preview_height) \
+                and landscape == (self._orientation == 'landscape'):
             return False
         self.video_preview_width = w
         self.video_preview_height = h
-        self.video_display.setMinimumSize(min(640, w), min(360, h))
-        self.ratio_container.setFixedSize(w, h)
+        self._orientation = 'landscape' if landscape else 'portrait'
+        if landscape:
+            box_w = w
+            box_h = max(1, (h - self._box_spacing) // 2)
+            self.boxes_layout.setDirection(QBoxLayout.TopToBottom)
+        else:
+            box_w = max(1, (w - self._box_spacing) // 2)
+            box_h = h
+            self.boxes_layout.setDirection(QBoxLayout.LeftToRight)
+        self._a_box_size = (box_w, box_h)
+        self._b_box_size = (box_w, box_h)
+        self.ratio_container.setFixedSize(box_w, box_h)
+        self.b_ratio_container.setFixedSize(box_w, box_h)
+        self.b_placeholder.setGeometry(0, 0, box_w, box_h)
+        self.video_display.setMinimumSize(min(320, box_w), min(180, box_h))
+        self.b_video_display.setMinimumSize(min(320, box_w), min(180, box_h))
         self.black_container.setFixedWidth(w + 4)
         return True
 
@@ -335,16 +419,43 @@ class VideoDisplayComponent(QWidget):
         self.render_offset_x = (disp_w - f_w * scale) / 2.0
         self.render_offset_y = (disp_h - f_h * scale) / 2.0
 
-        if (render_w, render_h) != (f_w, f_h):
+        # 与控件同尺寸的黑色画布：letterbox 黑边；圆角裁剪只作用于图像矩形（左上/右上）
+        canvas = self._make_canvas(
+            frame, disp_w, disp_h, int(round(self.render_offset_x)),
+            int(round(self.render_offset_y)), render_w, render_h, rounded='top')
+
+        # 保存当前的pixmap用于绘制选择框
+        self.current_pixmap = canvas
+        self.video_display.setPixmap(canvas)
+
+    def _render_frame_b(self, frame):
+        """B 框渲染：与 A 同规则 contain 缩放 + letterbox，独立几何（不参与选区映射）"""
+        disp_w = self.b_video_display.width()
+        disp_h = self.b_video_display.height()
+        f_h, f_w = frame.shape[:2]
+        if disp_w <= 0 or disp_h <= 0 or f_w <= 0 or f_h <= 0:
+            return
+        scale = min(disp_w / f_w, disp_h / f_h)
+        render_w = min(disp_w, max(1, int(round(f_w * scale))))
+        render_h = min(disp_h, max(1, int(round(f_h * scale))))
+        off_x = int(round((disp_w - f_w * scale) / 2.0))
+        off_y = int(round((disp_h - f_h * scale) / 2.0))
+        canvas = self._make_canvas(frame, disp_w, disp_h, off_x, off_y,
+                                   render_w, render_h, rounded='top')
+        self.b_video_display.setPixmap(canvas)
+
+    @staticmethod
+    def _make_canvas(frame, disp_w, disp_h, img_x, img_y, render_w, render_h, rounded=None):
+        """帧 → 控件尺寸黑色画布（contain 缩放 + 居中）；rounded='top' 时图像
+        矩形左上/右上角做 8px 圆角裁剪。"""
+        if (render_w, render_h) != (frame.shape[1], frame.shape[0]):
             frame = cv2.resize(frame, (render_w, render_h))
-        # 将 OpenCV 帧（BGR 格式）转换为 QImage 并绘制到画布上
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
         image = QtGui.QImage(rgb_frame.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
         pix = QtGui.QPixmap.fromImage(image)
 
-        # 与控件同尺寸的黑色画布：letterbox 黑边；圆角裁剪只作用于图像矩形（左上/右上）
         canvas = QtGui.QPixmap(disp_w, disp_h)
         canvas.fill(QtGui.QColor(0, 0, 0))
 
@@ -352,27 +463,32 @@ class VideoDisplayComponent(QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing)  # 抗锯齿
         painter.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
 
-        # 创建圆角路径（相对图像矩形偏移）
-        path = QtGui.QPainterPath()
-        radius = 8
-        img_x = int(round(self.render_offset_x))
-        img_y = int(round(self.render_offset_y))
-        path.moveTo(img_x + radius, img_y)
-        path.lineTo(img_x + pix.width() - radius, img_y)
-        path.arcTo(img_x + pix.width() - radius * 2, img_y, radius * 2, radius * 2, 90, -90)
-        path.lineTo(img_x + pix.width(), img_y + pix.height())
-        path.lineTo(img_x, img_y + pix.height())
-        path.lineTo(img_x, img_y + radius)
-        path.arcTo(img_x, img_y, radius * 2, radius * 2, 180, -90)
-        path.closeSubpath()
-
-        painter.setClipPath(path)
+        if rounded == 'top':
+            radius = 8
+            path = QtGui.QPainterPath()
+            path.moveTo(img_x + radius, img_y)
+            path.lineTo(img_x + pix.width() - radius, img_y)
+            path.arcTo(img_x + pix.width() - radius * 2, img_y, radius * 2, radius * 2, 90, -90)
+            path.lineTo(img_x + pix.width(), img_y + pix.height())
+            path.lineTo(img_x, img_y + pix.height())
+            path.lineTo(img_x, img_y + radius)
+            path.arcTo(img_x, img_y, radius * 2, radius * 2, 180, -90)
+            path.closeSubpath()
+            painter.setClipPath(path)
         painter.drawPixmap(img_x, img_y, pix)
         painter.end()
+        return canvas
 
-        # 保存当前的pixmap用于绘制选择框
-        self.current_pixmap = canvas
-        self.video_display.setPixmap(canvas)
+    def set_b_frame(self, frame):
+        """B 框内容：None → 显示占位提示；有帧 → 渲染结果（处理中实时 / 对比播放）"""
+        self._current_b_frame = frame
+        if frame is None:
+            self.b_video_display.clear()
+            self.b_placeholder.setVisible(True)
+            self.b_placeholder.raise_()
+            return
+        self.b_placeholder.setVisible(False)
+        self._render_frame_b(frame)
 
     def display_to_original(self, x, y):
         """显示坐标（相对 video_display 控件）→ 原图像素坐标。
@@ -807,12 +923,13 @@ class VideoDisplayComponent(QWidget):
 
     def _reflow_preview(self):
         """按当前视频宽高比重排预览容器（加载新视频时免防抖阈值立即生效）。
-        显式同步 video_display 几何：load_video 在 set_video_parameters 后立即渲染首帧，
+        显式同步 A/B 两框几何：load_video 在 set_video_parameters 后立即渲染首帧，
         嵌套布局异步生效来不及——否则首帧按旧控件尺寸渲染（1080 竖屏首帧缩成小条）。
         布局随后会按容器新尺寸重申同一几何，此处提前 resize 无副作用。"""
         budget = self.width() - 24 if self.width() > 344 else self.video_preview_width
         self.update_preview_size(max(640, budget))
-        self.video_display.resize(self.video_preview_width, self.video_preview_height)
+        self.video_display.resize(*self._a_box_size)
+        self.b_video_display.resize(*self._b_box_size)
     
     def get_selection_coordinates(self):
         """获取选择框坐标（原图像素）"""

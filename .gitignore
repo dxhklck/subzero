@@ -375,6 +375,7 @@ test*_no_sub*.mp4
 inference.onnx
 /config/config.json
 /config/tasks.json
+/config/snapshots/
 /config/presets.json
 /config/logs/
 
