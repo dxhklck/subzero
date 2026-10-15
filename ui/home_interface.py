@@ -604,7 +604,7 @@ class HomeInterface(QWidget):
             self.b_video_cap = None
         if not output_path or not os.path.isfile(output_path):
             self.video_display_component.set_b_frame(None)
-            self.video_display_component.play_button.setVisible(False)
+            self.video_display_component.play_button.setEnabled(False)
             if output_path:
                 InfoBar.warning(
                     title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
@@ -614,7 +614,7 @@ class HomeInterface(QWidget):
         cap = cv2.VideoCapture(get_readable_path(output_path))
         if not cap.isOpened():
             self.video_display_component.set_b_frame(None)
-            self.video_display_component.play_button.setVisible(False)
+            self.video_display_component.play_button.setEnabled(False)
             InfoBar.warning(
                 title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
                 content=tr['SubtitleExtractorGUI']['CompareOutputMissing'].format(output_path),
@@ -625,8 +625,8 @@ class HomeInterface(QWidget):
         self.video_display_component.set_b_frame(frame if ret else None)
         # 有结果源 → 切到 A/B 对比布局（双框同步对比/播放）
         self.video_display_component.set_compare_mode(True)
-        # 有结果源才开放同步播放
-        self.video_display_component.play_button.setVisible(
+        # A 路源就绪才开放同步播放（按钮常驻可见，未就绪置灰）
+        self.video_display_component.play_button.setEnabled(
             self.video_cap is not None and self.video_cap.isOpened())
         # 就绪提示（仅从「无结果源」新开时提示，避免重复刷屏）
         if not was_open:
@@ -641,7 +641,7 @@ class HomeInterface(QWidget):
         if self.b_video_cap is not None:
             self.b_video_cap.release()
             self.b_video_cap = None
-        self.video_display_component.play_button.setVisible(False)
+        self.video_display_component.play_button.setEnabled(False)
         self.video_display_component.set_b_frame(None)
 
     def _toggle_compare_play(self):
@@ -808,6 +808,16 @@ class HomeInterface(QWidget):
         self.task_list_component.set_task_output_path(index, output_path)
         # 完成的正是当前预览的任务 → 打开结果视频，B 框进入同步对比
         if index == self.task_list_component.get_current_task_index():
+            # worker 收尾已释放 A 路视频源（video_cap=None），此处重开：
+            # 否则同步播放按钮的 A 路就绪判定恒为 False——完成后永远无按钮可点
+            # （「完成后没有任何播放按钮」的根因）
+            with self._video_cap_lock:
+                if self.video_cap is None or not self.video_cap.isOpened():
+                    task = self.task_list_component.get_task(index)
+                    if task and os.path.isfile(task.path):
+                        self.video_cap = cv2.VideoCapture(get_readable_path(task.path))
+                        if not self.video_cap.isOpened():
+                            self.video_cap = None
             self._open_compare_output(output_path)
 
     def run_button_clicked(self):

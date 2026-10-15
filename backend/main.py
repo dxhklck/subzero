@@ -100,6 +100,7 @@ class SubtitleRemover:
         self.residue_only = False
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
         self._first_pass_regions = []
+        self._first_pass_union = None  # 第一遍修复区域的联合外接框（懒计算）
 
     @staticmethod
     def is_current_frame_no_start(frame_no, continuous_frame_no_list):
@@ -617,13 +618,29 @@ class SubtitleRemover:
                 self._first_pass_regions.append((xmin, xmax, ymin, ymax))
 
     def _overlaps_first_pass(self, box, margin=30):
-        """残留判定：输出视频中新检出的框必须与第一遍修复过的区域（外扩 margin 容差）有重叠。
-        防止把画面里天然像文字的纹理（波纹/栅栏/立面/水面反光）误当残留而误修。"""
+        """残留判定：输出视频中新检出的框与第一遍修复区域（外扩 margin 容差）重叠。
+
+        防止把画面里天然像文字的纹理（波纹/栅栏/立面/水面反光）误当残留而误修。
+        兜底：第一遍**完全漏检**的字幕在 _first_pass_regions 里没有对应修复区域，
+        逐区域重叠判定会把它拒掉（残留二遍检出也白检——正是「漏检残留」Persist
+        的根因）。字幕通常固定在同一带内，故追加联合外接框判定：落在第一遍全部
+        修复区域的联合包围盒（外扩 margin）内的检出，同样视为残留予以二修；
+        带外的天然纹理仍被拒绝。
+        """
         xmin, xmax, ymin, ymax = box
         for rx0, rx1, ry0, ry1 in self._first_pass_regions:
             if xmin < rx1 + margin and xmax > rx0 - margin and ymin < ry1 + margin and ymax > ry0 - margin:
                 return True
-        return False
+        if self._first_pass_union is None:
+            self._first_pass_union = (
+                min(r[0] for r in self._first_pass_regions),
+                max(r[1] for r in self._first_pass_regions),
+                min(r[2] for r in self._first_pass_regions),
+                max(r[3] for r in self._first_pass_regions),
+            )
+        ux0, ux1, uy0, uy1 = self._first_pass_union
+        return (xmin < ux1 + margin and xmax > ux0 - margin
+                and ymin < uy1 + margin and ymax > uy0 - margin)
 
     def _residue_second_pass(self, tbar):
         """二遍残留兜底：第一遍修复依赖检测，漏检/欠覆盖的字幕会残留在输出里。

@@ -47,7 +47,6 @@ class VideoDisplayComponent(QWidget):
         # A/B 双框各自的尺寸（video_preview_* 是 A+B 总占位）
         self._a_box_size = (640, 360)
         self._b_box_size = (640, 360)
-        self._orientation = 'landscape'  # 布局方向：landscape=上下排 / portrait=左右排
         # 显示模式：False=单框（未处理，画面最大化）；True=A/B 对比（处理中/结果对比）
         self._compare_mode = False
         self._apply_compare = None  # 上次应用到布局的模式（None=尚未应用）
@@ -248,7 +247,7 @@ class VideoDisplayComponent(QWidget):
         self.label_resize_filter = LabelResizeEventFilter(self)
         self.video_display.installEventFilter(self.label_resize_filter)
 
-        # 进度条和滑块容器（含 A/B 同步播放按钮：有结果源时由宿主显示）
+        # 进度条和滑块容器（含 A/B 同步播放按钮：常驻可见，就绪与否由宿主 enable）
         control_container = QWidget(self)
         control_layout = QVBoxLayout()
         control_layout.setContentsMargins(8, 8, 8, 8)
@@ -257,7 +256,9 @@ class VideoDisplayComponent(QWidget):
         self.play_button = ToolButton(FluentIcon.PLAY, self)
         self.play_button.setFixedSize(28, 28)
         self.play_button.setToolTip(tr['SubtitleExtractorGUI']['ComparePlayTip'])
-        self.play_button.setVisible(False)
+        # 常驻可见 + 未就绪置灰：用户始终知道这里有 A/B 同步播放入口
+        # （旧实现隐藏按钮，完成任务后因 A 路源已释放永远不显示，被报「没有播放按钮」）
+        self.play_button.setEnabled(False)
         slider_row.addWidget(self.video_slider, 1)
         slider_row.addWidget(self.play_button)
         control_layout.addLayout(slider_row)
@@ -341,14 +342,13 @@ class VideoDisplayComponent(QWidget):
 
         两档模式（set_compare_mode 切换）：
         - 单框（未处理）：视频 contain 进预算框，最长边贴满窗口；
-        - A/B 对比（处理中/结果对比）：横屏上下排、竖屏左右排。
-          每框按视频真实宽高比计算（16:9 视频每框就是 16:9），整体在预算内
-          最大化——不再把总占位对半切分（旧实现竖屏会切出 9:32 瘦长条，
-          视频在框内只占一半高度，四周大片黑边）。
+        - A/B 对比（处理中/结果对比）：**始终左右排列**（用户定版，与原版
+          hconcat 预览一致），每框按视频真实宽高比计算，先按预算宽度对半、
+          高超预算再收，框内零 letterbox。
 
         横向预算 [640, 960]；纵向预算优先取宿主注入的可用高度
         （preview_height_budget，随窗口高度实时变化），未注入时退回 640。
-        尺寸/方向/模式均无变化时返回 False（跳过重排）。
+        尺寸/模式均无变化时返回 False（跳过重排）。
         """
         budget_w = max(640, min(width, 960))
         if self.preview_height_budget is not None:
@@ -360,7 +360,6 @@ class VideoDisplayComponent(QWidget):
             budget_h = 640
         f_w = self.frame_width or 16
         f_h = self.frame_height or 9
-        landscape = f_w >= f_h
         sp = self._box_spacing
         if not self._compare_mode:
             # 单框：视频宽高比 = 框宽高比，画面铺满框（框内零黑边）
@@ -368,19 +367,8 @@ class VideoDisplayComponent(QWidget):
             total_w = max(1, int(round(f_w * scale)))
             total_h = max(1, int(round(f_h * scale)))
             a_size = b_size = (total_w, total_h)
-            direction = QBoxLayout.TopToBottom
-        elif landscape:
-            # 上下排：先按预算高度对半（每框=视频宽高比），宽超预算再收
-            bh = max(1, (budget_h - sp) // 2)
-            bw = int(round(bh * f_w / f_h))
-            if bw > budget_w:
-                bw = budget_w
-                bh = max(1, int(round(bw * f_h / f_w)))
-            a_size = b_size = (bw, bh)
-            total_w, total_h = bw, bh * 2 + sp
-            direction = QBoxLayout.TopToBottom
         else:
-            # 左右排：先按预算宽度对半（每框=视频宽高比），高超预算再收
+            # A/B 左右排：先按预算宽度对半（每框=视频宽高比），高超预算再收
             bw = max(1, (budget_w - sp) // 2)
             bh = int(round(bw * f_h / f_w))
             if bh > budget_h:
@@ -388,20 +376,17 @@ class VideoDisplayComponent(QWidget):
                 bw = max(1, int(round(bh * f_w / f_h)))
             a_size = b_size = (bw, bh)
             total_w, total_h = bw * 2 + sp, bh
-            direction = QBoxLayout.LeftToRight
 
         b_visible = self._compare_mode
         changed = ((total_w, total_h) != (self.video_preview_width, self.video_preview_height)
                    or a_size != self._a_box_size or b_size != self._b_box_size
-                   or direction != self.boxes_layout.direction()
                    or self._apply_compare != self._compare_mode)
         if not changed:
             return False
         self._apply_compare = self._compare_mode
         self.video_preview_width = total_w
         self.video_preview_height = total_h
-        self._orientation = 'landscape' if landscape else 'portrait'
-        self.boxes_layout.setDirection(direction)
+        self.boxes_layout.setDirection(QBoxLayout.LeftToRight)
         # 单框模式隐藏 B 框（A 独占），对比模式恢复
         self.b_ratio_container.setVisible(b_visible)
         self._a_box_size = a_size
@@ -418,7 +403,7 @@ class VideoDisplayComponent(QWidget):
         """切换单框 / A/B 对比布局。
 
         未处理（加载视频、无结果源）→ False：A 框独占，画面按最长边撑满窗口；
-        开始处理或打开结果对比源 → True：A/B 双框（横屏上下排/竖屏左右排）。
+        开始处理或打开结果对比源 → True：A/B 双框左右排列。
         切换后按当前视频宽高比立即重排，A/B 两帧由各自的 Resize 过滤器重渲染。
         """
         enabled = bool(enabled)
