@@ -624,6 +624,11 @@ class TaskListComponent(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
+        # 卡片列表形态（去二维表格感）：隐藏行号列与表头——
+        # 列语义由单元格自解释（名称/百分比+状态字），列宽模式仍由 header 配置控制
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setVisible(False)
+
         # 连接信号
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
@@ -696,10 +701,16 @@ class TaskListComponent(QWidget):
         self.save_tasks()
         return True
 
-    def _add_task_row(self, task):
-        """为 self.tasks 末行的任务创建表格行（add_task 与持久化恢复共用）"""
-        row = len(self.tasks) - 1
-        self.table.setRowCount(len(self.tasks))
+    def _add_task_row(self, task, row=None):
+        """为任务创建表格行（add_task/持久化恢复追加末行；move_task 重建时显式传 row）
+
+        ⚠ row 缺省=末行（len(tasks)-1），只对「任务已 append 到列表末尾」的
+        调用方正确；整表重建必须逐行显式传 row，否则全部写进最后一行。
+        """
+        if row is None:
+            row = len(self.tasks) - 1
+        if self.table.rowCount() <= row:
+            self.table.setRowCount(row + 1)
 
         item0 = QTableWidgetItem(task.name)
         item0.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -964,8 +975,8 @@ class TaskListComponent(QWidget):
         self.current_task_index = _shift(self.current_task_index)
 
         self.table.setRowCount(0)
-        for t in self.tasks:
-            self._add_task_row(t)
+        for i, t in enumerate(self.tasks):
+            self._add_task_row(t, row=i)
         self.table.selectRow(final_row)
         self.task_moved.emit(from_row, final_row)
         self.save_tasks()
