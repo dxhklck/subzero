@@ -221,9 +221,13 @@ if _interface_lang != 'ch':
             for _key, _value in _lang_tr[_section].items():
                 tr[_section][_key] = _value
 
-# 旧版 config 里可能残留已删除的算法值，直接进 GUI 下拉会 optionToText KeyError
+# 旧版 config 里可能残留已删除的算法值，直接进 GUI 下拉会 optionToText KeyError。
+# ⚠ 比较必须同为字符串：config 加载后 value 是枚举成员（deserializeFrom），
+# 直接与 [m.value...] 字符串列表比会恒为 True → 每次进程启动（含 GUI 任务子进程）
+# 都把用户选择的算法静默重置回 STTN 并写盘（"选的和跑的不是同一个"的根因）
 try:
-    if config.inpaintMode.value not in [m.value for m in InpaintMode]:
+    _inpaint_value = getattr(config.inpaintMode.value, 'value', config.inpaintMode.value)
+    if _inpaint_value not in [m.value for m in InpaintMode]:
         config.set(config.inpaintMode, InpaintMode.STTN_AUTO)
 except Exception:
     pass
