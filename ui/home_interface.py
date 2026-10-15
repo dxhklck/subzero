@@ -591,19 +591,34 @@ class HomeInterface(QWidget):
         self.video_display_component.set_b_frame(frame if ret else None)
 
     def _open_compare_output(self, output_path):
-        """打开结果视频作为 B 框同步源（当前任务已完成输出）；失败静默退回占位"""
+        """打开结果视频作为 B 框同步源（当前任务已完成输出）。
+
+        三种结局均有用户可见反馈（不再静默）：
+        - 成功 → 切 A/B 对比布局 + 就绪提示（每次新开结果源提示一次）；
+        - 输出文件不存在 / 打不开 → 警告并退回占位。
+        """
         self._stop_compare_play()
+        was_open = self.b_video_cap is not None
         if self.b_video_cap is not None:
             self.b_video_cap.release()
             self.b_video_cap = None
         if not output_path or not os.path.isfile(output_path):
             self.video_display_component.set_b_frame(None)
             self.video_display_component.play_button.setVisible(False)
+            if output_path:
+                InfoBar.warning(
+                    title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
+                    content=tr['SubtitleExtractorGUI']['CompareOutputMissing'].format(output_path),
+                    parent=self.window(), duration=5000)
             return
         cap = cv2.VideoCapture(get_readable_path(output_path))
         if not cap.isOpened():
             self.video_display_component.set_b_frame(None)
             self.video_display_component.play_button.setVisible(False)
+            InfoBar.warning(
+                title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
+                content=tr['SubtitleExtractorGUI']['CompareOutputMissing'].format(output_path),
+                parent=self.window(), duration=5000)
             return
         self.b_video_cap = cap
         ret, frame = cap.read()
@@ -613,6 +628,12 @@ class HomeInterface(QWidget):
         # 有结果源才开放同步播放
         self.video_display_component.play_button.setVisible(
             self.video_cap is not None and self.video_cap.isOpened())
+        # 就绪提示（仅从「无结果源」新开时提示，避免重复刷屏）
+        if not was_open:
+            InfoBar.success(
+                title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
+                content=tr['SubtitleExtractorGUI']['CompareReadyHint'],
+                parent=self.window(), duration=5000)
 
     def _close_compare_output(self):
         """释放 B 框结果源并复位按钮/占位"""
