@@ -293,8 +293,17 @@ class SubtitleRemover:
                 del groups[i + 1]
             else:
                 i += 1
-        # 组内坐标去重（静态字幕每帧同框会重复）
-        return [(g[0], g[1], list(dict.fromkeys(g[2]))) for g in groups]
+        # 组内坐标去重（静态字幕每帧同框会重复）；选区整片擦除：用户手绘选区
+        # （(ymin,ymax,xmin,xmax)）转换到掩膜口径 ((xmin,xmax,ymin,ymax)) 后并入
+        # 每组坐标——选区内一律视为字幕，不依赖"每个字都被检出"
+        # （描边/艺术字/淡入淡出的字形鬼影残留的根治手段）
+        def _dedupe(seq):
+            return list(dict.fromkeys(seq))
+
+        if config.selectionAsMask.value and self.sub_areas:
+            sel = [(a[2], a[3], a[0], a[1]) for a in self.sub_areas]
+            return [(g[0], g[1], _dedupe(g[2] + sel)) for g in groups]
+        return [(g[0], g[1], _dedupe(g[2])) for g in groups]
 
     @staticmethod
     def _split_duplicate_frames(frames, diff_threshold=1.0, probe_width=160):
@@ -794,13 +803,18 @@ class SubtitleRemover:
 
     def _collect_first_pass_regions(self, sub_list):
         """收集第一遍检测/修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定。
-        剔除高瘦误检框（与第一遍修复同规则），保证"第一遍真正修过的区域"这个语义一致。"""
+        剔除高瘦误检框（与第一遍修复同规则），保证"第一遍真正修过的区域"这个语义一致。
+        选区整片擦除开启时，用户选区同样属于第一遍修复区域（选区内检出按残留二修）。"""
         for boxes in sub_list.values():
             for b in boxes:
                 xmin, xmax, ymin, ymax = b
                 if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
                     continue
                 self._first_pass_regions.append((xmin, xmax, ymin, ymax))
+        if config.selectionAsMask.value and self.sub_areas:
+            for a in self.sub_areas:
+                # SUB_AREAS 为 (ymin,ymax,xmin,xmax)，统一到 (xmin,xmax,ymin,ymax)
+                self._first_pass_regions.append((a[2], a[3], a[0], a[1]))
 
     def _overlaps_first_pass(self, box, margin=30):
         """残留判定：输出视频中新检出的框与第一遍修复区域（外扩 margin 容差）重叠。

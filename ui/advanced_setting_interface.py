@@ -136,6 +136,11 @@ class AdvancedSettingInterface(ScrollArea):
             config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
             tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
         vbox.addWidget(CompactParamRow(e1, e2, e3, e4, columns=4))
+        # 选区整片擦除：选区整体并入掩膜（检测框 ∪ 选区），根治字形鬼影残留
+        self.selection_mask_row = CompactSwitchRow(
+            config.selectionAsMask, gui['SelectionAsMask'], gui['SelectionAsMaskDesc'],
+            icon=FluentIcon.REMOVE_FROM, parent=card)
+        vbox.addWidget(CompactParamRow(self.selection_mask_row, columns=4))
         self.rows_detect = [r1, r2, r3, r4, r5, r6]
         self.rows_detect_expert = [e1, e2, e3, e4]
 

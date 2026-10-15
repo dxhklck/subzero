@@ -112,6 +112,11 @@ class Config(QConfig):
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
     residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
+    # 选区整片擦除：手动框选了字幕区域时，选区整体并入每帧掩膜（检测框 ∪ 选区），
+    # 选区内一律视为字幕——不依赖"每个字都被检出"，根治描边/艺术字/淡入淡出的
+    # 字形鬼影残留。代价：选区内非字幕的背景也会被重绘（选区画得越大重绘越多）。
+    # 关闭后回退为"仅检测框+外扩"的精确掩膜
+    selectionAsMask = ConfigItem("Main", "SelectionAsMask", True, BoolValidator())
     # 长视频分段时长（秒）：0=禁用分段；视频时长 ≤ 该值整片处理，
     # 超过则按此值切段逐段执行，支持中断续跑（checkpoint 保存在
     # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）
