@@ -1008,8 +1008,8 @@ class TaskListComponent(QWidget):
         n = len(self.tasks)
         if not (0 <= from_row < n) or not (0 <= insert_index <= n):
             return
-        if insert_index == from_row or insert_index == from_row + 1:
-            return  # 原位
+        if insert_index == from_row:
+            return  # 原位（⚠ from_row+1 是「下移一行」的真实移动，不是原位）
         task = self.tasks.pop(from_row)
         final_row = min(insert_index, len(self.tasks))
         self.tasks.insert(final_row, task)
