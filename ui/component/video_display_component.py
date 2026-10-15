@@ -41,15 +41,17 @@ class VideoDisplayComponent(QWidget):
         self.screen_width = screen.width()
         self.screen_height = screen.height()
         
-        # 视频预览区域：初始 640x360（与 ratio_container 构造尺寸一致），
-        # 视频加载/窗口缩放后按「视频宽高比 + 窗口宽度」contain 自适应（update_preview_size）
+        # 视频预览区域：初始 640x360（单框模式，视频加载后按宽高比自适应）
         self.video_preview_width = 640
         self.video_preview_height = 360
-        # A/B 双框各自的尺寸（video_preview_* 是 A+B 总占位；两框按方向切分）
-        self._a_box_size = (640, 178)
-        self._b_box_size = (640, 178)
+        # A/B 双框各自的尺寸（video_preview_* 是 A+B 总占位）
+        self._a_box_size = (640, 360)
+        self._b_box_size = (640, 360)
         self._orientation = 'landscape'  # 布局方向：landscape=上下排 / portrait=左右排
-        # A/B 双框间距（总占位扣除，避免窗口尺寸跳变）
+        # 显示模式：False=单框（未处理，画面最大化）；True=A/B 对比（处理中/结果对比）
+        self._compare_mode = False
+        self._apply_compare = None  # 上次应用到布局的模式（None=尚未应用）
+        # A/B 双框间距
         self._box_spacing = 4
         # 纵向预算上限的宿主注入点：callable -> 像素。竖屏视频的预览高度受
         # 「窗口实际可用高度」约束（写死 640 会在矮窗口把日志卡挤出可视区，
@@ -335,20 +337,20 @@ class VideoDisplayComponent(QWidget):
             self._resize_timer.start()
 
     def update_preview_size(self, width):
-        """预览容器按「视频宽高比 + 窗口可用宽度」contain 自适应（旧实现固定 16:9，
-        竖屏/4:3 等比例视频会被缩成中间一小条）。
+        """按「视频宽高比 + 窗口预算」计算预览布局，使画面最大化、框内零黑边。
 
-        A/B 双框布局：先按预算算出与单框时代一致的总占位 (w, h)——窗口尺寸
-        不因双框而跳变；再按视频方向切分给 A/B 两框：
-        - 横屏视频（宽>=高）：上下排列，两框共享总宽、各占总高一半；
-        - 竖屏视频（宽<高）：左右排列，两框共享总高、各占总宽一半。
-        帧在各框内按 contain 等比缩放（letterbox 黑边居中）。
+        两档模式（set_compare_mode 切换）：
+        - 单框（未处理）：视频 contain 进预算框，最长边贴满窗口；
+        - A/B 对比（处理中/结果对比）：横屏上下排、竖屏左右排。
+          每框按视频真实宽高比计算（16:9 视频每框就是 16:9），整体在预算内
+          最大化——不再把总占位对半切分（旧实现竖屏会切出 9:32 瘦长条，
+          视频在框内只占一半高度，四周大片黑边）。
 
         横向预算 [640, 960]；纵向预算优先取宿主注入的可用高度
-        （preview_height_budget，随窗口高度实时变化），未注入时退回 640 上限。
-        尺寸与方向均无实质变化返回 False（跳过重排）。
+        （preview_height_budget，随窗口高度实时变化），未注入时退回 640。
+        尺寸/方向/模式均无变化时返回 False（跳过重排）。
         """
-        budget = max(640, min(width, 960))
+        budget_w = max(640, min(width, 960))
         if self.preview_height_budget is not None:
             try:
                 budget_h = max(260, int(self.preview_height_budget()))
@@ -358,33 +360,72 @@ class VideoDisplayComponent(QWidget):
             budget_h = 640
         f_w = self.frame_width or 16
         f_h = self.frame_height or 9
-        scale = min(budget / f_w, budget_h / f_h)
-        w = max(1, int(round(f_w * scale)))
-        h = max(1, int(round(f_h * scale)))
         landscape = f_w >= f_h
-        if (w, h) == (self.video_preview_width, self.video_preview_height) \
-                and landscape == (self._orientation == 'landscape'):
-            return False
-        self.video_preview_width = w
-        self.video_preview_height = h
-        self._orientation = 'landscape' if landscape else 'portrait'
-        if landscape:
-            box_w = w
-            box_h = max(1, (h - self._box_spacing) // 2)
-            self.boxes_layout.setDirection(QBoxLayout.TopToBottom)
+        sp = self._box_spacing
+        if not self._compare_mode:
+            # 单框：视频宽高比 = 框宽高比，画面铺满框（框内零黑边）
+            scale = min(budget_w / f_w, budget_h / f_h)
+            total_w = max(1, int(round(f_w * scale)))
+            total_h = max(1, int(round(f_h * scale)))
+            a_size = b_size = (total_w, total_h)
+            direction = QBoxLayout.TopToBottom
+        elif landscape:
+            # 上下排：先按预算高度对半（每框=视频宽高比），宽超预算再收
+            bh = max(1, (budget_h - sp) // 2)
+            bw = int(round(bh * f_w / f_h))
+            if bw > budget_w:
+                bw = budget_w
+                bh = max(1, int(round(bw * f_h / f_w)))
+            a_size = b_size = (bw, bh)
+            total_w, total_h = bw, bh * 2 + sp
+            direction = QBoxLayout.TopToBottom
         else:
-            box_w = max(1, (w - self._box_spacing) // 2)
-            box_h = h
-            self.boxes_layout.setDirection(QBoxLayout.LeftToRight)
-        self._a_box_size = (box_w, box_h)
-        self._b_box_size = (box_w, box_h)
-        self.ratio_container.setFixedSize(box_w, box_h)
-        self.b_ratio_container.setFixedSize(box_w, box_h)
-        self.b_placeholder.setGeometry(0, 0, box_w, box_h)
-        self.video_display.setMinimumSize(min(320, box_w), min(180, box_h))
-        self.b_video_display.setMinimumSize(min(320, box_w), min(180, box_h))
-        self.black_container.setFixedWidth(w + 4)
+            # 左右排：先按预算宽度对半（每框=视频宽高比），高超预算再收
+            bw = max(1, (budget_w - sp) // 2)
+            bh = int(round(bw * f_h / f_w))
+            if bh > budget_h:
+                bh = budget_h
+                bw = max(1, int(round(bh * f_w / f_h)))
+            a_size = b_size = (bw, bh)
+            total_w, total_h = bw * 2 + sp, bh
+            direction = QBoxLayout.LeftToRight
+
+        b_visible = self._compare_mode
+        changed = ((total_w, total_h) != (self.video_preview_width, self.video_preview_height)
+                   or a_size != self._a_box_size or b_size != self._b_box_size
+                   or direction != self.boxes_layout.direction()
+                   or self._apply_compare != self._compare_mode)
+        if not changed:
+            return False
+        self._apply_compare = self._compare_mode
+        self.video_preview_width = total_w
+        self.video_preview_height = total_h
+        self._orientation = 'landscape' if landscape else 'portrait'
+        self.boxes_layout.setDirection(direction)
+        # 单框模式隐藏 B 框（A 独占），对比模式恢复
+        self.b_ratio_container.setVisible(b_visible)
+        self._a_box_size = a_size
+        self._b_box_size = b_size
+        self.ratio_container.setFixedSize(*a_size)
+        self.b_ratio_container.setFixedSize(*b_size)
+        self.b_placeholder.setGeometry(0, 0, b_size[0], b_size[1])
+        self.video_display.setMinimumSize(min(320, a_size[0]), min(180, a_size[1]))
+        self.b_video_display.setMinimumSize(min(240, b_size[0]), min(135, b_size[1]))
+        self.black_container.setFixedWidth(total_w + 4)
         return True
+
+    def set_compare_mode(self, enabled):
+        """切换单框 / A/B 对比布局。
+
+        未处理（加载视频、无结果源）→ False：A 框独占，画面按最长边撑满窗口；
+        开始处理或打开结果对比源 → True：A/B 双框（横屏上下排/竖屏左右排）。
+        切换后按当前视频宽高比立即重排，A/B 两帧由各自的 Resize 过滤器重渲染。
+        """
+        enabled = bool(enabled)
+        if enabled == self._compare_mode:
+            return
+        self._compare_mode = enabled
+        self._reflow_preview()
 
     def update_video_display(self, frame, draw_selection=True):
         """更新视频显示：帧按 contain 规则等比缩放居中（letterbox 黑边），

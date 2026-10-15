@@ -608,6 +608,8 @@ class HomeInterface(QWidget):
         self.b_video_cap = cap
         ret, frame = cap.read()
         self.video_display_component.set_b_frame(frame if ret else None)
+        # 有结果源 → 切到 A/B 对比布局（双框同步对比/播放）
+        self.video_display_component.set_compare_mode(True)
         # 有结果源才开放同步播放
         self.video_display_component.play_button.setVisible(
             self.video_cap is not None and self.video_cap.isOpened())
@@ -763,6 +765,9 @@ class HomeInterface(QWidget):
             self.running_process = None
             self.run_button.setVisible(True)
             self.stop_button.setVisible(False)
+            # 停止后回到单框模式（画面最大化），恢复字幕框选便于重新调整
+            self.video_display_component.set_compare_mode(False)
+            self.video_display_component.set_dragger_enabled(True)
 
     @Slot(bool)
     def _toggle_buttons(self, show_run):
@@ -793,6 +798,8 @@ class HomeInterface(QWidget):
             self.toggle_buttons_signal.emit(False)
             # 处理开始：关闭旧结果源（B 框改由 worker 实时结果帧接管）
             self._close_compare_output()
+            # 切到 A/B 对比布局（处理中实时预览双框显示）
+            self.video_display_component.set_compare_mode(True)
             # 重置监控：速度 EMA 与显存峰值
             self._speed_last = None
             self._speed_ema = 0.0
@@ -1386,8 +1393,9 @@ class HomeInterface(QWidget):
 
     def load_video(self, video_path):
         self.video_path = video_path
-        # 换视频：停止 A/B 同步播放并释放旧结果源（B 框回占位提示）
+        # 换视频：停止 A/B 同步播放并释放旧结果源，回到单框模式（画面最大化）
         self._close_compare_output()
+        self.video_display_component.set_compare_mode(False)
         with self._video_cap_lock:
             if self.video_cap:
                 self.video_cap.release()
