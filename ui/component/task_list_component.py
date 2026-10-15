@@ -11,7 +11,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
                                QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer
+from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer, QRect, QPoint
 from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox
 from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent, QPainter, QPen
 from showinfm import show_in_file_manager
@@ -352,6 +352,8 @@ class _TaskTable(TableWidget):
         self._dragging = False
         self._marker_row = None   # 指示线所在目标行
         self._marker_after = False  # True=插到目标行之后
+        self._ghost = None        # 拖动跟随的行幽灵（顶层半透明快照）
+        self._ghost_offset = None  # 光标相对行左上角的偏移
 
     # ---- 拖拽状态机 ----
 
@@ -370,8 +372,11 @@ class _TaskTable(TableWidget):
             if not self._dragging:
                 if (pos - self._press_pos).manhattanLength() >= self._DRAG_THRESHOLD:
                     self._dragging = True
+                    self._start_ghost(pos)
+                    self.viewport().setCursor(Qt.ClosedHandCursor)
             if self._dragging:
                 self._update_marker(pos)
+                self._move_ghost(pos)
                 self.viewport().update()
                 event.accept()
                 return
@@ -379,10 +384,14 @@ class _TaskTable(TableWidget):
 
     def mouseReleaseEvent(self, event):
         if self._dragging and self._press_row is not None:
+            # ⚠ 必须先取 from_row 再复位——复位会把 _press_row 清成 None，
+            # 发 Signal(int,int) 时 None 被静默转 0 → 永远移动第 0 行
+            # （「往后可以往前不行」的根因）
+            from_row = self._press_row
             insert = self._insert_index()
             self._reset_drag()
             if insert is not None:
-                self.row_move_requested.emit(self._press_row, insert)
+                self.row_move_requested.emit(from_row, insert)
                 event.accept()
                 return
         self._reset_drag()
@@ -419,8 +428,49 @@ class _TaskTable(TableWidget):
         self._dragging = False
         self._marker_row = None
         self._marker_after = False
+        self._close_ghost()
+        self.viewport().unsetCursor()
         if changed:
             self.viewport().update()
+
+    # ---- 拖动跟随（行幽灵快照）----
+
+    def _start_ghost(self, pos):
+        """拖拽开始：抓取源行快照，做成跟随光标的顶层半透明浮窗"""
+        try:
+            row_rect = self.visualRect(self.model().index(self._press_row, 0))
+            full = QRect(0, row_rect.top(), self.viewport().width(),
+                         row_rect.height())
+            self._ghost_offset = QPoint(pos.x(), pos.y() - full.top())
+            pix = self.viewport().grab(full)
+            ghost = QLabel(self, Qt.ToolTip | Qt.FramelessWindowHint)
+            ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            ghost.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            ghost.setWindowOpacity(0.85)
+            ghost.setPixmap(pix)
+            ghost.move(self.viewport().mapToGlobal(
+                QPoint(pos.x() - self._ghost_offset.x(), full.top())))
+            ghost.show()
+            self._ghost = ghost
+        except Exception:
+            self._ghost = None  # 快照失败不影响拖拽功能本身
+
+    def _move_ghost(self, pos):
+        """幽灵跟随光标（保持按下时相对行的偏移）"""
+        if self._ghost is None or self._ghost_offset is None:
+            return
+        top_left = self.viewport().mapToGlobal(pos) - self._ghost_offset
+        self._ghost.move(top_left)
+
+    def _close_ghost(self):
+        if self._ghost is not None:
+            try:
+                self._ghost.close()
+                self._ghost.deleteLater()
+            except RuntimeError:
+                pass
+            self._ghost = None
+            self._ghost_offset = None
 
     # ---- 指示线绘制 ----
 
