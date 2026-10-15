@@ -106,11 +106,13 @@ class Config(QConfig):
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
     residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
-    # 长视频分段时长（分钟）：0=禁用分段；视频时长 ≤ 该值整片处理，
+    # 长视频分段时长（秒）：0=禁用分段；视频时长 ≤ 该值整片处理，
     # 超过则按此值切段逐段执行，支持中断续跑（checkpoint 保存在
     # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）
-    # 视频分段时长（秒）：0=不分段；新键名避免旧配置的分钟值被误读为秒
-    segmentSeconds = RangeConfigItem("Main", "SegmentSeconds", 600, RangeValidator(0, 14400))
+    # 默认 300 秒（5 分钟/段）：段更短 → ①中断后重跑的续跑粒度更细（最多损失
+    # 半段重算）；②单段的中间产物更早落盘，长片更抗崩溃/OOM；
+    # 代价：段数变多、段边界变多（段间重叠帧已消除接缝，质量无影响）
+    segmentSeconds = RangeConfigItem("Main", "SegmentSeconds", 300, RangeValidator(0, 14400))
     # 段间重叠帧数：除第一段外，每段向前多处理 N 帧作为邻帧模型（STTN/MiniMax 靠前后帧
     # 窗口推理）的上下文，消除段边界处上下文被截断产生的接缝；重叠帧只送入模型、
     # 不写入段文件，因此拼接时无需裁剪、成片总帧数不变。0=关闭（与旧行为一致）
