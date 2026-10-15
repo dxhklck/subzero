@@ -55,6 +55,7 @@ class AdvancedSettingInterface(ScrollArea):
         self._build_minimax_group()
         self._build_sttn_group()
         self._build_general_group()
+        self._build_about_group()
         self.page_layout.addStretch(1)
 
     # ---------- 页头：恢复默认（按钮靠最左） ----------
@@ -239,11 +240,42 @@ class AdvancedSettingInterface(ScrollArea):
             config.segmentOverlapFrames, gui['SegmentOverlap'],
             gui['SegmentOverlapDesc'], icon=FluentIcon.LINK, parent=card)
 
-        # 关于并入：版权与版本直接作为行标题显示（原 tooltip 内容），按钮即检查更新
+        # 流水线（边检测边去除）：分块帧数 | 预取块数
+        # 0 = 关闭流水线回退旧行为；分块只改变调度、不改变输出（逐帧已验证一致）
+        self.pipeline_chunk_row = CompactRangeRow(
+            config.pipelineChunkFrames, gui['PipelineChunkFrames'],
+            gui['PipelineChunkFramesDesc'], icon=FluentIcon.SPEED_MEDIUM, parent=card)
+        self.pipeline_prefetch_row = CompactRangeRow(
+            config.pipelinePrefetchChunks, gui['PipelinePrefetchChunks'],
+            gui['PipelinePrefetchChunksDesc'], icon=FluentIcon.UPDATE, parent=card)
+
+        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数
+        # （信息类行已抽到「关于」卡：版权·版本 / 关键参数速览 / 项目链接 / 流水线说明）
+        vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.pipeline_chunk_row,
+                                       self.pipeline_prefetch_row, columns=4))
+
+    def _build_about_group(self):
+        """关于卡：信息类内容集中展示（从通用组抽出）。
+
+        行1：版权·版本（跨两列）| 关键参数速览（跨两列，实时显示当前生效数值）
+        行2：项目链接（仓库配置后显示）| 流水线说明（跨三列）
+        """
+        gui = tr['SubtitleExtractorGUI']
+        st = tr['Setting']
+        card, vbox, self._about_header = self._make_group(st['CopyrightTitle'])
+
+        # 版权·版本：行标题即文案（原 tooltip 内容），按钮即检查更新
         self.copyright_row = CompactActionRow(
             st['CopyrightDesc'].format(VERSION), st['CopyrightDesc'].format(VERSION),
             icon=FluentIcon.MAIL, parent=card)
         self.copyright_row.add_button(st['CopyrightButton'], on_click=lambda: self.check_update())
+
+        # 关键参数速览：当前生效的核心数值直接显示（refresh_config_rows / 恢复默认后刷新）
+        self.about_values_row = CompactActionRow(
+            st['AboutValues'], st['AboutValuesDesc'],
+            icon=FluentIcon.TILES, parent=card)
+        self.about_values_label = self.about_values_row.add_status_label(width=250)
+        self._update_about_values()
 
         # 项目链接（仓库地址配置后才显示）
         self.project_row = None
@@ -253,12 +285,24 @@ class AdvancedSettingInterface(ScrollArea):
                 icon=FluentIcon.GITHUB, parent=card)
             self.project_row.add_button(st['ProjectLinkOpen'],
                                         on_click=lambda: QDesktopServices.openUrl(QUrl(PROJECT_HOME_URL)))
-            # 末行四列：段间重叠帧数 | 项目链接 | 版权·版本（跨两列）
-            vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.project_row,
-                                           (self.copyright_row, 2), columns=4))
+
+        self.pipeline_info_row = CompactActionRow(
+            gui['PipelineInfo'], gui['PipelineInfoDesc'],
+            icon=FluentIcon.INFO, parent=card)
+
+        vbox.addWidget(CompactParamRow((self.copyright_row, 2), (self.about_values_row, 2),
+                                       columns=4))
+        if self.project_row is not None:
+            vbox.addWidget(CompactParamRow(self.project_row, (self.pipeline_info_row, 3),
+                                           columns=4))
         else:
-            vbox.addWidget(CompactParamRow(self.segment_overlap_row,
-                                           (self.copyright_row, 2), columns=4))
+            vbox.addWidget(CompactParamRow((self.pipeline_info_row, 4), columns=4))
+
+    def _update_about_values(self):
+        """「关键参数速览」：当前生效的分段/分块/预取/重叠数值（与 config.json 同步）"""
+        self.about_values_label.setText(
+            f"分段 {config.segmentSeconds.value}s · 分块 {config.pipelineChunkFrames.value}帧 · "
+            f"预取 {config.pipelinePrefetchChunks.value}块 · 重叠 {config.segmentOverlapFrames.value}帧")
 
     def _update_save_dir_display(self):
         """保存目录行内显示当前文件夹；整行 tooltip 同步为实际路径"""
@@ -272,7 +316,8 @@ class AdvancedSettingInterface(ScrollArea):
         """刷新全部参数行的显示（外部改配置后调用，如首页应用参数预设）"""
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
-                      self.segment_overlap_row,
+                      self.segment_overlap_row, self.pipeline_chunk_row,
+                      self.pipeline_prefetch_row,
                       self.update_row, self.theme_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
@@ -280,11 +325,13 @@ class AdvancedSettingInterface(ScrollArea):
         for row in all_rows:
             if hasattr(row, 'refresh_row'):
                 row.refresh_row()
+        self._update_about_values()
 
     def _on_restore_defaults(self):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
-                      self.segment_overlap_row,
+                      self.segment_overlap_row, self.pipeline_chunk_row,
+                      self.pipeline_prefetch_row,
                       self.update_row, self.theme_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \
@@ -303,6 +350,7 @@ class AdvancedSettingInterface(ScrollArea):
         for row in all_rows:
             config.set(row.config_item, row.config_item.defaultValue)
             row.refresh_row()
+        self._update_about_values()
         InfoBar.success(
             tr['Setting']['RestoreDefaultsTitle'],
             tr['Setting']['RestoreDone'].format(total),

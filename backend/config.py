@@ -102,6 +102,12 @@ class Config(QConfig):
     # 区块越小流水线起步越快、显存峰值越低（每块只装本块帧），但跨块的字幕区间会被
     # 自然切开（各自用本块掩膜，无漏除）；300 帧（30fps 下约10秒）为实测平衡点。
     pipelineChunkFrames = RangeConfigItem("Main", "PipelineChunkFrames", 300, RangeValidator(0, 5000))
+    # 流水线预取块数：先检测出这么多块再启动去除（用户定版语义「检测出几块再去除」）。
+    # 1 = 最激进（检测出 1 块就开跑，起步最快但可能逐块起停）；
+    # 2 = 默认（起步与连贯性平衡，生产者最多领先 2 块）；
+    # 更大 = 起步更晚、缓冲更深（检测抖动大/修复极快时可适当调大）。
+    # 仅当 pipelineChunkFrames > 0 时生效；不影响输出（与整片路径逐帧一致）
+    pipelinePrefetchChunks = RangeConfigItem("Main", "PipelinePrefetchChunks", 2, RangeValidator(1, 5))
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修

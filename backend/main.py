@@ -379,7 +379,8 @@ class SubtitleRemover:
         跨块字幕区间会被自然切开（各块用本块帧的掩膜），逐帧不重不漏。
         """
         write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
-        depth = 2                       # 预取深度（块）
+        # 预取深度（块）：先检测出这么多块再启动去除（config.pipelinePrefetchChunks，1-5）
+        depth = max(1, min(5, int(config.pipelinePrefetchChunks.value or 1)))
         task_queue = queue.Queue(maxsize=depth)
         stop_event = threading.Event()
         state = {'detected': 0, 'error': None}
