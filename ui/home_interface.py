@@ -753,10 +753,15 @@ class HomeInterface(QWidget):
         """MiniMax 宽条带提速提示：条带宽超过 1280、而当前 ProcessWidth 不会
         对它降采样（0=原分辨率，或上限高于条带宽）时，建议设 1280。
         默认 1280 + 窄条带场景不触发；每次点运行前检查一次。"""
-        if config.inpaintMode.value != InpaintMode.MINIMAX:
-            return
         idx = self.task_list_component.get_current_task_index()
         if idx < 0:
+            return
+        # 有效模式：任务级覆盖优先于全局（与子进程同一口径）
+        mode_override = self.task_list_component.get_task_option(
+            idx, TaskOptions.INPAINT_MODE, None)
+        effective = mode_override or config.inpaintMode.value
+        eff_value = getattr(effective, 'value', None) or str(effective)
+        if eff_value != InpaintMode.MINIMAX.value:
             return
         areas = self.task_list_component.get_task_option(idx, TaskOptions.SUB_AREAS, [])
         # 条目可为 4/6 元组，前 4 项为 (ymin,ymax,xmin,xmax)
@@ -982,6 +987,17 @@ class HomeInterface(QWidget):
                         return False
             sys.stdout = _QueueConsoleWriter(queue, sys.__stdout__)
             sys.stderr = _QueueConsoleWriter(queue, sys.__stderr__)
+            # 任务级模型覆盖：options 显式携带 inpaint_mode 时优先于全局 config.json。
+            # 子进程内存覆盖（save=False），不写盘污染全局设置；同时从 options 弹出，
+            # 避免下面的 setattr 循环往 sr 上挂一个无关属性
+            mode_override = options.pop('inpaint_mode', None)
+            if mode_override:
+                from backend.config import config as _config
+                from backend.tools.constant import InpaintMode as _InpaintMode
+                _m = (mode_override if isinstance(mode_override, _InpaintMode)
+                      else _InpaintMode(str(mode_override)))
+                _config.set(_config.inpaintMode, _m, save=False)
+                print(f'[任务级模型] 使用 {_m.value}（覆盖全局 {config.inpaintMode.value}）')
             from backend.main import SubtitleRemover
             sr = SubtitleRemover(video_path, True)
             sr.video_out_path = output_path
@@ -1093,7 +1109,9 @@ class HomeInterface(QWidget):
         stem = os.path.splitext(os.path.basename(video_path))[0]
         task_dir = os.path.join(out_dir, f'{stem}_no_sub_segments')
         ckpt_path = os.path.join(task_dir, 'checkpoint.json')
-        params = build_task_params(options, config.inpaintMode.value)
+        # 任务级模型覆盖（options 显式携带时优先于全局），与续跑判定同一口径
+        params = build_task_params(
+            options, options.get('inpaint_mode') or config.inpaintMode.value)
         params['segmentOverlapFrames'] = overlap
 
         checkpoint, mode = load_or_rebuild_checkpoint(

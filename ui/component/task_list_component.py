@@ -18,6 +18,20 @@ from showinfm import show_in_file_manager
 
 from backend.config import config, tr
 from backend.tools.common_tools import is_image_file
+from backend.tools.constant import InpaintMode
+
+
+def _mode_display(mode_value):
+    """模式存储值（'sttn-auto' 等）→ 界面显示名（无翻译时回退原值）"""
+    try:
+        m = InpaintMode(str(mode_value))
+    except ValueError:
+        return str(mode_value)
+    key = {InpaintMode.STTN_AUTO: 'SttnAuto', InpaintMode.STTN_DET: 'SttnDet',
+           InpaintMode.LAMA: 'LAMA', InpaintMode.OPENCV: 'OpenCV',
+           InpaintMode.MINIMAX: 'MiniMax'}.get(m)
+    return tr['InpaintMode'].get(key, m.value) if key else m.value
+from backend.tools.constant import InpaintMode
 
 @unique
 class TaskStatus(Enum):
@@ -31,6 +45,7 @@ class TaskStatus(Enum):
 class TaskOptions(Enum):
     AB_SECTIONS = "ab_sections"
     SUB_AREAS = "sub_areas"
+    INPAINT_MODE = "inpaint_mode"  # 任务级处理模型（None/缺省 = 跟随全局设置）
 
 
 def resolve_output_path(video_path: str) -> str:
@@ -170,7 +185,9 @@ def collect_segment_info(task):
         from backend.tools.segmenter import derive_resume_info, params_hash
         # 传入当前参数哈希：与 run_task_with_segments 的续跑判定同一口径，
         # 否则参数已改时角标仍显示「可续跑」而实际运行会被拒绝，误导用户
-        params = build_task_params(task.options, config.inpaintMode.value)
+        # 任务级模型参与哈希：与 run_task_with_segments 同一口径（无覆盖时用全局）
+        params = build_task_params(
+            task.options, task.options.get(TaskOptions.INPAINT_MODE.value) or config.inpaintMode.value)
         params['segmentOverlapFrames'] = config.segmentOverlapFrames.value
         info = derive_resume_info(ckpt_path, params_hash(params))
         return {
@@ -793,6 +810,8 @@ class TaskListComponent(QWidget):
         self.table.setTextElideMode(Qt.ElideMiddle)
 
         self.table.setItem(row, 0, item0)
+        # 任务级模型标注（右键「处理模型」指定时名称后追加显示名）
+        self._refresh_model_tag(row, task)
         # 进度·状态卡片单元格
         self.table.setRowHeight(row, 46)
         cell = TaskProgressCell()
@@ -816,6 +835,64 @@ class TaskListComponent(QWidget):
                             info.get('chip_text', ''))
         # 时间标签：历史用时（完成/失败）或预估总时长（待处理，有速度模型时）
         self._refresh_time_label(len(self.tasks) - 1)
+
+    def _refresh_model_tag(self, row, task):
+        """刷新名称列的任务级模型标注（指定时在名称后追加显示名）"""
+        item0 = self.table.item(row, 0)
+        if item0 is None:
+            return
+        mode_override = task.options.get(TaskOptions.INPAINT_MODE.value)
+        if mode_override:
+            display = _mode_display(mode_override)
+            item0.setText(task.name + '　· ' + display)
+            item0.setToolTip(task.path + '\n'
+                             + tr['TaskList']['TaskModelTag'].format(display))
+        else:
+            item0.setText(task.name)
+            item0.setToolTip(task.path)
+
+    def set_task_model(self, rows, mode_value):
+        """设置任务级处理模型（右键「处理模型」菜单调用）。
+
+        mode_value = None 表示清除覆盖、跟随全局；否则为 InpaintMode 的存储值
+        （'sttn-auto' 等）。非法值忽略；设置后刷新名称标注并持久化。
+        多选批量：同一模型应用到 rows 全部行。
+        """
+        if mode_value is not None:
+            try:
+                InpaintMode(str(mode_value))
+            except ValueError:
+                return
+        for row in sorted({r for r in rows if 0 <= r < len(self.tasks)}):
+            task = self.tasks[row]
+            if mode_value is None:
+                task.options.pop(TaskOptions.INPAINT_MODE.value, None)
+            else:
+                task.options[TaskOptions.INPAINT_MODE.value] = str(mode_value)
+            self._refresh_model_tag(row, task)
+        self.save_tasks()
+
+    def _build_model_submenu(self, menu, rows):
+        """构造「处理模型」子菜单（单项与批量共用）。
+
+        项：跟随全局（清除覆盖）+ 全部 InpaintMode；当前项打勾。
+        批量时按 rows 中首个任务的当前值标注勾选态。
+        """
+        tl = tr['TaskList']
+        sub = menu.addMenu(tl['TaskModelMenu'])
+        current = self.tasks[rows[0]].options.get(TaskOptions.INPAINT_MODE.value)
+        follow = sub.addAction(tl['TaskModelFollow'])
+        follow.setCheckable(True)
+        follow.setChecked(current is None)
+        follow.triggered.connect(
+            lambda checked=False, r=list(rows): self.set_task_model(r, None))
+        for m in InpaintMode:
+            act = sub.addAction(_mode_display(m.value))
+            act.setCheckable(True)
+            act.setChecked(current == m.value)
+            act.triggered.connect(
+                lambda checked=False, r=list(rows), v=m.value: self.set_task_model(r, v))
+        return sub
 
     def _fit_progress_column(self, *args):
         """「进度·状态」列宽贴合内容自适应（单元格 content_changed 触发）。
@@ -969,6 +1046,9 @@ class TaskListComponent(QWidget):
             lambda: [self._reset_task(r) for r in rows])
         menu.addAction(reset_action)
 
+        # 处理模型：批量设置（覆盖全局默认，参与续跑参数哈希）
+        self._build_model_submenu(menu, rows)
+
         menu.addSeparator()
         delete_action = QAction(tl['BatchDelete'].format(len(rows)), self)
         delete_action.triggered.connect(lambda: self.delete_tasks(rows))
@@ -1005,6 +1085,9 @@ class TaskListComponent(QWidget):
         reset_task_status_action = QAction(tr['TaskList']['ResetTaskStatus'], self)
         reset_task_status_action.triggered.connect(lambda: self._reset_task(row))
         menu.addAction(reset_task_status_action)
+
+        # 处理模型：任务级覆盖全局设置（右键菜单 → 跟随全局 / 各算法）
+        self._build_model_submenu(menu, [row])
 
         # 失败任务：直达错误现场（崩溃报告文件/输出目录）
         if self.tasks[row].status == TaskStatus.FAILED:
