@@ -29,8 +29,6 @@ SubZero removes hard-burned subtitles from videos: OCR locates the subtitle regi
 - **One-click checkpoint cleanup**: when a parameter change refuses to resume, the task card shows "⛔ params changed" and a right-click deletes the stale progress and resets
 
 > This repository contains source only — **no automatic environment setup or weight downloading is built in**. For installation, weight download links, parameter reference and configuration examples, see the detailed tutorial: **[Tutorial (English)](使用教程_en.md)** · [使用教程 (简体中文)](使用教程.md)
->
-> Prefer not to set up the environment yourself? Download the installer `净影SubZero-Setup-*.exe` from [GitHub Releases](https://github.com/dxhklck/subzero/releases) (thin install; first launch guides dependency and weight setup).
 
 ## Quick Start
 
