@@ -72,6 +72,11 @@ class Config(QConfig):
     # 纯 CPU 机器保底 libx264 veryfast（与旧行为一致），没有 N 卡不代表变慢
     videoEncoder = OptionsConfigItem("Main", "VideoEncoder", EncoderMode.AUTO, OptionsValidator(EncoderMode), EnumSerializer(EncoderMode))
 
+    # 输出码率（kbps）：0 = 默认按质量档（crf/cq 21 档，体积随内容浮动）；
+    # >0 = 指定 VBR 目标码率（如 8000 ≈ 1080p 高画质、4000 ≈ 中等），文件体积可预期。
+    # 质量档与码率档二选一；同一编码器家族内两者的体积/画质权衡不同档位自洽
+    outputBitrate = RangeConfigItem("Main", "OutputBitrate", 0, RangeValidator(0, 200000))
+
     # 【设置像素点偏差】
     # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)
     subtitleYXAxisDifferencePixel = RangeConfigItem("Main", "SubtitleYXAxisDifferencePixel", 10, RangeValidator(0, 100))

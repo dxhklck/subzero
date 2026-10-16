@@ -71,7 +71,8 @@ class SubtitleRemover:
         # 创建视频写对象（H.264 硬件编码优先，video_encoder 按本机实测探测，失败自动降级）
         try:
             self.video_writer = FFmpegVideoWriter(get_readable_path(self.video_temp_file.name), self.fps, self.size,
-                                                  encoder_override=config.videoEncoder.value)
+                                                  encoder_override=config.videoEncoder.value,
+                                                  bitrate_kbps=int(config.outputBitrate.value or 0))
         except Exception:
             self.video_writer = cv2.VideoWriter(get_readable_path(self.video_temp_file.name), cv2.VideoWriter_fourcc(*'mp4v'), self.fps, self.size)
         self.video_out_path = os.path.abspath(os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub.mp4'))
@@ -108,6 +109,10 @@ class SubtitleRemover:
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
         self._first_pass_regions = []
         self._first_pass_union = None  # 第一遍修复区域的联合外接框（懒计算）
+        # 阶段耗时累加（秒）：解码/检测/修复/写盘，任务结束输出一行汇总，
+        # 用于定位瓶颈（单消费者线程内累加，天然线程安全；检测在独立线程，
+        # 由其自身累加自己的键，与消费键互不相交）
+        self._phase_times = {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
 
     @staticmethod
     def is_current_frame_no_start(frame_no, continuous_frame_no_list):
@@ -463,12 +468,16 @@ class SubtitleRemover:
                 cursor = self.frame_start + 1
                 while cursor <= frame_end and not stop_event.is_set():
                     c_end = min(frame_end, cursor + chunk - 1)
+                    _t0 = time.perf_counter()
                     sub_list = detector.find_subtitle_frame_no(frame_start=cursor - 1,
                                                                frame_end=c_end, sub_remover=self)
                     self._collect_first_pass_regions(sub_list)
                     state['detected'] += len(sub_list)
                     start_end_map = self._plan_intervals(detector, sub_list, self.frame_start,
                                                          cursor, c_end, tbar)
+                    self.__dict__.setdefault(
+                        '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
+                    )['detect'] += time.perf_counter() - _t0
                     motion = dict(detector.frame_diff_scores) if route else None
                     detector.frame_diff_scores.clear()  # 逐块取走，避免全程累积
                     task_queue.put((cursor, c_end, start_end_map, sub_list, motion))
@@ -529,9 +538,25 @@ class SubtitleRemover:
         """
         if write_start is None:
             write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
+        # 阶段计时辅助：读帧（解码/等待预读）与写盘（编码管道背压）各计各的；
+        # 推理时间在批推理处单独累加。setdefault 兼容测试桩（object.__new__ 绕过 __init__）
+        ptimes = self.__dict__.setdefault(
+            '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0})
+
+        def timed_read():
+            _t = time.perf_counter()
+            r = reader.read()
+            ptimes['decode'] += time.perf_counter() - _t
+            return r
+
+        def timed_write(f):
+            _t = time.perf_counter()
+            self.video_writer.write(f)
+            ptimes['encode'] += time.perf_counter() - _t
+
         current_frame_index = range_start - 1
         while current_frame_index < range_end:
-            ret, frame = reader.read()
+            ret, frame = timed_read()
             # 如果读取视频帧失败（视频读到最后一帧）
             if not ret:
                 return
@@ -540,7 +565,7 @@ class SubtitleRemover:
             if current_frame_index not in start_end_map.keys():
                 # 段首重叠帧（全局帧号 <= write_start）只作上下文，不写入
                 if current_frame_index > write_start:
-                    self.video_writer.write(frame)
+                    timed_write(frame)
                     self.update_progress(tbar, increment=1)
                     self.update_preview_with_comp(frame, frame)
             # 如果是区间开始，则找到尾巴
@@ -554,7 +579,7 @@ class SubtitleRemover:
                 frames_need_inpaint.append(frame)
                 # 接着往下读，直到读取到尾巴（不得超过本块末帧）
                 while current_frame_index < end_frame_index:
-                    ret, frame = reader.read()
+                    ret, frame = timed_read()
                     if not ret:
                         break
                     current_frame_index += 1
@@ -573,7 +598,7 @@ class SubtitleRemover:
                         n_write = 0
                         for i, frame in enumerate(frames_g):
                             if g_start + i > write_start:
-                                self.video_writer.write(frame)
+                                timed_write(frame)
                                 self.update_preview_with_comp(frame, frame)
                                 n_write += 1
                         if n_write:
@@ -601,9 +626,11 @@ class SubtitleRemover:
                     out_kept = []
                     run_pos = 0
                     for batch in batch_generator(frames_run, batch_size):
-                        # 3. 调用批推理
+                        # 3. 调用批推理（含掩膜建批的模型内部开销，全计修复）
                         if len(batch) >= 1:
+                            _t = time.perf_counter()
                             out_kept.extend(model(batch, mask))
+                            ptimes['repair'] += time.perf_counter() - _t
                         # 仅统计本批中需要写入的帧（重叠上下文帧不计进度）
                         n_write = sum(1 for i in kept_idx[run_pos:run_pos + len(batch)] if i >= ctx)
                         run_pos += len(batch)
@@ -624,11 +651,12 @@ class SubtitleRemover:
                     for i, (src, rep) in enumerate(zip(frames_g, out_full)):
                         # 段首重叠帧只作上下文不写入（进度已在上面按写入帧计数）
                         if g_start + i > write_start:
-                            self.video_writer.write(rep)
+                            timed_write(rep)
                             self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
 
     def _video_inpaint_whole(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
+        _t0 = time.perf_counter()
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
         self._collect_first_pass_regions(sub_list)
         if len(sub_list) == 0:
@@ -641,6 +669,9 @@ class SubtitleRemover:
         tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
         # 选框时间边界切分（与 _plan_intervals 同理：组不跨时间边界）
         continuous_frame_no_list = split_ranges_at_area_bounds(continuous_frame_no_list, self.sub_areas)
+        self.__dict__.setdefault(
+            '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
+        )['detect'] += time.perf_counter() - _t0
         # AUTO路由需要在删除检测器前取出帧差分数
         motion_scores = sub_detector.frame_diff_scores if route else None
         del sub_detector
@@ -747,6 +778,11 @@ class SubtitleRemover:
                 self.merge_audio_to_video()
         self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
+        pt = self._phase_times
+        if any(v > 0 for v in pt.values()):
+            self.append_output(tr['Main']['PhaseTiming'].format(
+                round(pt['decode']), round(pt['detect']), round(pt['repair']),
+                round(pt['encode']), round(time.time() - start_time)))
         self.isFinished = True
         self.progress_total = 100
         try:
@@ -804,6 +840,11 @@ class SubtitleRemover:
         self.video_cap.release()
         self.append_output(tr['Main']['FinishedProcessing'].format(self.video_out_path))
         self.append_output(tr['Main']['ProcessingTime'].format(round(time.time() - start_time)))
+        pt = self._phase_times
+        if any(v > 0 for v in pt.values()):
+            self.append_output(tr['Main']['PhaseTiming'].format(
+                round(pt['decode']), round(pt['detect']), round(pt['repair']),
+                round(pt['encode']), round(time.time() - start_time)))
         self.isFinished = True
         self.progress_total = 100
         try:
@@ -998,7 +1039,8 @@ class SubtitleRemover:
         new_temp.close()
         try:
             writer = FFmpegVideoWriter(get_readable_path(new_temp.name), self.fps, self.size,
-                                       encoder_override=config.videoEncoder.value)
+                                       encoder_override=config.videoEncoder.value,
+                                       bitrate_kbps=int(config.outputBitrate.value or 0))
         except Exception:
             writer = cv2.VideoWriter(get_readable_path(new_temp.name), cv2.VideoWriter_fourcc(*'mp4v'),
                                      self.fps, self.size)

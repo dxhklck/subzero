@@ -84,6 +84,32 @@ def resolve_h264_encoder(override=None):
         return _cache[key]
 
 
+def encoder_params(encoder, bitrate_kbps=0):
+    """按编码器返回正式编码参数。
+
+    bitrate_kbps > 0：VBR 目标码率（-b:v + maxrate/bufsize 限制峰值，
+    文件体积可预期）；= 0：质量档（crf/cq 21，与探测参数一致）。
+    -b:v/-maxrate/-bufsize 为四家编码器通用选项，无需按家特判峰值参数；
+    AMF 用 vbr_peak（其 vbr 不消费 maxrate）。
+    """
+    if bitrate_kbps and int(bitrate_kbps) > 0:
+        b = int(bitrate_kbps)
+        presets = {'h264_nvenc': ('-preset', 'p5'),
+                   'h264_qsv': ('-preset', 'medium'),
+                   'h264_amf': ('-quality', 'quality'),
+                   'libx264': ('-preset', 'veryfast')}
+        # ⚠ ffmpeg 码率选项裸数字 = bit/s，必须带 'k' 后缀才是 kbps
+        br = (f'-b:v', f'{b}k', '-maxrate', f'{int(b * 1.45)}k', '-bufsize', f'{b * 2}k')
+        if encoder == 'h264_amf':
+            head = (*presets[encoder], '-rc', 'vbr_peak')  # AMF 的 vbr 不消费 maxrate
+        elif encoder == 'libx264':
+            head = presets[encoder]  # x264 无 -rc 选项：-b:v 即 ABR，VBV 限峰值
+        else:
+            head = (*presets[encoder], '-rc', 'vbr')
+        return (*head, *br)
+    return dict(_ENCODER_CANDIDATES).get(encoder, _ENCODER_CANDIDATES[-1][1])
+
+
 def reset_encoder_cache():
     """清空探测缓存（测试用；保证改设置后重新探测）。"""
     with _cache_lock:

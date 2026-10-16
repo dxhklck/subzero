@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from .ffmpeg_cli import FFmpegCLI
-from .video_encoder import resolve_h264_encoder
+from .video_encoder import resolve_h264_encoder, encoder_params
 from .common_tools import SUBPROCESS_CREATION_FLAGS
 
 
@@ -80,13 +80,15 @@ class FFmpegVideoWriter:
     接口兼容 cv2.VideoWriter（write/release）。
     """
 
-    def __init__(self, output_path, fps, size, encoder_override=None):
+    def __init__(self, output_path, fps, size, encoder_override=None, bitrate_kbps=0):
         w, h = size
         # fps 读不到（0/负值）时编码器会以 -r 0 拒绝或产出坏文件；回退 25 保底
         if not fps or fps <= 0:
             fps = 25.0
         encoder, enc_params = resolve_h264_encoder(encoder_override)
         self.encoder = encoder  # 实际使用的编码器（上层日志/排查用）
+        # 码率：0 = 质量档（探测参数一致）；>0 = VBR 目标码率 kbps（体积可预期）
+        enc_params = encoder_params(encoder, bitrate_kbps)
         cmd = [
             FFmpegCLI.instance().ffmpeg_path,
             '-y',
