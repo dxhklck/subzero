@@ -749,10 +749,36 @@ class HomeInterface(QWidget):
             self._reopen_source_cap()
             self._open_compare_output(output_path)
 
+    def _maybe_hint_process_width(self):
+        """MiniMax 宽条带提速提示：条带宽超过 1280、而当前 ProcessWidth 不会
+        对它降采样（0=原分辨率，或上限高于条带宽）时，建议设 1280。
+        默认 1280 + 窄条带场景不触发；每次点运行前检查一次。"""
+        if config.inpaintMode.value != InpaintMode.MINIMAX:
+            return
+        idx = self.task_list_component.get_current_task_index()
+        if idx < 0:
+            return
+        areas = self.task_list_component.get_task_option(idx, TaskOptions.SUB_AREAS, [])
+        # 条目可为 4/6 元组，前 4 项为 (ymin,ymax,xmin,xmax)
+        widths = [a[3] - a[2] for a in areas if len(a) >= 4 and a[3] > a[2]]
+        if not widths:
+            return
+        widest = max(widths)
+        pw = int(config.minimaxProcessWidth.value or 0)
+        if widest > 1280 and (pw == 0 or pw > widest):
+            gui = tr['SubtitleExtractorGUI']
+            InfoBar.warning(
+                title=gui['ProcessWidthHintTitle'],
+                content=gui['ProcessWidthHintText'].format(widest, pw if pw else gui['ProcessWidthNative']),
+                parent=self.window(), duration=8000)
+
     def run_button_clicked(self):
         if not self.task_list_component.get_pending_tasks():
             self.append_output(tr['SubtitleExtractorGUI']['OpenVideoFirst'])
             return
+
+        # MiniMax 宽条带提速提示（不阻断，仅一次 InfoBar）
+        self._maybe_hint_process_width()
 
         try:
             # 获取所有待执行的任务
