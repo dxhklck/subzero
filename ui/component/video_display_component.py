@@ -118,6 +118,11 @@ class VideoDisplayComponent(QWidget):
             border: 0px solid transparent;
         """)
         self.video_display.setMinimumSize(640, 360)
+        # ClickFocus：鼠标点入预览区即获焦，Tab/Shift+Tab 循环切换活动选框。
+        # 键盘用户无法经 Tab 进入本区（ClickFocus 不含 TabFocus），
+        # 全局 Tab 导航不受影响，不会被困在预览岛里
+        self.video_display.setFocusPolicy(Qt.ClickFocus)
+        self.video_display.keyPressEvent = self.video_display_key_press
         
         self.video_display.setMouseTracking(True)
         self.video_display.setScaledContents(True)
@@ -1124,6 +1129,25 @@ class VideoDisplayComponent(QWidget):
             self.update_cursor_shape(pos)
 
     # ---------- 选框时间范围（per-box） ----------
+
+    def video_display_key_press(self, event):
+        """预览区按键（label 实例级接管，沿用本组件鼠标事件的同一模式）。
+
+        Tab / Shift+Tab：循环切换活动选框——多框 + 各自时间段的键盘流
+        （切到目标框后Alt+[ / Alt+] 标时间，见 __handle_box_time_*）。
+        仅有选框时消费这两个键；其余按键交还 QLabel 默认行为。"""
+        if self.selection_rects and event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            n = len(self.selection_rects)
+            if not (0 <= self.active_selection_index < n):
+                # 无活动框：Tab 进第一个、Shift+Tab 进最后一个（反向更自然）
+                self.active_selection_index = 0 if event.key() == Qt.Key_Tab else n - 1
+            else:
+                step = 1 if event.key() == Qt.Key_Tab else -1
+                self.active_selection_index = (self.active_selection_index + step) % n
+            self.update_preview_with_rect()
+            event.accept()
+            return
+        QtWidgets.QLabel.keyPressEvent(self.video_display, event)
 
     def _set_box_time(self, index, t0, t1):
         """设置活动选框的时间范围（0-based、end 排他，与 AB 区块同口径）；
