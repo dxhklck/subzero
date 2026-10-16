@@ -99,6 +99,8 @@ modules.xml
 
 # Icon must end with two \r
 Icon
+!ui/icon/
+!ui/icon/**
 
 
 # Thumbnails
