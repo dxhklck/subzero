@@ -1,6 +1,5 @@
 import gc
 import queue
-import contextlib
 import torch
 import shutil
 import traceback
@@ -11,7 +10,6 @@ import threading
 import cv2
 import sys
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,29 +36,6 @@ import multiprocessing
 import time
 from tqdm import tqdm
 import numpy as np
-
-class _ChunkReader:
-    """块内帧读取器：修复 worker 线程各自打开视频源，seek 到块首顺序读取，
-    接口兼容 FramePrefetcher.read()。块边界由 remaining 严格约束（不跨块）。"""
-
-    def __init__(self, video_path, start, end):
-        self.cap = cv2.VideoCapture(get_readable_path(video_path))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)  # 块首（帧号 1-based）
-        self.remaining = max(0, end - start + 1)
-
-    def read(self):
-        if self.remaining <= 0:
-            return False, None
-        ret, frame = self.cap.read()
-        if ret:
-            self.remaining -= 1
-        return ret, frame
-
-    def stop(self):
-        try:
-            self.cap.release()
-        except Exception:
-            pass
 
 
 class SubtitleRemover:
@@ -133,10 +108,6 @@ class SubtitleRemover:
         # 第一遍修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定
         self._first_pass_regions = []
         self._first_pass_union = None  # 第一遍修复区域的联合外接框（懒计算）
-        # 修复线程池（repairWorkers>1 时）：线程局部模型克隆 + 共享模型互斥 + 进度锁
-        self._tls = threading.local()
-        self._shared_model_lock = threading.Lock()  # 不可克隆模型（MiniMax/STTN）推理互斥
-        self._progress_lock = threading.Lock()
 
     @staticmethod
     def is_current_frame_no_start(frame_no, continuous_frame_no_list):
@@ -159,11 +130,10 @@ class SubtitleRemover:
         return -1
 
     def update_progress(self, tbar, increment):
-        with self._progress_lock:  # 修复多线程并发推理：进度计数互斥，防回跳
-            tbar.update(increment)
-            current_percentage = (tbar.n / tbar.total) * 100
-            self.progress_remover = int(current_percentage)
-            self.progress_total = self.progress_remover
+        tbar.update(increment)
+        current_percentage = (tbar.n / tbar.total) * 100
+        self.progress_remover = int(current_percentage)
+        self.progress_total = self.progress_remover
         self.notify_progress_listeners()
 
     def append_output(self, *args):
@@ -470,11 +440,14 @@ class SubtitleRemover:
 
     def _video_inpaint_pipelined(self, tbar, model, batch_size, route, frame_end, chunk):
         """边检测边去除：检测线程（生产者）按块产出 interval 计划，
-        主线程（消费者）按块读帧、修复、写盘，两者重叠。
+        主线程（消费者）按块读帧、修复、流式写盘，两者重叠。
 
-        预取深度 2 块（用户定版语义）：先检测出 2 块再启动去除，之后消费者持续
-        消费、生产者最多领先 2 块——既不逐块起停浪费算力，也不让修复等太久。
+        预取深度（用户定版语义）：先检测出 N 块再启动去除，之后消费者持续
+        消费、生产者最多领先 N 块——既不逐块起停浪费算力，也不让修复等太久。
         跨块字幕区间会被自然切开（各块用本块帧的掩膜），逐帧不重不漏。
+        修复多线程已移除（2026-10-16 实测：LAMA 480p 全片 nw2 对 nw1 零收益；
+        MiniMax/STTN 共享实例锁串行化后仅剩块间解码重叠 ~1%，却要付
+        nw×chunk 帧的内存缓冲代价）——顺序流式写盘是唯一路径，内存最省。
         """
         write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
         # 预取深度（块）：先检测出这么多块再启动去除（config.pipelinePrefetchChunks，1-5）
@@ -508,12 +481,7 @@ class SubtitleRemover:
         worker = threading.Thread(target=producer, daemon=True)
         worker.start()
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
-        # 修复线程池：>1 时块任务并发推理（可克隆模型每线程一份实例；不可克隆的
-        # 共享实例加锁自动串行化），写盘由本线程按块序执行保证输出帧序
-        nw = max(1, min(4, int(config.repairWorkers.value or 1)))
-        executor = ThreadPoolExecutor(max_workers=nw) if nw > 1 else None
-        reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start) \
-            if executor is None else None  # 并行时各 worker 自开源顺序读，无需共享预读
+        reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
         ready = deque()
         finished = False
         # 预取：先攒够 depth 块（不足则以生产者结束为准）再开始去除
@@ -523,53 +491,25 @@ class SubtitleRemover:
                 finished = True
             else:
                 ready.append(item)
-        outstanding = deque()  # 已提交未写盘的块 future（FIFO 弹出 → 按块序写盘）
         try:
             while True:
                 if state['error'] is not None:
                     break
-                if executor is None:
-                    # 顺序路径（repairWorkers=1）：直接流式写盘，不积帧
-                    if not ready:
-                        if finished:
-                            break
-                        item = task_queue.get()
-                        if item is None:
-                            finished = True
-                            continue
-                        ready.append(item)
+                # 顺序流式路径：直接写盘，不积帧
+                if not ready:
+                    if finished:
+                        break
+                    item = task_queue.get()
+                    if item is None:
+                        finished = True
                         continue
-                    c_start, c_end, cur_map, cur_sub, motion = ready.popleft()
-                    self._process_range(reader, c_start, c_end, cur_map, cur_sub, tbar,
-                                        model, batch_size, route, motion, write_start)
+                    ready.append(item)
                     continue
-                # 并行路径：提交窗口保持 nw 个块在飞，FIFO 弹出按序写盘
-                while len(outstanding) < nw:
-                    if ready:
-                        c_start, c_end, cur_map, cur_sub, motion = ready.popleft()
-                        outstanding.append(executor.submit(
-                            self._run_chunk_task, c_start, c_end, cur_map, cur_sub,
-                            tbar, model, batch_size, route, motion, write_start))
-                    elif not finished:
-                        item = task_queue.get()
-                        if item is None:
-                            finished = True
-                        else:
-                            ready.append(item)
-                    else:
-                        break
-                if not outstanding:
-                    if not ready and finished:
-                        break
-                    continue
-                frames = outstanding.popleft().result()
-                for f in frames:
-                    self.video_writer.write(f)
+                c_start, c_end, cur_map, cur_sub, motion = ready.popleft()
+                self._process_range(reader, c_start, c_end, cur_map, cur_sub, tbar,
+                                    model, batch_size, route, motion, write_start)
         finally:
-            if executor is not None:
-                executor.shutdown(wait=True)
-            if reader is not None:
-                reader.stop()
+            reader.stop()
             stop_event.set()
             worker.join(timeout=10)
         if state['error'] is not None:
@@ -577,71 +517,30 @@ class SubtitleRemover:
         if state['detected'] == 0:
             raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
 
-    def _run_chunk_task(self, c_start, c_end, cur_map, cur_sub, tbar,
-                        model, batch_size, route, motion, write_start):
-        """修复 worker：独立打开视频源顺序读取本块帧并推理，返回待写帧列表
-        （写盘由主线程按块序执行，保证输出帧序与整片路径完全一致）。"""
-        self._tls.is_worker = True
-        reader = _ChunkReader(self.video_path, c_start, c_end)
-        try:
-            return self._process_range(reader, c_start, c_end, cur_map, cur_sub, tbar,
-                                       model, batch_size, route, motion, write_start,
-                                       collect=True)
-        finally:
-            reader.stop()
-
-    def _worker_model(self, model):
-        """修复线程的模型策略：可无参克隆的（LAMA/OpenCV）每线程一份实例实现
-        真并行；不可克隆的（MiniMax/STTN/包装器，显存翻倍或构造需参）共享实例
-        加互斥锁串行化（正确性优先，此时仍有块间读帧/写盘重叠）。
-        返回 (model, needs_lock)。主线程串行路径不克隆也不加锁。"""
-        tls = getattr(self, '_tls', None)  # 测试桩（object.__new__）可能未初始化
-        if tls is None or not getattr(tls, 'is_worker', False):
-            return model, False
-        if isinstance(model, (LamaInpaint, OpenCVInpaint)):
-            cache = getattr(self._tls, 'model_clones', None)
-            if cache is None:
-                cache = self._tls.model_clones = {}
-            key = type(model).__name__
-            if key not in cache:
-                try:
-                    cache[key] = type(model)()
-                except Exception as e:
-                    print(f'[Repair] 模型克隆失败，回退共享实例串行推理: {e}')
-                    cache[key] = model
-            m = cache[key]
-            return m, m is model  # 克隆失败回退共享同实例 → 需要锁
-        return model, True
-
     def _process_range(self, reader, range_start, range_end, start_end_map, sub_list, tbar,
                        model=None, batch_size=None, route=False, motion_scores=None,
-                       write_start=None, collect=False):
+                       write_start=None):
         """处理帧号区间 [range_start, range_end]（1-based 全局帧号）：
 
         区间外的帧直接写原帧；命中区间起点的帧连续读到区间尾，按帧间 bbox 变化
         分组掩膜后修复写出。整片模式下一次覆盖全片；流水线模式下按块调用，
         每块严格读取自己的帧数（不得跨块，否则后续块逐帧错位）。
-        collect=True（修复 worker 并行模式）时不直接写盘，返回待写帧列表（按帧序），
-        由主线程按块序写入；collect=False 顺序路径直接流式写盘。
+        帧直接流式写盘，不积帧。
         """
         if write_start is None:
             write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
-        out_frames = [] if collect else None
         current_frame_index = range_start - 1
         while current_frame_index < range_end:
             ret, frame = reader.read()
             # 如果读取视频帧失败（视频读到最后一帧）
             if not ret:
-                return out_frames
+                return
             current_frame_index += 1
             # 判断当前帧号是不是字幕区间开始, 如果不是，则直接写
             if current_frame_index not in start_end_map.keys():
                 # 段首重叠帧（全局帧号 <= write_start）只作上下文，不写入
                 if current_frame_index > write_start:
-                    if collect:
-                        out_frames.append(frame)
-                    else:
-                        self.video_writer.write(frame)
+                    self.video_writer.write(frame)
                     self.update_progress(tbar, increment=1)
                     self.update_preview_with_comp(frame, frame)
             # 如果是区间开始，则找到尾巴
@@ -674,10 +573,7 @@ class SubtitleRemover:
                         n_write = 0
                         for i, frame in enumerate(frames_g):
                             if g_start + i > write_start:
-                                if collect:
-                                    out_frames.append(frame)
-                                else:
-                                    self.video_writer.write(frame)
+                                self.video_writer.write(frame)
                                 self.update_preview_with_comp(frame, frame)
                                 n_write += 1
                         if n_write:
@@ -704,20 +600,15 @@ class SubtitleRemover:
                         batch_size = max(batch_size, min(len(frames_run), chunk * 4))
                     out_kept = []
                     run_pos = 0
-                    # 修复线程模型策略：可克隆模型（LAMA/OpenCV）每线程一份真并行；
-                    # 不可克隆的（MiniMax/STTN）共享实例互斥串行（正确性优先）
-                    run_model, needs_lock = self._worker_model(model)
-                    lock_ctx = self._shared_model_lock if needs_lock else contextlib.nullcontext()
-                    with lock_ctx:
-                        for batch in batch_generator(frames_run, batch_size):
-                            # 3. 调用批推理
-                            if len(batch) >= 1:
-                                out_kept.extend(run_model(batch, mask))
-                            # 仅统计本批中需要写入的帧（重叠上下文帧不计进度）
-                            n_write = sum(1 for i in kept_idx[run_pos:run_pos + len(batch)] if i >= ctx)
-                            run_pos += len(batch)
-                            if n_write:
-                                self.update_progress(tbar, increment=n_write)
+                    for batch in batch_generator(frames_run, batch_size):
+                        # 3. 调用批推理
+                        if len(batch) >= 1:
+                            out_kept.extend(model(batch, mask))
+                        # 仅统计本批中需要写入的帧（重叠上下文帧不计进度）
+                        n_write = sum(1 for i in kept_idx[run_pos:run_pos + len(batch)] if i >= ctx)
+                        run_pos += len(batch)
+                        if n_write:
+                            self.update_progress(tbar, increment=n_write)
                     # 重建全组输出：推理帧按原位回填，重复帧复用代表帧的修复结果
                     if dup_map:
                         out_full = [None] * len(frames_g)
@@ -733,13 +624,8 @@ class SubtitleRemover:
                     for i, (src, rep) in enumerate(zip(frames_g, out_full)):
                         # 段首重叠帧只作上下文不写入（进度已在上面按写入帧计数）
                         if g_start + i > write_start:
-                            if collect:
-                                out_frames.append(rep)
-                            else:
-                                self.video_writer.write(rep)
+                            self.video_writer.write(rep)
                             self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
-        if collect:
-            return out_frames
 
     def _video_inpaint_whole(self, tbar, model=None, batch_size=None, route=False):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)

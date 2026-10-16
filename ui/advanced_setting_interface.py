@@ -254,14 +254,11 @@ class AdvancedSettingInterface(ScrollArea):
             config.pipelinePrefetchChunks, gui['PipelinePrefetchChunks'],
             gui['PipelinePrefetchChunksDesc'], icon=FluentIcon.UPDATE, parent=card)
 
-        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数 | 修复线程数
-        # （信息类行已抽到「关于」卡：版权·版本 / 关键参数速览 / 项目链接 / 流水线说明）
-        self.repair_workers_row = CompactRangeRow(
-            config.repairWorkers, gui['RepairWorkers'],
-            gui['RepairWorkersDesc'], icon=FluentIcon.PEOPLE, parent=card)
+        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数
+        # （信息类行已抽到「关于」卡：版权·版本 / 关键参数速览 / 项目链接 / 流水线说明；
+        #   修复多线程已移除——2026-10-16 实测并行修复无收益，见 main.py 说明）
         vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.pipeline_chunk_row,
-                                       self.pipeline_prefetch_row, self.repair_workers_row,
-                                       columns=4))
+                                       self.pipeline_prefetch_row, columns=3))
 
         # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
         # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
@@ -336,7 +333,7 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row, self.repair_workers_row,
+                      self.pipeline_prefetch_row,
                       self.update_row, self.theme_row, self.encoder_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
@@ -350,7 +347,7 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row, self.repair_workers_row,
+                      self.pipeline_prefetch_row,
                       self.update_row, self.theme_row, self.encoder_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \

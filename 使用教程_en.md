@@ -136,7 +136,6 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | Hardware acceleration | On | GPU inference toggle |
 | Segment duration (s) | 300 | Videos longer than this are processed in segments; 0 = off. Affects resume granularity and per-segment overhead only (overlap frames cover seams), not quality |
 | Segment overlap frames | 2 (0–10) | Adjacent segments exchange overlap frames as model context (not written to output), removing seam artifacts |
-| Repair workers | 2 (1–4) | Concurrent repair of different chunks. Clonable models (LAMA/OpenCV) run truly in parallel; MiniMax/STTN share one model instance and serialize automatically (only decode/write overlap remains), so >2 gains nothing. Keep 2 |
 | Pipeline chunk frames | 300 (0–5000) | Handoff granularity between detection and repair; 0 = off (detect whole file first). Too large defeats parallelism, too small raises scheduling overhead — keep the default |
 | Pipeline prefetch chunks | 2 (1–5) | How many chunks detection may run ahead of repair: 1 = earliest start, larger = deeper buffer (raise to 3 when repair is much faster than detection). Keep the default |
 | Check updates on startup | On | Online version check |
