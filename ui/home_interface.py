@@ -127,89 +127,6 @@ class _SegmentResult:
     def __init__(self, exitcode: int):
         self.exitcode = exitcode
 
-class PresetComboRow(QFrame):
-    """参数预设行（#5）：动画/真人/电影一键应用，手动微调任一覆盖项 → 自定义。
-
-    应用即逐项 config.set（写盘 config.json），随后刷新主页模型行与设置页
-    各行的显示；预设值存 config/presets.json（用户可编辑，重启生效）。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._applying = False  # 应用期间的覆盖项变更不算「手动微调」
-        self.on_applied = None  # 预设应用后回调（宿主注入：刷新模型行/设置页）
-        self.setAttribute(Qt.WA_StyledBackground)
-        self.setStyleSheet('PresetComboRow { background: transparent; }')
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 7, 14, 7)
-        layout.setSpacing(10)
-
-        icon_widget = _make_icon(FluentIcon.BRUSH, self)
-        if icon_widget is not None:
-            layout.addWidget(icon_widget, 0, Qt.AlignVCenter)
-
-        title = StrongBodyLabel(tr['ParameterPreset']['Title'], self)
-        title.setStyleSheet('font-size: 13px;')
-        layout.addWidget(title, 1)
-
-        self.combo = ComboBox(self)
-        self._ids = ['animation', 'real', 'film', 'custom']
-        self._texts = [tr['ParameterPreset']['Animation'],
-                       tr['ParameterPreset']['Real'],
-                       tr['ParameterPreset']['Film'],
-                       tr['ParameterPreset']['Custom']]
-        self.combo.addItems(self._texts)
-        self.combo.setFixedWidth(150)
-        self.combo.currentIndexChanged.connect(self._on_index)
-        layout.addWidget(self.combo, 0)
-        set_row_tooltip(tr['ParameterPreset']['Desc'], self, title, self.combo)
-
-        # 覆盖项被手动改动（设置页/模型行）→ 预设失效显示自定义
-        from backend.tools.presets import COVERED_ITEMS
-        for item in COVERED_ITEMS:
-            item.valueChanged.connect(self._on_covered_changed)
-
-        self.refresh_preset()
-
-    def refresh_preset(self):
-        """按当前配置实际值匹配预设（启动/应用后调用，不触发应用逻辑）"""
-        from backend.tools.presets import load_presets, match_current
-        pid = match_current(load_presets())
-        if pid in self._ids:
-            self.combo.setCurrentIndex(self._ids.index(pid))
-
-    def _on_index(self, idx):
-        if not (0 <= idx < len(self._ids)) or self._applying:
-            return
-        pid = self._ids[idx]
-        if pid == 'custom':
-            # 用户手动选「自定义」：仅记录，不改参数
-            config.set(config.parameterPreset, 'custom')
-            return
-        from backend.tools.presets import apply_preset, load_presets
-        self._applying = True
-        try:
-            apply_preset(pid, load_presets())
-            config.set(config.parameterPreset, pid)
-        finally:
-            self._applying = False
-        if self.on_applied is not None:
-            self.on_applied()
-        InfoBar.success(
-            title=tr['ParameterPreset']['Title'],
-            content=tr['ParameterPreset']['Applied'].format(self._texts[idx]),
-            parent=self.window(), duration=4000)
-
-    def _on_covered_changed(self, *_):
-        """任一覆盖项被手动改动 → 预设失效为自定义（应用期间的变更除外）"""
-        if self._applying:
-            return
-        if config.parameterPreset.value != 'custom':
-            config.set(config.parameterPreset, 'custom')
-        if self.combo.currentIndex() != self._ids.index('custom'):
-            self.combo.setCurrentIndex(self._ids.index('custom'))
-
 
 class HomeInterface(QWidget):
     progress_signal = Signal(int, bool)
@@ -375,10 +292,6 @@ class HomeInterface(QWidget):
             values=list(config.inpaintMode.validator.options),
             icon=FluentIcon.ROBOT, parent=status_card)
         status_lay.addWidget(self.model_row)
-        # 参数预设行：动画/真人/电影一键应用（跟随模型行同卡展示）
-        self.preset_row = PresetComboRow(status_card)
-        self.preset_row.on_applied = self._refresh_after_preset
-        status_lay.addWidget(self.preset_row)
         right_layout.addWidget(status_card)
 
         # 添加任务列表容器
@@ -422,17 +335,6 @@ class HomeInterface(QWidget):
         main_layout.addLayout(right_layout, 1)
 
         outer_layout.addLayout(main_layout, 1)
-
-    def _refresh_after_preset(self):
-        """预设应用后同步主页模型行与设置页各行的显示（Switch/Combo 行不监听 valueChanged）"""
-        self.model_row.refresh_row()
-        try:
-            from ui.advanced_setting_interface import AdvancedSettingInterface
-            settings = self.window().findChild(AdvancedSettingInterface)
-            if settings is not None:
-                settings.refresh_config_rows()
-        except Exception:
-            pass  # 设置页尚未构建时跳过（构建时会从 config 读当前值）
 
     def _emit_startup_banner(self):
         """启动环境横幅 → 监控标签。

@@ -64,9 +64,6 @@ class Config(QConfig):
     # 【设置inpaint算法】
     inpaintMode = OptionsConfigItem("Main", "InpaintMode", InpaintMode.STTN_AUTO, OptionsValidator(InpaintMode), EnumSerializer(InpaintMode))
 
-    # 参数预设（#5）：animation/real/film/custom；应用预设后手动微调任一覆盖项即回 custom
-    parameterPreset = ConfigItem("Main", "ParameterPreset", "custom")
-    
     subtitleDetectMode =  OptionsConfigItem("Main", "SubtitleDetectMode", SubtitleDetectMode.PP_OCRv5_SERVER, OptionsValidator(SubtitleDetectMode), EnumSerializer(SubtitleDetectMode))
 
     # 【设置视频编码器】auto = 按本机实测探测（NVENC→QSV→AMF→libx264 保底）；
