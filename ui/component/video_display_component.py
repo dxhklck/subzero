@@ -526,8 +526,11 @@ class VideoDisplayComponent(QWidget):
         self._render_frame_b(frame)
 
     def seed_b_from_a(self):
-        """开始处理时用当前 A 框画面预填 B 框：检测阶段（尚无修复帧发来）B 框
-        不再是黑底占位，而是与 A 框相同的画面；worker 的修复帧到达后自然接管。"""
+        """用当前 A 框画面预填 B 框：检测阶段（尚无修复帧发来）B 框
+        不再是黑底占位，而是与 A 框相同的画面；worker 的修复帧到达后自然接管。
+        两个调用时机：点「运行」立即预填（已预览过同视频时秒出画面）；
+        worker 载入任务视频后经 seed_b_signal 再填一次（未预览直接运行的场景，
+        此时 _current_frame 已是当前任务首帧，修复黑窗问题见 home_interface）。"""
         if getattr(self, '_current_frame', None) is not None:
             self.set_b_frame(self._current_frame.copy())
 

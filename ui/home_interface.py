@@ -140,6 +140,7 @@ class HomeInterface(QWidget):
     task_progress_signal = Signal(int, int)  # (task_index, progress)——worker 线程更新任务卡片用
     task_option_signal = Signal(int, object, object)  # (task_index, TaskOptions, value)
     clear_console_signal = Signal(str)  # 新任务开始清空监控（参数=任务名，worker 线程经信号触发）
+    seed_b_signal = Signal()  # worker 载入任务视频后用 A 框首帧预填 B 框（GUI 线程执行）
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("HomeInterface")
@@ -169,6 +170,8 @@ class HomeInterface(QWidget):
         # A/B 同步对比：B 框结果视频源（当前任务的已完成输出）+ 播放定时器
         self.b_video_cap = None
         self._compare_playing = False
+        # B 框实时修复帧是否已到达（到达后源帧预填不再回填，避免把结果帧冲掉）
+        self._b_live_arrived = False
         self._compare_timer = QTimer(self)
         self._compare_timer.timeout.connect(self._compare_tick)
 
@@ -186,6 +189,7 @@ class HomeInterface(QWidget):
         self.console_signal.connect(self.append_console)
         self.clear_console_signal.connect(self._on_new_task_console)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
+        self.seed_b_signal.connect(self._on_seed_b)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
         # 启动环境横幅：绘世式开机信息。监控即终端——每次启动都是全新会话，
@@ -572,6 +576,7 @@ class HomeInterface(QWidget):
             self.b_video_cap = None
         self.video_display_component.play_button.setEnabled(False)
         self.video_display_component.set_b_frame(None)
+        self._b_live_arrived = False
 
     def _toggle_compare_play(self):
         """A/B 同步播放/暂停：从滑块当前位置起，两路源逐帧同步推进"""
@@ -801,6 +806,13 @@ class HomeInterface(QWidget):
 
                             # 选中当前任务
                             self.select_task_signal.emit(self.current_processing_task_index)
+
+                            # B 框预填（经信号在 GUI 线程执行）：上面的 load_video 与
+                            # select_task 链都已把当前任务首帧渲染进 A 框（_current_frame），
+                            # 此刻复制到 B 框——检测阶段（修复帧尚未到达）B 框不再是黑底
+                            # 占位；必须排在本行之前的所有 load_video 之后发送，否则
+                            # 后到的 load_video 内 _close_compare_output 会把 B 框清回占位
+                            self.seed_b_signal.emit()
 
                             with self._video_cap_lock:
                                 if self.video_cap:
@@ -1336,6 +1348,8 @@ class HomeInterface(QWidget):
     def update_preview_with_comp(self, args):
         """处理中实时预览：A 框=源帧（叠加字幕区域矩形），B 框=去字幕结果帧"""
         frame_ori, frame_comp = args
+        # 修复帧已接管 B 框：后续 seed_b_signal 预填直接跳过（_on_seed_b 守卫）
+        self._b_live_arrived = True
         if self.current_processing_task_index >= 0:
             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
             if len(subtitle_areas) > 0:
@@ -1352,6 +1366,14 @@ class HomeInterface(QWidget):
         # contain 适配 + 黑边由显示组件完成（A 框不画选区：矩形已直接画在帧上）
         self.video_display_component.update_video_display(frame_ori, draw_selection=False)
         self.video_display_component.set_dragger_enabled(False)
+
+    @Slot()
+    def _on_seed_b(self):
+        """worker 载入当前任务视频后：用 A 框首帧预填 B 框（GUI 线程执行）。
+        修复帧已到达（_b_live_arrived）则跳过，避免把结果帧冲掉。"""
+        if self._b_live_arrived:
+            return
+        self.video_display_component.seed_b_from_a()
 
     @Slot(object)
     def on_task_error(self, e):
