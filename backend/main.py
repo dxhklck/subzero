@@ -971,6 +971,17 @@ class SubtitleRemover:
         return (xmin < ux1 + margin and xmax > ux0 - margin
                 and ymin < uy1 + margin and ymax > uy0 - margin)
 
+    def _first_pass_crop_rect(self):
+        """第一遍修复区域联合外接框 (x0,y0,x1,y1)，供残留二遍检测裁剪（None=无区域）。
+        与 _overlaps_first_pass 的联合包围盒判定同源——保留的检出框本就落在该带内，
+        裁剪不改变语义；未框选用户（选区=全帧）由此把整片 960 检测缩到字幕带。"""
+        if not self._first_pass_regions:
+            return None
+        return (min(r[0] for r in self._first_pass_regions),
+                min(r[2] for r in self._first_pass_regions),
+                max(r[1] for r in self._first_pass_regions),
+                max(r[3] for r in self._first_pass_regions))
+
     def _residue_second_pass(self, tbar):
         """二遍残留兜底：第一遍修复依赖检测，漏检/欠覆盖的字幕会残留在输出里。
         对第一遍输出（video_temp_file，此时无音频）重跑检测：
@@ -996,9 +1007,12 @@ class SubtitleRemover:
             # box_thresh 0.6→0.3（碎边也能成框）、thresh 0.3→0.2、unclip 1.5→2.0
             # （框外扩约1/3，盖住描边残留）。误检由 _overlaps_first_pass 与
             # 高瘦过滤双保险约束，代价只是对已修复区域多做一次小面积 LAMA。
+            # 检测输入同时裁到第一遍修复区域联合带（+margin，SubtitleDetect 内部加）：
+            # 保留的检出框本就与该带重叠，裁剪不改变语义，未框选用户收益最大
             detector = SubtitleDetect(
                 self.video_temp_file.name, self.sub_areas,
-                det_params={'thresh': 0.2, 'box_thresh': 0.3, 'unclip_ratio': 2.0})
+                det_params={'thresh': 0.2, 'box_thresh': 0.3, 'unclip_ratio': 2.0},
+                crop_rect=self._first_pass_crop_rect())
             sub_list = detector.find_subtitle_frame_no()
         finally:
             config.subtitleDetectProcessSize.value = old_size

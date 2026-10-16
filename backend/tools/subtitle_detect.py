@@ -22,13 +22,25 @@ class SubtitleDetect:
     # 采样间隔，根据视频帧率在 _init_sample_step 中自适应设置
     SAMPLE_STEP = 3
 
-    def __init__(self, video_path, sub_areas=[], det_params=None):
+    # 检测输入裁剪的外扩 margin：需覆盖 DB unclip 外扩（约 0.2~0.4 倍字高）、
+    # 跨界文字与坐标数值噪声；按帧高 1/8 自适应（下限 64px）
+    CROP_MARGIN_MIN = 64
+
+    def __init__(self, video_path, sub_areas=[], det_params=None, crop_rect=None):
         self.video_path = video_path
         self.sub_areas = sub_areas
         # DB 后处理可调参数（thresh/box_thresh/unclip_ratio），None 走模型默认。
         # 残留二遍兜底用更敏感的参数：第一遍修完的残留多为笔画碎边，对比度低、
         # 检测得分低于默认 box_thresh=0.6 门槛，两遍同参数必然同样漏
         self.det_params = det_params or {}
+        # 检测输入裁剪区（原图像素坐标 (x0,y0,x1,y1)，None=不裁剪）：
+        # 显式传入（残留二遍传第一遍修复区域联合带）或缺省由 sub_areas 并集自动推导；
+        # 真正生效前按首帧尺寸加 margin 并钳制（_resolve_crop_rect，惰性解析一次）。
+        # 质量边界见 _resolve_crop_rect 实证结论：框级有 ±18px 差异，掩膜级在
+        # selectionAsMask 开启时逐像素一致，故首遍自动裁剪仅该模式启用
+        self.crop_rect = crop_rect
+        self._active_crop = None
+        self._crop_resolved = False
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
         # 供 AUTO 路由判定区间运动量用，不影响检测结果
         self.frame_diff_scores = {}
@@ -77,6 +89,43 @@ class SubtitleDetect:
     # 因此长边 <= 960 的源始终按实际分辨率检测——预处理缩小是纯画质损失换不来收益
     NATIVE_LONG_SIDE = 960
 
+    def _resolve_crop_rect(self, frame_h, frame_w):
+        """按首帧尺寸确定检测裁剪区（已加 margin 并钳制到帧内）；无需裁剪返回 None。
+
+        ⚠ 实证结论（test2.mp4 真实帧，见 .workbuddy 测试）：
+        检出框级**不等价**——模型输出依赖输入尺寸/上下文，裁剪后检出框有
+        ±2~18px 位移、偶发同一行重组（整帧 1 框 → 裁剪 2 框），且「先裁后缩」
+        「先缩后裁」甚至原生纯切片都如此（非重采样相位问题）。
+        但掩膜级（真正进修复的东西）在 selectionAsMask 开启时**逐像素一致**：
+        掩膜 = 选区 ∪ 检出框，选区矩形主导，框级差异被完全吸收。
+        因此首遍自动裁剪仅在该模式下启用；精确掩膜模式（selectionAsMask 关）
+        的用户要的就是检测精度，回退整帧检测保持逐像素。
+        残留二遍显式传入的联合带裁剪不受此限（兜底清理趟，保留的框本就与
+        第一遍修复带重叠，20px+ 外扩足以吸收边缘位移）。
+        """
+        if not config.detectCropToArea.value:
+            return None
+        rect = self.crop_rect
+        if rect is None:
+            # 自动裁剪（首遍）：仅当选区整片擦除开启时（掩膜由选区主导，
+            # 框级差异被吸收——掩膜级 0 像素差已验证）；精确掩膜模式回退整帧
+            if not self.sub_areas or not config.selectionAsMask.value:
+                return None
+            # SUB_AREAS 口径 (ymin,ymax,xmin,xmax) → 并集转 (x0,y0,x1,y1)
+            rect = (min(int(a[2]) for a in self.sub_areas), min(int(a[0]) for a in self.sub_areas),
+                    max(int(a[3]) for a in self.sub_areas), max(int(a[1]) for a in self.sub_areas))
+        margin = max(self.CROP_MARGIN_MIN, frame_h // 8)
+        x0 = max(0, int(rect[0]) - margin)
+        y0 = max(0, int(rect[1]) - margin)
+        x1 = min(frame_w, int(rect[2]) + margin)
+        y1 = min(frame_h, int(rect[3]) + margin)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        # 两个维度都覆盖≈全帧时裁剪无意义（GUI 未框选时选区=全帧的默认 flow）
+        if (x1 - x0) >= frame_w * 0.98 and (y1 - y0) >= frame_h * 0.98:
+            return None
+        return (x0, y0, x1, y1)
+
     def _prepare_for_detection(self, img):
         """按配置的长边上限等比缩小待检测帧，返回 (缩小后的帧, 坐标还原倍数)。
         倍数为1表示未缩小；检测框坐标需乘该倍数映射回原分辨率。
@@ -111,6 +160,16 @@ class SubtitleDetect:
 
     def detect_subtitle(self, img):
         temp_list = []
+        # 检测输入裁剪（惰性解析一次）：裁到字幕带+margin，检出框加偏移映射回原分辨率
+        if not self._crop_resolved:
+            h, w = img.shape[:2]
+            self._active_crop = self._resolve_crop_rect(h, w)
+            self._crop_resolved = True
+        offset_x = offset_y = 0
+        if self._active_crop is not None:
+            x0, y0, x1, y1 = self._active_crop
+            img = img[y0:y1, x0:x1]
+            offset_x, offset_y = x0, y0
         proc_img, coord_scale = self._prepare_for_detection(img)
         results = self.text_detector.predict(proc_img)
         sub_areas = self.sub_areas
@@ -124,6 +183,10 @@ class SubtitleDetect:
                 # 降采样检测的框映射回原分辨率坐标
                 coordinate_list = [(int(round(xmin * coord_scale)), int(round(xmax * coord_scale)),
                                     int(round(ymin * coord_scale)), int(round(ymax * coord_scale)))
+                                   for xmin, xmax, ymin, ymax in coordinate_list]
+            if offset_x or offset_y:
+                # 裁剪检测的框平移回原分辨率坐标
+                coordinate_list = [(xmin + offset_x, xmax + offset_x, ymin + offset_y, ymax + offset_y)
                                    for xmin, xmax, ymin, ymax in coordinate_list]
             if not coordinate_list:
                 continue

@@ -124,6 +124,13 @@ class Config(QConfig):
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
     residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
+    # 检测输入裁剪：把待检测帧裁到「字幕带 + margin」再送 OCR，检出框映射回原分辨率。
+    # ⚠ 实证（test2.mp4 真实帧）：检出框级不等价（模型输出依赖输入尺寸，裁剪后有
+    # ±2~18px 位移、偶发同行重组），但掩膜级在 selectionAsMask 开启时逐像素一致
+    # （掩膜=选区∪框，选区主导）。故首遍自动裁剪仅在该模式下启用；精确掩膜模式
+    # （selectionAsMask 关）自动抑制。残留二遍裁到第一遍联合带不受此限（兜底趟）。
+    # margin = max(64, 帧高/8) 覆盖 DB unclip 外扩与跨界文字。关闭后全部回退整帧检测
+    detectCropToArea = ConfigItem("Main", "DetectCropToArea", True, BoolValidator())
     # 选区整片擦除：手动框选了字幕区域时，选区整体并入每帧掩膜（检测框 ∪ 选区），
     # 选区内一律视为字幕——不依赖"每个字都被检出"，根治描边/艺术字/淡入淡出的
     # 字形鬼影残留。代价：选区内非字幕的背景也会被重绘（选区画得越大重绘越多）。
