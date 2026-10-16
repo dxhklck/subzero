@@ -201,11 +201,12 @@ class Config(QConfig):
     minimaxNumInferenceSteps = RangeConfigItem("MiniMax", "NumInferenceSteps", 8, RangeValidator(1, 12))
     # 掩膜边界扩张迭代次数：越大残影越少但误伤画面越多；0 = 不扩张
     minimaxIterations = RangeConfigItem("MiniMax", "Iterations", 6, RangeValidator(0, 12))
-    # 处理分辨率上限（宽度像素，0 = 按视频原分辨率推理）。视频宽超过该值时，
-    # 先等比降采样到该宽度推理、输出再放大回原分辨率。高分辨率视频（1080p/4K）
-    # 设 960~1280 可提速 2~9 倍，重建区清晰度略降；480p 视频无影响。
-    # 上限 2160：条带裁剪下只有 4K 宽 mask 透传时条带长边才会到 2160，再大用不上
-    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 0, RangeValidator(0, 2160))
+    # 处理分辨率上限（宽度像素）。视频宽超过该值时，先等比降采样到该宽度推理、
+    # 输出再放大回原分辨率（缩小 INTER_AREA / 放大 INTER_LANCZOS4，画质损失最小）；
+    # 条带宽不超过该值时按原分辨率推理。0 = 恒按原分辨率。
+    # 2026-10-16 实测（1714 宽条带 360 帧）：0=326s / 1280=41s（快8倍）/ 640=8s（快40倍），
+    # 默认 1280 为画质优先平衡点；480p 等窄素材不受影响。
+    minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 1280, RangeValidator(0, 2160))
     # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
     # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
     minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))

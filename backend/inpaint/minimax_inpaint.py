@@ -145,12 +145,12 @@ class MiniMaxInpaint:
             iterations=self.iterations,
         ).frames[0]
 
-        # [0,1] float → uint8 RGB → 原分辨率 → BGR
+        # [0,1] float → uint8 RGB → 原分辨率 → BGR（放大用 Lanczos：细节锐度优于双三次）
         out = []
         for i in range(num):
             frame = (np.clip(result[i], 0, 1) * 255).astype(np.uint8)
             frame = cv2.resize(frame, (frames_bgr[0].shape[1], frames_bgr[0].shape[0]),
-                               interpolation=cv2.INTER_CUBIC)
+                               interpolation=cv2.INTER_LANCZOS4)
             out.append(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
         return out
 
