@@ -37,6 +37,8 @@ class MiniMaxInpaint:
     # （A/B 实测：0.30MP 条带固定61帧比守卫缩到25帧快13%，峰值仅多0.3GB）
     _VRAM_GB_PER_MP = 30.0
     _VRAM_GB_PER_FRAME_MP = 0.005
+    # 自动降档下限：处理宽度低于此值认为无进一步收缩意义（字幕细节已不可辨）
+    _MIN_PROC_W = 256
 
     def __init__(self, device: torch.device,
                  model_dir: str,
@@ -79,7 +81,8 @@ class MiniMaxInpaint:
         实测标定（见类属性 _VRAM_GB_PER_MP）：显存峰值由条带**分辨率**主导、与块大小几乎无关
         （0.30MP 下 25 帧与 61 帧峰值仅差 0.01GB）。因此本守卫在典型字幕条带（≤0.32MP）
         下不收缩配置值——A/B 实测收缩反而慢 13%；仅在条带分辨率本身超出显存预算时介入：
-        边际项超限则收缩帧数，固定项（分辨率）超限则砍帧无益，改发警告提示降处理分辨率。
+        边际项超限则收缩帧数，固定项（分辨率）超限理论上砍帧无益——已由上游
+        _auto_fit_process_size 自动缩宽兜底，此分支仅作双保险保留。
         """
         if not (torch.cuda.is_available() and str(self.device).startswith('cuda')):
             return chunk
@@ -111,6 +114,39 @@ class MiniMaxInpaint:
         print(f'[MiniMax] 条带推理 {proc_w}x{proc_h} ({mp:.2f}MP) x {fitted} 帧/块'
               f'（显存守卫 {chunk} -> {fitted}，剩余 {free_gb:.1f}G）')
         return fitted
+
+    def _auto_fit_process_size(self, H_ori: int, W_ori: int,
+                               proc_h: int, proc_w: int):
+        """显存守卫前置档：推理分辨率本身超预算时按面积反解自动缩宽。
+
+        原逻辑只警告不动作（720p 全帧实测 27.6G > 预算必 OOM）。这里按
+        同一标定（_VRAM_GB_PER_MP）反解预算内最大处理分辨率：等比缩小、
+        16 对齐、宽不低于 _MIN_PROC_W，只缩不增；缩到下限仍放不下返回
+        None（调用方抛出明确错误，不再带着 OOM 风险硬跑）。
+
+        返回 (proc_h, proc_w)；非 CUDA / 查询失败时原样返回（不干预）。
+        """
+        if not (torch.cuda.is_available() and str(self.device).startswith('cuda')):
+            return proc_h, proc_w
+        try:
+            free_b, _ = torch.cuda.mem_get_info()
+        except Exception:
+            return proc_h, proc_w
+        budget = free_b / 1024 ** 3 * 0.85
+        mp = (proc_h * proc_w) / 1e6
+        if mp <= 0 or self._VRAM_GB_PER_MP * mp <= budget:
+            return proc_h, proc_w
+        # 面积比 = max_mp/mp → 线性比开根号（等比缩放保条带宽高比）
+        max_mp = budget / self._VRAM_GB_PER_MP
+        scale = min(1.0, max((max_mp / mp) ** 0.5, self._MIN_PROC_W / max(1, W_ori)))
+        new_w = self._align_16(W_ori * scale)
+        new_h = self._align_16(H_ori * scale)
+        if new_w >= proc_w or new_w < self._MIN_PROC_W:
+            return None  # 已无法再缩
+        print(f'[MiniMax] 显存预算不足：条带 {proc_w}x{proc_h} ({mp:.2f}MP) 预计激活 '
+              f'{self._VRAM_GB_PER_MP * mp:.1f}G / 预算 {budget:.1f}G，'
+              f'处理分辨率自动降至 {new_w}x{new_h}（推理后放大回原尺寸，画质略降）')
+        return new_h, new_w
 
     def _proc_size(self, h: int, w: int) -> Tuple[int, int]:
         """推理分辨率：默认按原分辨率 16 对齐；设置了 process_width 且视频更宽时按宽度等比降采样（对齐 16）"""
@@ -171,6 +207,16 @@ class MiniMaxInpaint:
 
         H_ori, W_ori = input_frames[0].shape[:2]
         proc_h, proc_w = self._proc_size(H_ori, W_ori)
+
+        # 显存守卫①：分辨率本身超预算时自动降档（原先仅警告，720p+ 全帧必 OOM）；
+        # 缩到下限仍放不下则明确报错提示换算法，不再带着 OOM 风险硬跑
+        fitted = self._auto_fit_process_size(H_ori, W_ori, proc_h, proc_w)
+        if fitted is None:
+            raise RuntimeError(
+                f'[MiniMax] 显存不足：条带 {proc_w}x{proc_h} 即使降到最低处理分辨率 '
+                f'（{self._MIN_PROC_W}px 宽）也超出显存预算。请关闭其他占显存的程序、'
+                f'框选更窄的字幕条带，或改用 STTN / LAMA 等更轻的算法')
+        proc_h, proc_w = fitted
 
         # 显存守卫：按实际条带推理分辨率与剩余显存收敛块大小（见 _fit_chunk_to_vram）
         chunk = self._fit_chunk_to_vram(proc_h, proc_w, self.chunk_frames)
