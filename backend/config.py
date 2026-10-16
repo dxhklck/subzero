@@ -184,7 +184,7 @@ class Config(QConfig):
     minimaxProcessWidth = RangeConfigItem("MiniMax", "ProcessWidth", 1280, RangeValidator(0, 2160))
     # 条带裁剪修复：mask bbox 向四周外扩的上下文像素。越大背景参考越充分、耗时越多；
     # 0 = 不外扩（仅修 mask 紧贴范围，不推荐）；条带最小高度固定 160px
-    minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 256))
+    minimaxStripPadding = RangeConfigItem("MiniMax", "StripPadding", 128, RangeValidator(0, 300))
     # 块间重叠帧数：视频按 chunk(4k+1帧) 分块推理，块边界处潜空间不连续可能出现闪烁/接缝；
     # 相邻块重叠这么多帧并线性加权混合可消除接缝；0 = 关闭（省推理时间）
     # 开销：总推理帧数变为 chunk/(chunk-重叠)，81帧块重叠8约多花11%时间
