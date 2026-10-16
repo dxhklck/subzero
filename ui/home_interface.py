@@ -10,7 +10,7 @@ import multiprocessing
 import traceback
 from pathlib import Path
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget,
-                               QPlainTextEdit, QMenu, QFrame)
+                               QPlainTextEdit, QMenu, QFrame, QApplication)
 from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer
 from PySide6.QtGui import QTextCursor, QAction
 from PySide6 import QtWidgets
@@ -139,6 +139,7 @@ class HomeInterface(QWidget):
     task_output_path_signal = Signal(int, str)  # (task_index, output_path)
     task_progress_signal = Signal(int, int)  # (task_index, progress)——worker 线程更新任务卡片用
     task_option_signal = Signal(int, object, object)  # (task_index, TaskOptions, value)
+    task_done_signal = Signal(str, bool)  # (task_name, success) 任务完成/失败提醒（worker 线程经信号回 GUI）
     clear_console_signal = Signal(str)  # 新任务开始清空监控（参数=任务名，worker 线程经信号触发）
     seed_b_signal = Signal()  # worker 载入任务视频后用 A 框首帧预填 B 框（GUI 线程执行）
     def __init__(self, parent=None):
@@ -190,6 +191,7 @@ class HomeInterface(QWidget):
         self.clear_console_signal.connect(self._on_new_task_console)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.seed_b_signal.connect(self._on_seed_b)
+        self.task_done_signal.connect(self._on_task_done)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
         # 启动环境横幅：绘世式开机信息。监控即终端——每次启动都是全新会话，
@@ -787,6 +789,7 @@ class HomeInterface(QWidget):
                             if not self.load_video(task_item.path, keep_compare=True):
                                 self.append_log_signal.emit([tr['SubtitleExtractorGUI']['OpenVideoFailed'].format(task_item.path)])
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
+                                self.task_done_signal.emit(task_item.name, False)
                                 continue
 
                             # 新任务开始：清空监控（监控即终端，每任务全新会话）
@@ -847,8 +850,10 @@ class HomeInterface(QWidget):
                                 # 任务完成, 更新输出路径为只读（经信号在 GUI 线程落库+持久化）
                                 self.task_output_path_signal.emit(self.current_processing_task_index, output_path)
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.COMPLETED)
+                                self.task_done_signal.emit(task_item.name, True)
                             elif task_obj and task_obj.status == TaskStatus.PROCESSING:
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
+                                self.task_done_signal.emit(task_item.name, False)
 
                         except Exception as e:
                             print(e)
@@ -856,6 +861,7 @@ class HomeInterface(QWidget):
                             # 更新任务状态为失败
                             if self.current_processing_task_index >= 0:
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
+                                self.task_done_signal.emit(task_item.name, False)
                             break
                         finally:
                             with self._video_cap_lock:
@@ -1374,6 +1380,24 @@ class HomeInterface(QWidget):
         if self._b_live_arrived:
             return
         self.video_display_component.seed_b_from_a()
+
+    @Slot(str, bool)
+    def _on_task_done(self, name, success):
+        """任务完成/失败提醒（worker 线程经 task_done_signal 回到 GUI 线程执行）。
+
+        窗口不在前台时闪任务栏按钮（QApplication.alert，原生、零侵入）；
+        前台时 InfoBar 本就可见，无需闪灯。config.taskNotify 关则静默。"""
+        if not config.taskNotify.value:
+            return
+        win = self.window()
+        if win is not None and not win.isActiveWindow():
+            QApplication.alert(win)
+        gui = tr['SubtitleExtractorGUI']
+        text = gui['NotifyDoneText' if success else 'NotifyFailText'].format(name)
+        if success:
+            InfoBar.success(title=gui['NotifyTitle'], content=text, parent=win, duration=5000)
+        else:
+            InfoBar.error(title=gui['NotifyTitle'], content=text, parent=win, duration=5000)
 
     @Slot(object)
     def on_task_error(self, e):

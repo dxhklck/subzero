@@ -198,6 +198,9 @@ class Config(QConfig):
     
     # 启动时检查应用更新
     checkUpdateOnStartup = ConfigItem("Main", "CheckUpdateOnStartup", True, BoolValidator())
+    # 任务完成提醒：任务跑完时闪任务栏按钮 + 完成提示条。窗口在前台时
+    # InfoBar 本就可见，闪灯只发生在窗口不在前台时（长任务切走场景），零侵入
+    taskNotify = ConfigItem("Main", "TaskNotify", True, BoolValidator())
 
     # 视频保存目录
     saveDirectory = ConfigItem("Main", "SaveDirectory", "", ConfigValidator())

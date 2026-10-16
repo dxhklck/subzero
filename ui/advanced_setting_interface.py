@@ -191,7 +191,8 @@ class AdvancedSettingInterface(ScrollArea):
         """通用（页面最底部）：并入外观与关于。
         行1：界面语言 | 硬件加速 | 视频分段时长 | 启动检查更新
         行2：应用主题 | 环境自检 | 保存目录（跨两列）
-        行3（末行）：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
+        行3：任务完成提醒
+        行4（末行）：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
         """
         gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
@@ -238,6 +239,12 @@ class AdvancedSettingInterface(ScrollArea):
         self._update_save_dir_display()
         vbox.addWidget(CompactParamRow(self.theme_row, self.env_row,
                                        (self.save_dir_row, 2), columns=4))
+
+        # 任务完成提醒：行（长任务切走窗口后跑完的感知手段）
+        self.notify_row = CompactSwitchRow(
+            config.taskNotify, gui['TaskNotify'], gui['TaskNotifyDesc'],
+            icon=FluentIcon.RINGER, parent=card)
+        vbox.addWidget(CompactParamRow(self.notify_row, columns=4))
 
         # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
         self.segment_overlap_row = CompactRangeRow(
@@ -317,7 +324,8 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.bitrate_row,
                       self.decoder_row,
-                      self.update_row, self.theme_row, self.encoder_row]
+                      self.update_row, self.theme_row, self.encoder_row,
+                      self.notify_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
                     moved_rows)
@@ -330,7 +338,8 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.bitrate_row,
                       self.decoder_row,
-                      self.update_row, self.theme_row, self.encoder_row]
+                      self.update_row, self.theme_row, self.encoder_row,
+                      self.notify_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \
             len(moved_rows)
