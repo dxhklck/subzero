@@ -1088,6 +1088,9 @@ class TaskListComponent(QWidget):
         tl = tr['TaskList']
         menu = QMenu(self)
 
+        # 处理模型：批量设置（覆盖全局默认，参与续跑参数哈希）——置顶
+        self._build_model_submenu(menu, rows)
+
         open_video_location_action = QAction(tl['OpenSourceVideoLocation'], self)
         open_video_location_action.triggered.connect(
             lambda: [self.open_file_location(self.tasks[r].path) for r in rows])
@@ -1097,9 +1100,6 @@ class TaskListComponent(QWidget):
         reset_action.triggered.connect(
             lambda: [self._reset_task(r) for r in rows])
         menu.addAction(reset_action)
-
-        # 处理模型：批量设置（覆盖全局默认，参与续跑参数哈希）
-        self._build_model_submenu(menu, rows)
 
         menu.addSeparator()
         delete_action = QAction(tl['BatchDelete'].format(len(rows)), self)
@@ -1111,6 +1111,9 @@ class TaskListComponent(QWidget):
     def _show_single_menu(self, row, pos):
         """单项右键菜单（原有逻辑，行为不变）"""
         menu = QMenu(self)
+
+        # 处理模型：任务级覆盖全局设置（置顶，最常用入口）
+        self._build_model_submenu(menu, [row])
 
         # 打开视频文件位置
         open_video_location_action = QAction(tr['TaskList']['OpenSourceVideoLocation'], self)
@@ -1137,9 +1140,6 @@ class TaskListComponent(QWidget):
         reset_task_status_action = QAction(tr['TaskList']['ResetTaskStatus'], self)
         reset_task_status_action.triggered.connect(lambda: self._reset_task(row))
         menu.addAction(reset_task_status_action)
-
-        # 处理模型：任务级覆盖全局设置（右键菜单 → 跟随全局 / 各算法）
-        self._build_model_submenu(menu, [row])
 
         # 失败任务：直达错误现场（崩溃报告文件/输出目录）
         if self.tasks[row].status == TaskStatus.FAILED:
