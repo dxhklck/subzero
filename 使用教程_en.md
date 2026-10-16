@@ -101,7 +101,7 @@ Main window: task queue, video preview (letterbox, native aspect ratio with blac
 - **Timing & estimates**: running tasks show "elapsed mm:ss / est. mm:ss" (extrapolated from the task's own speed once progress ≥3%, otherwise from historical speed; `--` when no estimate is possible); pending tasks show "Est. ~mm:ss"; completed/failed tasks show "Took mm:ss". After the first finished task, estimates keep calibrating to your machine.
 - **No-overwrite output**: if the output already exists (e.g. a previous result is still locked), a numbered copy is saved instead (`_no_sub_2.mp4`, `_3`, …) — old results are never overwritten.
 - **Failure triage**: on failure the Monitor tab holds the full traceback; a "崩溃报告_<name>_<timestamp>.txt" (environment + main-process log tail + traceback) is written next to the output; right-click a task → open the output folder.
-- **Subtitle area**: select a task and draw rectangles on the preview (multiple allowed); with no selection the app auto-detects full screen. Areas are stored in original-pixel coordinates and follow task selection.
+- **Subtitle area**: select a task and draw rectangles on the preview (multiple allowed); with no selection the app auto-detects full screen. Areas are stored in original-pixel coordinates and follow task selection. Mask strategy is fully automatic: frame groups with detections follow the detected boxes plus adaptive dilation (8–40 px horizontally, scaled by text height) so the mask tracks the actual subtitle width; a group with no valid detection at all (OCR miss / timeline-expanded segment) falls back to the drawn rectangle — no manual toggle
 - **Time range (AB sections)**: mark ranges on the slider to process only those parts. **Task-level global**: frames outside the range are neither detected nor repainted (passed through as-is); all selection boxes of a task share the same AB sections.
 - **Per-box time range**: with a selection box selected (clicked), press `Alt+[` to set the current frame as its time start, `Alt+]` as its end, `Alt+\` to clear (unset = active for the whole video). Colored time bands for each box appear below the timeline. Different boxes can have different start/end positions; a box's region is not repainted outside its own time window.
 
@@ -120,7 +120,6 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 
 | Algorithm | Traits | Use case |
 |---|---|---|
-| Auto routing (recommended) | Picks per interval by frame difference: LAMA (static, fast) vs MiniMax (motion, quality) | Mixed-content long videos |
 | STTN-auto | Fully automatic, fastest | Batch processing |
 | MiniMax-Remover | Strip-crop inpainting, best quality/speed balance | Motion / anime |
 | LAMA | High quality on static backgrounds | Static scenes / images |
@@ -136,8 +135,6 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | Hardware acceleration | On | GPU inference toggle |
 | Segment duration (s) | 300 | Videos longer than this are processed in segments; 0 = off. Affects resume granularity and per-segment overhead only (overlap frames cover seams), not quality |
 | Segment overlap frames | 2 (0–10) | Adjacent segments exchange overlap frames as model context (not written to output), removing seam artifacts |
-| Pipeline chunk frames | 300 (0–5000) | Handoff granularity between detection and repair; 0 = off (detect whole file first). Too large defeats parallelism, too small raises scheduling overhead — keep the default |
-| Pipeline prefetch chunks | 2 (1–5) | How many chunks detection may run ahead of repair: 1 = earliest start, larger = deeper buffer (raise to 3 when repair is much faster than detection). Keep the default |
 | Check updates on startup | On | Online version check |
 | Save directory | empty | Empty = save next to the input as `<name>_no_sub.mp4` |
 | Environment self-check | — | Checks dependencies and weights; missing items must be fetched manually per this tutorial |
@@ -151,7 +148,6 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | Area deviation pixels | 20 | Expand detected boxes outward to fully cover subtitles |
 | Detection sample step | 0 = smart | OCR every N frames; 0 adapts by frame difference |
 | Detection process size | 720 | Resolution cap for the detection stage (0–960); larger = more accurate, slower |
-| AUTO static threshold | 1 | Frame difference below this routes to LAMA |
 | Residue second pass | On | After the first pass, re-detect leftovers and repair them automatically. The second pass automatically uses more sensitive detection parameters (box threshold 0.6→0.3, box expansion 1.5→2.0, at 960px resolution for an independent catch), so fragment leftovers of outlined/stylized subtitles (common in anime) are detected too; false positives are constrained by requiring overlap with first-pass regions |
 
 **MiniMax-Remover**
@@ -161,8 +157,8 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | MaxLoadNum | 121 (5–121) | Frames fed to the GPU per pass (4k+1); mainly a speed parameter — larger blocks amortize fixed overhead. Little effect on peak VRAM (set by strip resolution); the app auto-checks free VRAM and shrinks if needed |
 | NumInferenceSteps | 8 (1–12) | Diffusion denoise steps. 8 is the sweet spot: 6 is ~2% faster but degrades quality, 12 is ~7.5% slower |
 | Iterations | 6 (0–12) | Refinement iterations per interval |
-| ProcessWidth | 0 = native | Strip processing resolution cap (multiples of 16). 0 = no downsampling; for 4K, 1280–1920 trades quality for speed |
-| StripPadding | 128 (0–256) | Padding above/below the subtitle strip for model context |
+| ProcessWidth | 1280 (0–2160) | Strip processing resolution cap. When strip width exceeds this value, inference runs at the reduced width and the output is upscaled back; narrow strips are unaffected. For 1080p+ keep 1280: measured ~8x faster repair on wide strips with minimal quality loss (Lanczos upscale). 0 = always native resolution |
+| StripPadding | 128 (0–300) | Padding above/below the subtitle strip for model context |
 | BlockOverlap | 8 (0–20) | Overlap frames between blocks to hide seams within long intervals (no cost when a single batch) |
 | VAE fp32 decode | On | Faster when off, but banding may appear in dark areas |
 
@@ -182,7 +178,7 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 
 ### 2.5 Monitor tab (a terminal)
 
-- **The Monitor is a terminal**: all raw output from detection/inpainting streams into the Monitor tab — progress bars refresh in place (never piling up), and `[Route]` routing decisions, `[Residue]` repair logs and tqdm progress are all visible line by line
+- **The Monitor is a terminal**: all raw output from detection/inpainting streams into the Monitor tab — progress bars refresh in place (never piling up), and `[Residue]` repair logs and tqdm progress are all visible line by line
 - Each launch is a fresh session (only the environment banner); starting a new task clears it and scrolls from the top
 - Right-click menu: copy selection / copy all / export to `config/logs/` / clear
 - The "Log" tab is a formatted summary for quick browsing; use "Monitor" for troubleshooting
@@ -203,7 +199,7 @@ python backend/main.py -i <input> [-o <output>] [options...]
 | `-o, --output` | Output path; omitted = next to input as `<name>_no_sub.mp4` (images: `no_sub/` subfolder) |
 | `-c, --subtitle-area-coords` | Subtitle area `ymin,ymax,xmin,xmax` (original pixels; repeatable for multiple areas). **Without it the full frame is scanned** — slower and more error-prone |
 | `--sub-area` | Same semantics (stackable) |
-| `-m, --inpaint-mode` | `sttn-auto` / `minimax` / `lama` / `opencv` / `auto`; omitted = the mode selected in GUI settings (config.json) |
+| `-m, --inpaint-mode` | `sttn-auto` / `minimax` / `lama` / `opencv`; omitted = the mode selected in GUI settings (config.json) |
 | `--time-range` | Range to process in seconds (decimals allowed), e.g. `'10.5-30'` |
 | `--frame-start` / `--frame-end` | 0-based frame range [start, end) for segmented/resumable processing |
 | `--frame-write-start` | 0-based first frame written; earlier frames serve as model context only (segment overlap) |
