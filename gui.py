@@ -81,8 +81,10 @@ class SubtitleExtractorGUI(FluentWindow):
         # self.themeListener = SystemThemeListener(self)
         # self.themeListener.start()
  
-        # 设置窗口图标
-        self.setWindowIcon(QtGui.QIcon("design/subzero.ico"))
+        # 设置窗口图标（绝对路径：快捷方式/启动器的「起始位置」可能不是项目根，
+        # 相对路径会加载失败，任务栏/最小化时回退显示默认 python 图标）
+        self.setWindowIcon(QtGui.QIcon(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'design', 'subzero.ico')))
         self.setWindowTitle(tr['SubtitleExtractorGUI']['Title'] + " v" + VERSION)
         # 创建界面布局
         self._create_layout()
