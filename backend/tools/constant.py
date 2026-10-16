@@ -36,7 +36,8 @@ class EncoderMode(Enum):
 class DecoderMode(Enum):
     """
     视频解码器枚举（值即配置存储值）
-    注意：顺序即 GUI 下拉框与 ini [VideoDecoder] 段的索引序
+    注意：GUI 设置页已不暴露该选项（2026-10-17 撤——auto 即实测最优），
+    固定走 AUTO；枚举与探测逻辑保留供 video_io 内部使用
     """
     AUTO = "auto"   # 实测探测 NVDEC，可用且分辨率 ≥720p 用硬解，否则 CPU 软解
     CUDA = "cuda"   # 强制 NVDEC 硬解（探测失败自动回退 CPU）

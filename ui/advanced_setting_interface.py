@@ -17,7 +17,6 @@ from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon, PushButton,
 from backend.config import (config, tr, VERSION, PROJECT_HOME_URL, PROJECT_UPDATE_URLS,
                            PROJECT_RELEASES_URL, HARDWARD_ACCELERATION_OPTION, BASE_DIR)
 from backend.tools.version_service import VersionService
-from backend.tools.constant import DecoderMode
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all
 from ui.component.compact_rows import (CompactRangeRow, CompactSwitchRow,
@@ -197,8 +196,8 @@ class AdvancedSettingInterface(ScrollArea):
         """通用（页面最底部）：并入外观与关于。
         行1：界面语言 | 硬件加速 | 视频分段时长 | 启动检查更新
         行2：应用主题 | 环境自检 | 保存目录（跨两列）
-        行3：任务完成提醒
-        行4（末行）：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
+        行3（末行）：段间重叠帧数 | 任务完成提醒 | 视频编码器 | 输出码率
+        （视频解码器行 2026-10-17 撤：auto 即实测最优，无可调项）
         """
         gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
@@ -246,12 +245,6 @@ class AdvancedSettingInterface(ScrollArea):
         vbox.addWidget(CompactParamRow(self.theme_row, self.env_row,
                                        (self.save_dir_row, 2), columns=4))
 
-        # 任务完成提醒：行（长任务切走窗口后跑完的感知手段）
-        self.notify_row = CompactSwitchRow(
-            config.taskNotify, gui['TaskNotify'], gui['TaskNotifyDesc'],
-            icon=FluentIcon.RINGER, parent=card)
-        vbox.addWidget(CompactParamRow(self.notify_row, columns=4))
-
         # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
         self.segment_overlap_row = CompactRangeRow(
             config.segmentOverlapFrames, gui['SegmentOverlap'],
@@ -262,14 +255,10 @@ class AdvancedSettingInterface(ScrollArea):
             config.outputBitrate, gui['OutputBitrate'],
             gui['OutputBitrateDesc'], icon=FluentIcon.VIDEO, parent=card)
 
-        # 视频解码器（NVDEC 实验选项）
-        # （TF32 设置项已移除——2026-10-16 实测无收益：LAMA 卷积本走 cudnn TF32
-        #  默认，MiniMax 主体 fp16，开启反而引入数值差）
-        self.decoder_row = CompactComboRow(
-            config.videoDecoder, gui['VideoDecoder'], gui['VideoDecoderDesc'],
-            texts=[tr['VideoDecoder'][k] for k in ('Auto', 'NVDEC', 'CPU')],
-            values=[m.value for m in DecoderMode],
-            icon=FluentIcon.SPEED_MEDIUM, parent=card)
+        # 任务完成提醒：长任务切走窗口后跑完的感知手段（闪任务栏 + 提示条）
+        self.notify_row = CompactSwitchRow(
+            config.taskNotify, gui['TaskNotify'], gui['TaskNotifyDesc'],
+            icon=FluentIcon.RINGER, parent=card)
 
         # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
         # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
@@ -280,10 +269,12 @@ class AdvancedSettingInterface(ScrollArea):
             values=list(config.videoEncoder.validator.options),
             icon=FluentIcon.VIDEO, parent=card)
 
-        # 通用组末行：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
-        # （流水线分块/预取已移除——2026-10-16 实测负优化，代码一并删除；
+        # 通用组末行：段间重叠帧数 | 任务完成提醒 | 视频编码器 | 输出码率
+        # （视频解码器行已撤——2026-10-17 实测 NVDEC 管道比 cv2 软解慢 3 倍，
+        #   auto 即最优，无可调项；任务完成提醒自独立行挪入此空位。
+        #   流水线分块/预取已移除——2026-10-16 实测负优化，代码一并删除；
         #   信息类行见「关于」卡；修复多线程已移除——并行修复无收益）
-        vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.decoder_row,
+        vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.notify_row,
                                        self.encoder_row, self.bitrate_row,
                                        columns=4))
 
@@ -329,7 +320,6 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.bitrate_row,
-                      self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row,
                       self.notify_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
@@ -343,7 +333,6 @@ class AdvancedSettingInterface(ScrollArea):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.bitrate_row,
-                      self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row,
                       self.notify_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \

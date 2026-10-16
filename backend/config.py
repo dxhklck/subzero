@@ -76,10 +76,10 @@ class Config(QConfig):
     # 质量档与码率档二选一；同一编码器家族内两者的体积/画质权衡不同档位自洽
     outputBitrate = RangeConfigItem("Main", "OutputBitrate", 0, RangeValidator(0, 200000))
 
-    # 【视频解码器】auto = CPU 软解（实测数据：ffmpeg 管道 NVDEC 需逐帧转 BGR
-    # + 管道传输，720p H.264 195fps vs cv2 软解 645fps，4K HEVC 21 vs 69fps——
-    # 管道开销远大于硬解收益，而本项目解码从来不是瓶颈）；cuda = 强制 NVDEC
-    # 管道硬解（实验选项，探测失败自动回退软解）；cpu = cv2 软解
+    # 【视频解码器】2026-10-17 起设置页不再暴露该选项（auto 即实测最优、无可调项），
+    # 固定走 AUTO（= CPU 软解；实测数据：ffmpeg 管道 NVDEC 需逐帧转 BGR + 管道传输，
+    # 720p H.264 195fps vs cv2 软解 645fps，4K HEVC 21 vs 69fps——管道开销远大于
+    # 硬解收益，而本项目解码从来不是瓶颈）。cuda/cpu 分支保留供内部与 CLI 使用
     videoDecoder = OptionsConfigItem("Main", "VideoDecoder", DecoderMode.AUTO, OptionsValidator(DecoderMode), EnumSerializer(DecoderMode))
 
     # 【设置像素点偏差】
