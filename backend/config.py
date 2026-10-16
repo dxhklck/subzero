@@ -215,12 +215,6 @@ class Config(QConfig):
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
 
-    # TF32 矩阵加速（Tensor Core，RTX 30/40/50 系支持）：fp32 矩阵乘用 10 位尾数
-    # 替代 23 位，推理提速，但输出可能有细微数值差。默认关——fp32 模型（LAMA）
-    # 收益最明显；MiniMax 主体 fp16 仅 RoPE/VAE 等 fp32 部分受益。开启前请拿
-    # 典型样片人眼抽样确认画质（项目对数值稳定性敏感，RoPE 都保持 fp32）
-    useTF32 = ConfigItem("Main", "UseTF32", False, BoolValidator())
-
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())
     

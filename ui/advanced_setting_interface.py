@@ -269,17 +269,15 @@ class AdvancedSettingInterface(ScrollArea):
                                        self.pipeline_prefetch_row, self.bitrate_row,
                                        columns=4))
 
-        # TF32 矩阵加速（Tensor Core，RTX 30/40/50 系）+ 视频解码器（NVDEC）：
-        # 一行两卡，同属「硬件加速扩展」
-        self.tf32_row = CompactSwitchRow(
-            config.useTF32, gui['UseTF32'],
-            gui['UseTF32Desc'], icon=FluentIcon.SPEED_HIGH, parent=card)
+        # 视频解码器（NVDEC 实验选项）：一行单卡
+        # （TF32 设置项已移除——2026-10-16 实测无收益：LAMA 卷积本走 cudnn TF32
+        #  默认，MiniMax 主体 fp16，开启反而引入数值差）
         self.decoder_row = CompactComboRow(
             config.videoDecoder, gui['VideoDecoder'], gui['VideoDecoderDesc'],
             texts=[tr['VideoDecoder'][k] for k in ('Auto', 'NVDEC', 'CPU')],
             values=[m.value for m in DecoderMode],
             icon=FluentIcon.SPEED_MEDIUM, parent=card)
-        vbox.addWidget(CompactParamRow(self.tf32_row, self.decoder_row, columns=4))
+        vbox.addWidget(CompactParamRow(self.decoder_row, columns=4))
 
         # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
         # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
@@ -355,7 +353,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.bitrate_row,
-                      self.tf32_row, self.decoder_row,
+                      self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
@@ -370,7 +368,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.bitrate_row,
-                      self.tf32_row, self.decoder_row,
+                      self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \

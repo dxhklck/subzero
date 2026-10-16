@@ -4,7 +4,7 @@ import re
 
 import torch
 
-from backend.config import config, tr
+from backend.config import tr
 from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
 
 # cuDNN 自动调优：同一任务内张量形状恒定（LAMA 条带高度只取决于画面宽度、
@@ -12,13 +12,8 @@ from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
 # 每次推理自动选最快算法。数值差异 1e-6 量级（视觉无损）；仅在有 CUDA 时生效，
 # CPU 路径无影响。放在模块级：所有流水线入口（main/检测/STTN）都经此导入
 torch.backends.cudnn.benchmark = True
-
-# TF32 矩阵加速（默认关，设置页开关）：fp32 matmul/cudnn 用 Tensor Core 的
-# 10 位尾数，提速但输出可能有细微数值差。worker 子进程每次启动按 config.json
-# 置位——GUI 内切换后下一个任务生效。对 fp32 模型（LAMA）收益最明显
-if config.useTF32.value:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+# TF32 不另设开关：PyTorch 默认 cudnn.allow_tf32=True（卷积已走 TF32），
+# matmul TF32 实测对本项目无收益（LAMA 输出逐位一致、MiniMax 主体 fp16）。
 
 class HardwareAccelerator:
 
