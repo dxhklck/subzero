@@ -450,11 +450,21 @@ class AdvancedSettingInterface(ScrollArea):
 
     def on_version_info_fetched(self, success, ignore=False):
         if success:
-            # 优先用更新清单里的国内直链（魔搭 version.json）；GitHub API 端点无直链，回退 Releases 页
+            # 主下载源：魔搭 version.json 的 download_url（国内直链，确认按钮直接打开）；
+            # GitHub API 端点无直链，回退 Releases 页
             dl = self.version_manager.get_download_url()
             target = dl or PROJECT_RELEASES_URL
             desc = tr["Setting"]["UpdatesAvailableDesc"].format(self.version_manager.lastest_version)
-            # 清单可带更新说明（网盘提取码等），追加到弹窗正文
+            # 备用下载地址（夸克网盘分享链接，仅魔搭清单提供）：主源挂掉/直链失效时
+            # 用户可复制该地址手动下载；提取码等说明随 backup_note 一并展示
+            backup = self.version_manager.get_backup_url()
+            if backup:
+                line = tr["Setting"]["UpdateBackupLink"].format(backup)
+                backup_note = self.version_manager.get_backup_note()
+                if backup_note:
+                    line += '（' + backup_note + '）'
+                desc += '\n' + line
+            # 清单可带更新说明（主源备注等），追加到弹窗正文
             notes = self.version_manager.get_release_notes()
             if notes:
                 desc += '\n' + notes

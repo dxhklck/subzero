@@ -7,14 +7,18 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode,
 import configparser
 
 # 项目版本号
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 # 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
 PROJECT_HOME_URL = "https://github.com/dxhklck/subzero"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
 PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"
 # 检查更新端点（有序，失败自动切下一个）：国内魔搭清单优先 → GitHub API 兜底
-# 魔搭端点返回 {"tag_name": "v1.2.0", "download_url": "...安装包直链"}，
-# 上传 app/version.json 到 dxhklck/subzero-models 仓库即生效
+# 魔搭端点返回 {"tag_name": "v1.2.0", "download_url": "...安装包直链",
+#              "backup_url": "...备用下载地址", "notes": "...更新说明"}，
+# 上传 app/version.json 到 dxhklck/subzero-models 仓库即生效。
+# 角色划分（2026-10-17 定）：download_url = 魔搭仓库直链（主下载源，国内快）；
+# backup_url = 夸克网盘分享链接（备用，魔搭挂/直链失效时用）；notes 含提取码等；
+# GitHub API 端点仅做版本探测与 Release 页回退（无直链字段）
 PROJECT_UPDATE_URLS = [
     "https://modelscope.cn/models/dxhklck/subzero-models/resolve/master/app/version.json",
     "https://api.github.com/repos/dxhklck/subzero/releases/latest",

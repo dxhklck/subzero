@@ -19,7 +19,10 @@ class VersionService:
         self.api_endpoints = PROJECT_UPDATE_URLS
         # 新版本安装包直链（来自魔搭 version.json 的 download_url；GitHub API 无此字段）
         self.download_url = None
-        # 更新说明（网盘提取码等，随 download_url 一起来自 version.json；弹窗中展示）
+        # 备用下载地址（夸克网盘分享链接等；同样仅魔搭清单提供）
+        self.backup_url = None
+        self.backup_note = None
+        # 更新说明（主源说明/提取码等，随 download_url 一起来自 version.json；弹窗中展示）
         self.release_notes = None
 
     def get_latest_version(self):
@@ -48,8 +51,11 @@ class VersionService:
                     continue  # 如果版本格式不匹配，尝试下一个API
 
                 self.lastest_version = match.group(1)
-                # 国内源清单可带安装包直链与说明（网盘提取码等），GitHub API 无此字段保持 None
+                # 国内源清单可带安装包直链、备用地址与说明（网盘提取码等），
+                # GitHub API 端点无这些字段保持 None（弹窗回退 Releases 页）
                 self.download_url = data.get('download_url') or None
+                self.backup_url = data.get('backup_url') or None
+                self.backup_note = data.get('backup_note') or None
                 self.release_notes = data.get('notes') or None
                 print(tr['VersionService']['VersionInfo'].format(VERSION, self.lastest_version))
                 return self.lastest_version
@@ -68,6 +74,14 @@ class VersionService:
         """更新说明（提取码/备注等），无则 None"""
         return self.release_notes
 
+    def get_backup_url(self):
+        """备用下载地址（夸克网盘等），无则 None"""
+        return self.backup_url
+
+    def get_backup_note(self):
+        """备用地址说明（提取码等），无则 None"""
+        return self.backup_note
+
     def has_new_version(self) -> bool:
         """ check whether there is a new version """
         version = QVersionNumber.fromString(self.get_latest_version())
@@ -84,7 +98,10 @@ class VersionService:
                     enabled, _ = winreg.QueryValueEx(key, 'ProxyEnable')
 
                     if enabled:
-                        return "http://" + winreg.QueryValueEx(key, 'ProxyServer')
+                        # QueryValueEx 返回 (值, 类型) 元组——必须解包，
+                        # 直接拼串会在有系统代理时 TypeError 崩掉整个更新检查
+                        server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                        return "http://" + server
             except OSError:
                 pass
         elif sys.platform == "darwin":
