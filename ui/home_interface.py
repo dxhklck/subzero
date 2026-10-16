@@ -83,8 +83,7 @@ def write_crash_report(video_path, output_path, tb_text):
 
     lines.append('\n[关键配置]')
     for key in ('inpaintMode', 'subtitleDetectMode', 'residueCheck',
-                'segmentSeconds', 'segmentOverlapFrames',
-                'pipelineChunkFrames', 'pipelinePrefetchChunks'):
+                'segmentSeconds', 'segmentOverlapFrames'):
         try:
             lines.append(f'{key}: {getattr(config, key).value}')
         except Exception:

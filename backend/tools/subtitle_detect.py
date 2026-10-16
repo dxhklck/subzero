@@ -51,7 +51,7 @@ class SubtitleDetect:
         # 上一次 find_subtitle_frame_no 中重复帧跳过的次数（日志/测试用）
         self.detect_dup_skipped = 0
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
-        # 供 AUTO 路由判定区间运动量用，不影响检测结果
+        # 供重复帧跳过判定用，不影响检测结果
         self.frame_diff_scores = {}
         self._prev_gray_small = None
         self._init_sample_step()

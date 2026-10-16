@@ -59,7 +59,6 @@ class Config(QConfig):
     - InpaintMode.STTN_AUTO 智能擦除版
     - InpaintMode.STTN_DET 带字幕检测版, 无智能擦除
     - InpaintMode.LAMA 算法：对于动画类视频效果好，速度一般，不可以跳过字幕检测
-    - InpaintMode.AUTO 智能路由：按区间运动量自动选 LAMA（静态）或 MiniMax（运动）
     """
     # 【设置inpaint算法】
     inpaintMode = OptionsConfigItem("Main", "InpaintMode", InpaintMode.STTN_AUTO, OptionsValidator(InpaintMode), EnumSerializer(InpaintMode))
@@ -104,26 +103,6 @@ class Config(QConfig):
     #   （1080p 33ms→19.5ms；本项目测试视频9.5px高小字在640下仍检出无损，但过小有漏检风险）
     # 上限 960：模型内部本就把长边钳到 960，>=960 的任何值结果完全相同，再大没有意义
     subtitleDetectProcessSize = RangeConfigItem("Main", "SubtitleDetectProcessSize", 720, RangeValidator(0, 960))
-    # 智能路由（AUTO模式）静态阈值：区间内采样帧的平均帧差（0-255灰度标度，160px长边灰度图上计算）
-    # 低于该值判为静态画面走 LAMA（0.09s/帧，静态背景≈无损），不低于则走 MiniMax（按MiniMax参数组）
-    # 默认1.0由 test2/test4 实测帧差分布定标（质量优先：只路由铁定静态的区间）；
-    # 想更激进可调大（3.0约一半区间走LAMA，5.0约九成——运动区间用LAMA会糊，按素材质量容忍度权衡）
-    autoRouteStaticThreshold = RangeConfigItem("Main", "AutoRouteStaticThreshold", 1, RangeValidator(0, 10))
-    # 检测/去除流水线（边检测边去除）的区块帧数：
-    #   0 = 关闭流水线（旧行为：全片检测完成后才开始去除）【默认，2026-10-16 定版】
-    #   >0 = 按该帧数切块，检测线程产出一块、去除线程立刻消费一块，两者并行。
-    # 2026-10-16 AB 实测（用户素材）：流水线版反而更慢，默认关闭。原因：
-    #   ① 检测(OCR)与修复同时在 GPU 上跑，互相争抢，修复吞吐下降（修复占大头，净亏）；
-    #   ② 检测线程与主线程各解码一遍视频，CPU 解码翻倍；
-    #   ③ 区间合并从全片全局退化到块内，区间碎片化 → 修复批次变小；
-    #   ④ 修复快于检测时（STTN/OpenCV）流水线退化为「等检测」的纯串行，还多付队列开销。
-    pipelineChunkFrames = RangeConfigItem("Main", "PipelineChunkFrames", 0, RangeValidator(0, 5000))
-    # 流水线预取块数：先检测出这么多块再启动去除（用户定版语义「检测出几块再去除」）。
-    # 1 = 最激进（检测出 1 块就开跑，起步最快但可能逐块起停）；
-    # 2 = 默认（起步与连贯性平衡，生产者最多领先 2 块）；
-    # 更大 = 起步更晚、缓冲更深（检测抖动大/修复极快时可适当调大）。
-    # 仅当 pipelineChunkFrames > 0 时生效；不影响输出（与整片路径逐帧一致）
-    pipelinePrefetchChunks = RangeConfigItem("Main", "PipelinePrefetchChunks", 2, RangeValidator(1, 5))
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修

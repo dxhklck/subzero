@@ -1,5 +1,4 @@
 import gc
-import queue
 import torch
 import shutil
 import traceback
@@ -9,7 +8,6 @@ from pathlib import Path
 import threading
 import cv2
 import sys
-from collections import deque
 from functools import cached_property
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -215,28 +213,6 @@ class SubtitleRemover:
             # 各段共用同一 STTN 模型实例与写通道，顺序调用无缝拼接
             sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar, frame_range=(f0, f1))
 
-    def _route_pick_model(self, start, end, motion_scores):
-        """AUTO路由：按区间帧差均值选算法。静态区间走LAMA（快，静态背景≈无损），
-        运动区间走MiniMax（质量优先）。返回 (model, batch_size)"""
-        scores = [s for f, s in motion_scores.items() if start <= f <= end] if motion_scores else []
-        if scores:
-            avg = sum(scores) / len(scores)
-        else:
-            # 无帧差采样点（区间由合并/时间线扩展产生，运动量未知）：
-            # 按运动处理走 MiniMax——质量优先取向下限，不用 LAMA 赌静态
-            avg = float('inf')
-        threshold = config.autoRouteStaticThreshold.value
-        if avg < threshold:
-            model = self.lama_inpaint
-            batch_size = config.getSttnMaxLoadNum()
-            tag = 'LAMA(静态)'
-        else:
-            model = self.minimax_inpaint
-            batch_size = config.minimaxMaxLoadNum.value
-            tag = 'MiniMax(运动)'
-        self.append_output(f'[Route] 区间 {start}-{end}: 帧差均值 {avg:.2f} (阈值 {threshold}) -> {tag}')
-        return model, batch_size
-
     @staticmethod
     def _bbox_union(boxes):
         return (min(b[0] for b in boxes), max(b[1] for b in boxes),
@@ -366,20 +342,9 @@ class SubtitleRemover:
                 last_gray = gray
         return kept_idx, dup_map
 
-    def video_inpaint(self, tbar, model=None, batch_size=None, route=False):
-        """字幕检测与去除的调度入口。
-
-        pipelineChunkFrames 决定形态：
-        - 0（关闭流水线）：全片检测完成后才开始去除，检测阶段修复资源空转（旧行为，
-          作为兜底路径保留，出问题可一键回退）；
-        - >0：按该帧数切块做流水线——检测线程产出一块，去除线程立刻消费一块，
-          两者并行，整体耗时 ≈ max(检测, 修复) 而非二者之和。
-        """
-        frame_end = self.frame_end if self.frame_end is not None else self.frame_count
-        chunk = int(config.pipelineChunkFrames.value or 0)
-        if chunk <= 0 or (frame_end - self.frame_start) <= chunk:
-            return self._video_inpaint_whole(tbar, model, batch_size, route)
-        return self._video_inpaint_pipelined(tbar, model, batch_size, route, frame_end, chunk)
+    def video_inpaint(self, tbar, model=None, batch_size=None):
+        """字幕检测与去除的调度入口：全片检测完成后按区间修复（整片路径）。"""
+        return self._video_inpaint_whole(tbar, model, batch_size)
 
     def _plan_intervals(self, detector, sub_list, frame_start, range_start, range_end, tbar=None):
         """检测结果 → 「区间起点 -> 区间终点」映射（连续同掩膜 → 时间线外扩 → 短区间合并）。
@@ -443,91 +408,8 @@ class SubtitleRemover:
             out[key] = val
         return out
 
-    def _video_inpaint_pipelined(self, tbar, model, batch_size, route, frame_end, chunk):
-        """边检测边去除：检测线程（生产者）按块产出 interval 计划，
-        主线程（消费者）按块读帧、修复、流式写盘，两者重叠。
-
-        预取深度（用户定版语义）：先检测出 N 块再启动去除，之后消费者持续
-        消费、生产者最多领先 N 块——既不逐块起停浪费算力，也不让修复等太久。
-        跨块字幕区间会被自然切开（各块用本块帧的掩膜），逐帧不重不漏。
-        修复多线程已移除（2026-10-16 实测：LAMA 480p 全片 nw2 对 nw1 零收益；
-        MiniMax/STTN 共享实例锁串行化后仅剩块间解码重叠 ~1%，却要付
-        nw×chunk 帧的内存缓冲代价）——顺序流式写盘是唯一路径，内存最省。
-        """
-        write_start = self.frame_write_start if self.frame_write_start is not None else self.frame_start
-        # 预取深度（块）：先检测出这么多块再启动去除（config.pipelinePrefetchChunks，1-5）
-        depth = max(1, min(5, int(config.pipelinePrefetchChunks.value or 1)))
-        task_queue = queue.Queue(maxsize=depth)
-        stop_event = threading.Event()
-        state = {'detected': 0, 'error': None}
-        # 检测器只在生产者线程内使用（paddle 推理句柄不做跨线程共享）
-        detector = SubtitleDetect(self.video_path, self.sub_areas)
-
-        def producer():
-            try:
-                cursor = self.frame_start + 1
-                while cursor <= frame_end and not stop_event.is_set():
-                    c_end = min(frame_end, cursor + chunk - 1)
-                    _t0 = time.perf_counter()
-                    sub_list = detector.find_subtitle_frame_no(frame_start=cursor - 1,
-                                                               frame_end=c_end, sub_remover=self)
-                    self._collect_first_pass_regions(sub_list)
-                    state['detected'] += len(sub_list)
-                    start_end_map = self._plan_intervals(detector, sub_list, self.frame_start,
-                                                         cursor, c_end, tbar)
-                    self.__dict__.setdefault(
-                        '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
-                    )['detect'] += time.perf_counter() - _t0
-                    motion = dict(detector.frame_diff_scores) if route else None
-                    detector.frame_diff_scores.clear()  # 逐块取走，避免全程累积
-                    task_queue.put((cursor, c_end, start_end_map, sub_list, motion))
-                    cursor = c_end + 1
-            except BaseException as e:  # 异常必须回传主线程，否则消费者会阻塞在 get()
-                state['error'] = e
-            finally:
-                task_queue.put(None)    # 哨兵：无论成败都要放行消费者
-
-        worker = threading.Thread(target=producer, daemon=True)
-        worker.start()
-        self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
-        reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
-        ready = deque()
-        finished = False
-        # 预取：先攒够 depth 块（不足则以生产者结束为准）再开始去除
-        while len(ready) < depth and not finished:
-            item = task_queue.get()
-            if item is None:
-                finished = True
-            else:
-                ready.append(item)
-        try:
-            while True:
-                if state['error'] is not None:
-                    break
-                # 顺序流式路径：直接写盘，不积帧
-                if not ready:
-                    if finished:
-                        break
-                    item = task_queue.get()
-                    if item is None:
-                        finished = True
-                        continue
-                    ready.append(item)
-                    continue
-                c_start, c_end, cur_map, cur_sub, motion = ready.popleft()
-                self._process_range(reader, c_start, c_end, cur_map, cur_sub, tbar,
-                                    model, batch_size, route, motion, write_start)
-        finally:
-            reader.stop()
-            stop_event.set()
-            worker.join(timeout=10)
-        if state['error'] is not None:
-            raise state['error']
-        if state['detected'] == 0:
-            raise Exception(tr['Main']['NoSubtitleDetected'].format(self.video_path))
-
     def _process_range(self, reader, range_start, range_end, start_end_map, sub_list, tbar,
-                       model=None, batch_size=None, route=False, motion_scores=None,
+                       model=None, batch_size=None,
                        write_start=None):
         """处理帧号区间 [range_start, range_end]（1-based 全局帧号）：
 
@@ -605,8 +487,6 @@ class SubtitleRemover:
                             self.update_progress(tbar, increment=n_write)
                         continue
                     mask = create_mask(self.mask_size, g_coords)
-                    if route:
-                        model, batch_size = self._route_pick_model(g_start, g_end, motion_scores)
                     if batch_size is None:
                         batch_size = config.getSttnMaxLoadNum()
                     # 重复帧跳过：与代表帧几乎相同的帧不送推理，修复后直接复用其结果
@@ -654,7 +534,7 @@ class SubtitleRemover:
                             timed_write(rep)
                             self.update_preview_with_comp(np.clip(src+mask[:,:,np.newaxis]*0.3,0,255).astype(np.uint8), rep)
 
-    def _video_inpaint_whole(self, tbar, model=None, batch_size=None, route=False):
+    def _video_inpaint_whole(self, tbar, model=None, batch_size=None):
         sub_detector = SubtitleDetect(self.video_path, self.sub_areas)
         _t0 = time.perf_counter()
         sub_list = sub_detector.find_subtitle_frame_no(sub_remover=self)
@@ -672,8 +552,6 @@ class SubtitleRemover:
         self.__dict__.setdefault(
             '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
         )['detect'] += time.perf_counter() - _t0
-        # AUTO路由需要在删除检测器前取出帧差分数
-        motion_scores = sub_detector.frame_diff_scores if route else None
         del sub_detector
         gc.collect()
         start_end_map = dict()
@@ -692,7 +570,7 @@ class SubtitleRemover:
         # 使用帧预读取，I/O 与推理重叠；段帧数作为预读取上限（读满即停）
         reader = FramePrefetcher(self.video_cap, max_frames=frame_end - self.frame_start)
         self._process_range(reader, self.frame_start + 1, frame_end, start_end_map, sub_list,
-                            tbar, model, batch_size, route, motion_scores, write_start)
+                            tbar, model, batch_size, write_start=write_start)
         reader.stop()
 
     def run(self):
@@ -756,9 +634,6 @@ class SubtitleRemover:
                 self.video_inpaint(tbar, self.lama_inpaint)
             elif config.inpaintMode.value == InpaintMode.MINIMAX:
                 self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
-            elif config.inpaintMode.value == InpaintMode.AUTO:
-                # 智能路由：按区间帧差自动选 LAMA（静态）或 MiniMax（运动）
-                self.video_inpaint(tbar, route=True)
             elif config.inpaintMode.value == InpaintMode.OPENCV:
                 self.video_inpaint(tbar, OpenCVInpaint())
             else:
@@ -994,7 +869,6 @@ class SubtitleRemover:
         ranges = expand_frame_ranges(ranges, config.subtitleTimelineBackwardFrameCount.value,
                                      config.subtitleTimelineForwardFrameCount.value)
         ranges = detector.filter_and_merge_intervals(ranges, config.sttnReferenceLength.value)
-        motion_scores = detector.frame_diff_scores
         del detector
         gc.collect()
         self.append_output(tr['Main']['ResidueCheckFound'].format(len(filtered), len(ranges)))
@@ -1009,10 +883,7 @@ class SubtitleRemover:
                         coords.append(area)
             if not coords:
                 continue
-            if config.inpaintMode.value == InpaintMode.AUTO:
-                model, batch_size = self._route_pick_model(start, end, motion_scores)
-            else:
-                model, batch_size = self.lama_inpaint, config.getSttnMaxLoadNum()
+            model, batch_size = self.lama_inpaint, config.getSttnMaxLoadNum()
             tbar.write(f"[Residue] repairing frames {start}-{end} with {type(model).__name__}")
             cap = open_video_reader(get_readable_path(self.video_temp_file.name))
             cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)

@@ -120,10 +120,11 @@ class AdvancedSettingInterface(ScrollArea):
         r5 = CompactRangeRow(
             config.subtitleAreaDeviationPixel, tr['Setting']['SubtitleAreaDeviationPixel'],
             tr['Setting']['SubtitleAreaDeviationPixelDesc'], icon=FluentIcon.ZOOM_IN, parent=card)
-        r6 = CompactRangeRow(
-            config.autoRouteStaticThreshold, tr['Setting']['AutoRouteStaticThreshold'],
-            tr['Setting']['AutoRouteStaticThresholdDesc'], icon=FluentIcon.SYNC, parent=card)
-        vbox.addWidget(CompactParamRow(r3, r4, r5, r6, columns=4))
+        # 检测批处理：一次送 N 个采样帧给 OCR 摊薄调用固定开销（1=关闭）
+        r7 = CompactRangeRow(
+            config.detectBatchSize, tr['Setting']['DetectBatchSize'],
+            tr['Setting']['DetectBatchSizeDesc'], icon=FluentIcon.SYNC, parent=card)
+        vbox.addWidget(CompactParamRow(r3, r4, r5, r7, columns=4))
         e1 = CompactRangeRow(
             config.subtitleYXAxisDifferencePixel, tr['Setting']['SubtitleYXAxisDifferencePixel'],
             tr['Setting']['SubtitleYXAxisDifferencePixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
@@ -141,12 +142,8 @@ class AdvancedSettingInterface(ScrollArea):
         self.selection_mask_row = CompactSwitchRow(
             config.selectionAsMask, gui['SelectionAsMask'], gui['SelectionAsMaskDesc'],
             icon=FluentIcon.REMOVE_FROM, parent=card)
-        # 检测批处理：一次送 N 个采样帧给 OCR 摊薄调用固定开销（1=关闭）
-        r7 = CompactRangeRow(
-            config.detectBatchSize, tr['Setting']['DetectBatchSize'],
-            tr['Setting']['DetectBatchSizeDesc'], icon=FluentIcon.SYNC, parent=card)
-        vbox.addWidget(CompactParamRow(self.selection_mask_row, r7, columns=4))
-        self.rows_detect = [r1, r2, r3, r4, r5, r6, r7]
+        vbox.addWidget(CompactParamRow((self.selection_mask_row, 2), columns=4))
+        self.rows_detect = [r1, r2, r3, r4, r5, r7]
         self.rows_detect_expert = [e1, e2, e3, e4]
 
     def _build_minimax_group(self):
@@ -197,7 +194,7 @@ class AdvancedSettingInterface(ScrollArea):
         """通用（页面最底部）：并入外观与关于。
         行1：界面语言 | 硬件加速 | 视频分段时长 | 启动检查更新
         行2：应用主题 | 环境自检 | 保存目录（跨两列）
-        行3（末行）：段间重叠帧数 | 项目链接 | 版权·版本（跨两列）
+        行3（末行）：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
         """
         gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
@@ -250,26 +247,12 @@ class AdvancedSettingInterface(ScrollArea):
             config.segmentOverlapFrames, gui['SegmentOverlap'],
             gui['SegmentOverlapDesc'], icon=FluentIcon.LINK, parent=card)
 
-        # 流水线（边检测边去除）：分块帧数 | 预取块数
-        # 0 = 关闭流水线回退旧行为；分块只改变调度、不改变输出（逐帧已验证一致）
-        self.pipeline_chunk_row = CompactRangeRow(
-            config.pipelineChunkFrames, gui['PipelineChunkFrames'],
-            gui['PipelineChunkFramesDesc'], icon=FluentIcon.SPEED_MEDIUM, parent=card)
-        self.pipeline_prefetch_row = CompactRangeRow(
-            config.pipelinePrefetchChunks, gui['PipelinePrefetchChunks'],
-            gui['PipelinePrefetchChunksDesc'], icon=FluentIcon.UPDATE, parent=card)
-
-        # 通用组末行：段间重叠帧数 | 流水线分块帧数 | 流水线预取块数 | 输出码率
-        # （信息类行已抽到「关于」卡：版权·版本 / 关键参数速览 / 项目链接 / 流水线说明；
-        #   修复多线程已移除——2026-10-16 实测并行修复无收益，见 main.py 说明）
+        # 输出码率（kbps）：0 = 按质量档；>0 = 指定 VBR 目标码率
         self.bitrate_row = CompactRangeRow(
             config.outputBitrate, gui['OutputBitrate'],
             gui['OutputBitrateDesc'], icon=FluentIcon.VIDEO, parent=card)
-        vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.pipeline_chunk_row,
-                                       self.pipeline_prefetch_row, self.bitrate_row,
-                                       columns=4))
 
-        # 视频解码器（NVDEC 实验选项）：一行单卡
+        # 视频解码器（NVDEC 实验选项）
         # （TF32 设置项已移除——2026-10-16 实测无收益：LAMA 卷积本走 cudnn TF32
         #  默认，MiniMax 主体 fp16，开启反而引入数值差）
         self.decoder_row = CompactComboRow(
@@ -277,7 +260,6 @@ class AdvancedSettingInterface(ScrollArea):
             texts=[tr['VideoDecoder'][k] for k in ('Auto', 'NVDEC', 'CPU')],
             values=[m.value for m in DecoderMode],
             icon=FluentIcon.SPEED_MEDIUM, parent=card)
-        vbox.addWidget(CompactParamRow(self.decoder_row, columns=4))
 
         # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
         # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
@@ -287,15 +269,19 @@ class AdvancedSettingInterface(ScrollArea):
                    for i, _ in enumerate(config.videoEncoder.validator.options)],
             values=list(config.videoEncoder.validator.options),
             icon=FluentIcon.VIDEO, parent=card)
-        vbox.addWidget(CompactParamRow(self.encoder_row, columns=4))
+
+        # 通用组末行：段间重叠帧数 | 视频解码器 | 视频编码器 | 输出码率
+        # （流水线分块/预取已移除——2026-10-16 实测负优化，代码一并删除；
+        #   信息类行见「关于」卡；修复多线程已移除——并行修复无收益）
+        vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.decoder_row,
+                                       self.encoder_row, self.bitrate_row,
+                                       columns=4))
 
     def _build_about_group(self):
         """关于卡：信息类内容集中展示（从通用组抽出）。
 
-        行1：版权·版本（跨两列）| 关键参数速览（跨两列，实时显示当前生效数值）
-        行2：项目链接（仓库配置后显示）| 流水线说明（跨三列）
+        行1：版权·版本（跨两列）| 项目链接（跨两列，仓库未配置时版权独占整行）
         """
-        gui = tr['SubtitleExtractorGUI']
         st = tr['Setting']
         card, vbox, self._about_header = self._make_group(st['CopyrightTitle'])
 
@@ -304,13 +290,6 @@ class AdvancedSettingInterface(ScrollArea):
             st['CopyrightDesc'].format(VERSION), st['CopyrightDesc'].format(VERSION),
             icon=FluentIcon.MAIL, parent=card)
         self.copyright_row.add_button(st['CopyrightButton'], on_click=lambda: self.check_update())
-
-        # 关键参数速览：当前生效的核心数值直接显示（refresh_config_rows / 恢复默认后刷新）
-        self.about_values_row = CompactActionRow(
-            st['AboutValues'], st['AboutValuesDesc'],
-            icon=FluentIcon.TILES, parent=card)
-        self.about_values_label = self.about_values_row.add_status_label(width=250)
-        self._update_about_values()
 
         # 项目链接（仓库地址配置后才显示）
         self.project_row = None
@@ -321,23 +300,11 @@ class AdvancedSettingInterface(ScrollArea):
             self.project_row.add_button(st['ProjectLinkOpen'],
                                         on_click=lambda: QDesktopServices.openUrl(QUrl(PROJECT_HOME_URL)))
 
-        self.pipeline_info_row = CompactActionRow(
-            gui['PipelineInfo'], gui['PipelineInfoDesc'],
-            icon=FluentIcon.INFO, parent=card)
-
-        vbox.addWidget(CompactParamRow((self.copyright_row, 2), (self.about_values_row, 2),
-                                       columns=4))
         if self.project_row is not None:
-            vbox.addWidget(CompactParamRow(self.project_row, (self.pipeline_info_row, 3),
+            vbox.addWidget(CompactParamRow((self.copyright_row, 2), (self.project_row, 2),
                                            columns=4))
         else:
-            vbox.addWidget(CompactParamRow((self.pipeline_info_row, 4), columns=4))
-
-    def _update_about_values(self):
-        """「关键参数速览」：当前生效的分段/分块/预取/重叠数值（与 config.json 同步）"""
-        self.about_values_label.setText(
-            f"分段 {config.segmentSeconds.value}s · 分块 {config.pipelineChunkFrames.value}帧 · "
-            f"预取 {config.pipelinePrefetchChunks.value}块 · 重叠 {config.segmentOverlapFrames.value}帧")
+            vbox.addWidget(CompactParamRow((self.copyright_row, 4), columns=4))
 
     def _update_save_dir_display(self):
         """保存目录行内显示当前文件夹；整行 tooltip 同步为实际路径"""
@@ -351,8 +318,7 @@ class AdvancedSettingInterface(ScrollArea):
         """刷新全部参数行的显示（外部改配置后调用，如首页应用参数预设）"""
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
-                      self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row, self.bitrate_row,
+                      self.segment_overlap_row, self.bitrate_row,
                       self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
@@ -361,13 +327,11 @@ class AdvancedSettingInterface(ScrollArea):
         for row in all_rows:
             if hasattr(row, 'refresh_row'):
                 row.refresh_row()
-        self._update_about_values()
 
     def _on_restore_defaults(self):
         moved_rows = [self.lang_row, self.detect_model_row,
                       self.residue_row, self.hw_row, self.segment_row,
-                      self.segment_overlap_row, self.pipeline_chunk_row,
-                      self.pipeline_prefetch_row, self.bitrate_row,
+                      self.segment_overlap_row, self.bitrate_row,
                       self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
@@ -387,7 +351,6 @@ class AdvancedSettingInterface(ScrollArea):
         for row in all_rows:
             config.set(row.config_item, row.config_item.defaultValue)
             row.refresh_row()
-        self._update_about_values()
         InfoBar.success(
             tr['Setting']['RestoreDefaultsTitle'],
             tr['Setting']['RestoreDone'].format(total),
