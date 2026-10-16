@@ -32,6 +32,8 @@ def create_mask(size, coords_list):
     mask = np.zeros(size, dtype="uint8")
     if coords_list:
         dev = int(config.subtitleAreaDeviationPixel.value)
+        # 横向附加外扩除数（0=不加；见 config.maskXExpandDivisor 注释）
+        x_div = int(config.maskXExpandDivisor.value)
         for coords in coords_list:
             xmin, xmax, ymin, ymax = coords
             # 坐标必须是整数（cv2.rectangle 不接受 float；选区经比例换算/
@@ -39,11 +41,11 @@ def create_mask(size, coords_list):
             xmin, xmax = int(round(float(xmin))), int(round(float(xmax)))
             ymin, ymax = int(round(float(ymin))), int(round(float(ymax)))
             # 横向自适应外扩：描边/艺术字/斜体的笔画横向超出检测框的比例明显高于
-            # 纵向（实测两端残留的形态），按字高 1/3 附加（下限 8px、上限 40px）；
+            # 纵向（实测两端残留的形态），按字高 ÷ x_div 附加（下限 8px、上限 40px）；
             # 纵向仍用「字幕区域外扩像素」。行合并/同行掩膜已保证框宽为该行最宽帧，
             # 此处只补笔画超出框沿的部分
             h = max(0, ymax - ymin)
-            x_dev = dev + min(40, max(8, h // 3))
+            x_dev = dev + (min(40, max(8, h // x_div)) if x_div > 0 else 0)
             x1 = xmin - x_dev
             if x1 < 0:
                 x1 = 0

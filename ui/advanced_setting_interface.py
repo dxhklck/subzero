@@ -138,9 +138,15 @@ class AdvancedSettingInterface(ScrollArea):
             config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
             tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
         vbox.addWidget(CompactParamRow(e1, e2, e3, e4, columns=4))
+        # 掩膜横向附加外扩：描边/艺术字横向超出检测框的补偿（0=不加）。
+        # 与「检测区域外扩像素」（四周基础外扩）搭配使用，残留重调小、误伤调大
+        r8 = CompactRangeRow(
+            config.maskXExpandDivisor, tr['Setting']['MaskXExpandDivisor'],
+            tr['Setting']['MaskXExpandDivisorDesc'], icon=FluentIcon.FIT_PAGE, parent=card)
+        vbox.addWidget(CompactParamRow(r8, columns=4))
         # 选区语义已改为全自动（掩膜跟随检测框、无检出组回落选区矩形），
         # 原「选区整片擦除」开关随 selectionAsMask 配置一并移除
-        self.rows_detect = [r1, r2, r3, r4, r5, r7]
+        self.rows_detect = [r1, r2, r3, r4, r5, r7, r8]
         self.rows_detect_expert = [e1, e2, e3, e4]
 
     def _build_minimax_group(self):
