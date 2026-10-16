@@ -525,6 +525,12 @@ class VideoDisplayComponent(QWidget):
         self.b_placeholder.setVisible(False)
         self._render_frame_b(frame)
 
+    def seed_b_from_a(self):
+        """开始处理时用当前 A 框画面预填 B 框：检测阶段（尚无修复帧发来）B 框
+        不再是黑底占位，而是与 A 框相同的画面；worker 的修复帧到达后自然接管。"""
+        if getattr(self, '_current_frame', None) is not None:
+            self.set_b_frame(self._current_frame.copy())
+
     def display_to_original(self, x, y):
         """显示坐标（相对 video_display 控件）→ 原图像素坐标。
         orig = (disp - offset) / scale；黑边区域钳制到图像边缘，

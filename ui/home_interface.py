@@ -760,6 +760,9 @@ class HomeInterface(QWidget):
             self._close_compare_output()
             # 切到 A/B 对比布局（处理中实时预览双框显示）
             self.video_display_component.set_compare_mode(True)
+            # B 框预填当前画面：检测阶段（无修复帧）B 框显示与 A 框相同的画面
+            # 而非黑底占位；修复帧到达后由 worker 实时结果自然接管
+            self.video_display_component.seed_b_from_a()
             # 重置监控：速度 EMA 与显存峰值
             self._speed_last = None
             self._speed_ema = 0.0
@@ -944,7 +947,16 @@ class HomeInterface(QWidget):
             sr.add_progress_listener(lambda progress, isFinished: SubtitleRemoverRemoteCall.remote_call_update_progress(queue, progress, isFinished))
             sr.append_output = lambda *args: SubtitleRemoverRemoteCall.remote_call_append_log(queue, args)
             sr.manage_process = lambda pid: SubtitleRemoverRemoteCall.remote_call_manage_process(queue, pid)
-            sr.update_preview_with_comp = lambda *args: SubtitleRemoverRemoteCall.remote_call_update_preview_with_comp(queue, args)
+            # 预览节流：源侧限频约 7fps（0.15s 间隔）。修复帧到达频率远高于人眼
+            # 对预览的需求，逐帧发会白白付出 multiprocessing 队列逐帧 pickle 与
+            # GUI 线程逐帧转换重绘的成本；限频后最新画面最多延迟 0.15s，无感知差异
+            _preview_last = [0.0]
+            def _throttled_preview(*args):
+                now = time.perf_counter()
+                if now - _preview_last[0] >= 0.15:
+                    _preview_last[0] = now
+                    SubtitleRemoverRemoteCall.remote_call_update_preview_with_comp(queue, args)
+            sr.update_preview_with_comp = _throttled_preview
             sr.run()
         except Exception as e:
             # traceback 完整进「监控」标签（pythonw 下 print_exc 落进 None 会静默丢失）

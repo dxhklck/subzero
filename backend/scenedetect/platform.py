@@ -234,7 +234,9 @@ def invoke_command(args: List[str]) -> int:
         CommandTooLong: `args` exceeds built in command line length limit on Windows.
     """
     try:
-        return subprocess.call(args)
+        # Windows 下 GUI 进程（pythonw）调用外部命令不得弹控制台：
+        # 场景切分等子命令统一带 CREATE_NO_WINDOW
+        return subprocess.call(args, creationflags=SUBPROCESS_CREATION_FLAGS)
     except OSError as err:
         if os.name != 'nt':
             raise

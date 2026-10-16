@@ -397,7 +397,9 @@ class AdvancedSettingInterface(ScrollArea):
             if os.path.exists(pythonw):
                 exe = pythonw
         root_dir = os.path.dirname(BASE_DIR)
-        subprocess.Popen([exe, os.path.join(root_dir, 'gui.py')], cwd=root_dir)
+        # CREATE_NO_WINDOW：pythonw 不存在回退 python.exe 时也不闪控制台
+        subprocess.Popen([exe, os.path.join(root_dir, 'gui.py')], cwd=root_dir,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
         QtWidgets.QApplication.quit()
 
     # ---------- 保存目录 / 环境自检 ----------
