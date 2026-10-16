@@ -10,15 +10,60 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QMenu, QAbstractItemView,
                                QTableWidgetItem, QHeaderView, QProgressBar, QLabel, QSizePolicy,
-                               QFileDialog)
+                               QFileDialog, QStyledItemDelegate, QApplication, QStyleOptionViewItem,
+                               QStyle)
 from PySide6.QtCore import Qt, Signal, QModelIndex, QUrl, QTimer, QRect, QPoint
 from qfluentwidgets import TableWidget, BodyLabel, FluentIcon, InfoBar, InfoBarPosition, isDarkTheme, qconfig, MessageBox, ToolButton
-from PySide6.QtGui import QAction, QColor, QBrush, QDragEnterEvent, QDropEvent, QPainter, QPen
+from PySide6.QtGui import (QAction, QColor, QBrush, QDragEnterEvent, QDropEvent, QPainter, QPen,
+                           QFontMetrics, QPalette)
 from showinfm import show_in_file_manager
 
 from backend.config import config, tr
 from backend.tools.common_tools import is_image_file
 from backend.tools.constant import InpaintMode
+
+
+class _ModelTagDelegate(QStyledItemDelegate):
+    """名称列委托：文件名（主文本色）+ 任务级模型标注（品牌青绿）双色绘制。
+
+    QTableWidgetItem 只能整体着色，无法只给后缀变色——故接管第 0 列的文字
+    绘制（背景/选中/悬停态仍交给 QStyle，只自绘文本）：文件名超宽按中段
+    省略，标注始终完整保留并紧跟其后。
+    """
+
+    # 品牌主色：明暗主题下均清晰（净影固定主色，不随主题改）
+    TAG_COLOR = QColor('#1D9E75')
+
+    def paint(self, painter, option, index):
+        name = index.data(Qt.DisplayRole) or ''
+        tag = index.data(Qt.UserRole) or ''
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ''  # 文字自己画，避免与自绘重叠
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        if not name and not tag:
+            return
+
+        fm = QFontMetrics(opt.font)
+        margin = 8
+        rect = opt.rect.adjusted(margin, 0, -margin, 0)
+        tag_w = fm.horizontalAdvance(tag) if tag else 0
+        name_w = max(0, rect.width() - tag_w)
+        elided = fm.elidedText(name, Qt.ElideMiddle, name_w) if name_w > 0 else ''
+
+        painter.save()
+        painter.setFont(opt.font)
+        if elided:
+            painter.setPen(opt.palette.color(QPalette.Text))
+            painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+        if tag:
+            # 标注紧跟文件名实际宽度之后（而非右对齐），视觉上属于同一行文本
+            x = rect.left() + (fm.horizontalAdvance(elided) if elided else 0)
+            painter.setPen(self.TAG_COLOR)
+            painter.drawText(QRect(x, rect.top(), tag_w, rect.height()),
+                             Qt.AlignVCenter | Qt.AlignLeft, tag)
+        painter.restore()
 
 
 def _mode_display(mode_value):
@@ -714,6 +759,8 @@ class TaskListComponent(QWidget):
         # 消歧：仅「无修饰键按下已选中的唯一行」才重排，其余交回 Qt 扫选
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # 名称列双色绘制委托：文件名主色 + 任务级模型标注青绿
+        self.table.setItemDelegateForColumn(0, _ModelTagDelegate(self.table))
 
         # 卡片列表形态（去二维表格感）：隐藏行号列与表头——
         # 列语义由单元格自解释（名称/百分比+状态字），列宽模式仍由 header 配置控制
@@ -837,18 +884,23 @@ class TaskListComponent(QWidget):
         self._refresh_time_label(len(self.tasks) - 1)
 
     def _refresh_model_tag(self, row, task):
-        """刷新名称列的任务级模型标注（指定时在名称后追加显示名）"""
+        """刷新名称列的任务级模型标注。
+
+        文件名保持纯净文本（供省略/复制），标注文本存 UserRole，由
+        _ModelTagDelegate 以品牌青绿双色绘制（表格项无法分段着色）。
+        """
         item0 = self.table.item(row, 0)
         if item0 is None:
             return
+        item0.setText(task.name)
         mode_override = task.options.get(TaskOptions.INPAINT_MODE.value)
         if mode_override:
             display = _mode_display(mode_override)
-            item0.setText(task.name + '　· ' + display)
+            item0.setData(Qt.UserRole, '　· ' + display)
             item0.setToolTip(task.path + '\n'
                              + tr['TaskList']['TaskModelTag'].format(display))
         else:
-            item0.setText(task.name)
+            item0.setData(Qt.UserRole, None)
             item0.setToolTip(task.path)
 
     def set_task_model(self, rows, mode_value):
