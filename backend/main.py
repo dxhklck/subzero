@@ -211,7 +211,12 @@ class SubtitleRemover:
             mask = create_mask(self.mask_size, mask_area_coordinates)
             # frame_range 限定本段读写帧范围（段 ⊆ 全局 AB，段内 ab_sections 门控天然满足）；
             # 各段共用同一 STTN 模型实例与写通道，顺序调用无缝拼接
+            # 阶段计时：本模式无检测（detect=0 即设计）；解码/写盘与推理在
+            # FramePrefetcher 里刻意重叠，统一计入 repair——Timing 行的 repair
+            # 即端到端推理耗时（run() 末尾统一打印，勿在此处打印）
+            _t0 = time.perf_counter()
             sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar, frame_range=(f0, f1))
+            self._phase_times['repair'] += time.perf_counter() - _t0
 
     @staticmethod
     def _bbox_union(boxes):
