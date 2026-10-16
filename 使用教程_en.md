@@ -44,10 +44,8 @@ Notes:
 ### 1.4 Download model weights (manual)
 
 Place the files below under `backend/models/` (item 11 goes to `backend/ffmpeg/win_x64/`).
-Two download sources, identical content:
 
-- ModelScope (fast in China): `https://modelscope.cn/models/dxhklck/subzero-models/resolve/master/models/<repo-relative-path>`
-- GitHub Releases: `https://github.com/dxhklck/subzero/releases` (weights attached to a Release)
+Download source: GitHub Releases `https://github.com/dxhklck/subzero/releases` (weights attached to a Release)
 
 | # | Destination path (under backend/models/) | Size | GitHub Release asset |
 |---|---|---|---|
