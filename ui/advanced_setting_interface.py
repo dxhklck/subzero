@@ -17,6 +17,7 @@ from qfluentwidgets import (ScrollArea, CardWidget, FluentIcon, PushButton,
 from backend.config import (config, tr, VERSION, PROJECT_HOME_URL, PROJECT_UPDATE_URLS,
                            PROJECT_RELEASES_URL, HARDWARD_ACCELERATION_OPTION, BASE_DIR)
 from backend.tools.version_service import VersionService
+from backend.tools.constant import DecoderMode
 from backend.tools.concurrent import TaskExecutor
 from backend.tools.bootstrap import check_all
 from ui.component.compact_rows import (CompactRangeRow, CompactSwitchRow,
@@ -140,8 +141,12 @@ class AdvancedSettingInterface(ScrollArea):
         self.selection_mask_row = CompactSwitchRow(
             config.selectionAsMask, gui['SelectionAsMask'], gui['SelectionAsMaskDesc'],
             icon=FluentIcon.REMOVE_FROM, parent=card)
-        vbox.addWidget(CompactParamRow(self.selection_mask_row, columns=4))
-        self.rows_detect = [r1, r2, r3, r4, r5, r6]
+        # 检测批处理：一次送 N 个采样帧给 OCR 摊薄调用固定开销（1=关闭）
+        r7 = CompactRangeRow(
+            config.detectBatchSize, tr['Setting']['DetectBatchSize'],
+            tr['Setting']['DetectBatchSizeDesc'], icon=FluentIcon.SYNC, parent=card)
+        vbox.addWidget(CompactParamRow(self.selection_mask_row, r7, columns=4))
+        self.rows_detect = [r1, r2, r3, r4, r5, r6, r7]
         self.rows_detect_expert = [e1, e2, e3, e4]
 
     def _build_minimax_group(self):
@@ -259,10 +264,22 @@ class AdvancedSettingInterface(ScrollArea):
         #   修复多线程已移除——2026-10-16 实测并行修复无收益，见 main.py 说明）
         self.bitrate_row = CompactRangeRow(
             config.outputBitrate, gui['OutputBitrate'],
-            gui['OutputBitrateDesc'], icon=FluentIcon.SPEED_HIGH, parent=card)
+            gui['OutputBitrateDesc'], icon=FluentIcon.VIDEO, parent=card)
         vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.pipeline_chunk_row,
                                        self.pipeline_prefetch_row, self.bitrate_row,
                                        columns=4))
+
+        # TF32 矩阵加速（Tensor Core，RTX 30/40/50 系）+ 视频解码器（NVDEC）：
+        # 一行两卡，同属「硬件加速扩展」
+        self.tf32_row = CompactSwitchRow(
+            config.useTF32, gui['UseTF32'],
+            gui['UseTF32Desc'], icon=FluentIcon.SPEED_HIGH, parent=card)
+        self.decoder_row = CompactComboRow(
+            config.videoDecoder, gui['VideoDecoder'], gui['VideoDecoderDesc'],
+            texts=[tr['VideoDecoder'][k] for k in ('Auto', 'NVDEC', 'CPU')],
+            values=[m.value for m in DecoderMode],
+            icon=FluentIcon.SPEED_MEDIUM, parent=card)
+        vbox.addWidget(CompactParamRow(self.tf32_row, self.decoder_row, columns=4))
 
         # 视频编码器：auto 按本机实测探测（NVENC→QSV→AMF→libx264 保底），
         # 实际选中的编码器在处理日志首行输出（用户反馈排查用）
@@ -338,6 +355,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.bitrate_row,
+                      self.tf32_row, self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         all_rows = (self.rows_detect + self.rows_detect_expert +
                     self.rows_minimax + self.rows_minimax_expert + self.rows_sttn +
@@ -352,6 +370,7 @@ class AdvancedSettingInterface(ScrollArea):
                       self.residue_row, self.hw_row, self.segment_row,
                       self.segment_overlap_row, self.pipeline_chunk_row,
                       self.pipeline_prefetch_row, self.bitrate_row,
+                      self.tf32_row, self.decoder_row,
                       self.update_row, self.theme_row, self.encoder_row]
         total = len(self.rows_detect) + len(self.rows_detect_expert) + \
             len(self.rows_minimax) + len(self.rows_minimax_expert) + len(self.rows_sttn) + \

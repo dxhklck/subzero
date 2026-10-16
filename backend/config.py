@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from qfluentwidgets import (qconfig, ConfigItem, QConfig, OptionsValidator, BoolValidator, OptionsConfigItem, 
                             EnumSerializer, RangeValidator, RangeConfigItem, ConfigValidator)
-from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode
+from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode, DecoderMode
 import configparser
 
 # 项目版本号
@@ -77,6 +77,12 @@ class Config(QConfig):
     # 质量档与码率档二选一；同一编码器家族内两者的体积/画质权衡不同档位自洽
     outputBitrate = RangeConfigItem("Main", "OutputBitrate", 0, RangeValidator(0, 200000))
 
+    # 【视频解码器】auto = CPU 软解（实测数据：ffmpeg 管道 NVDEC 需逐帧转 BGR
+    # + 管道传输，720p H.264 195fps vs cv2 软解 645fps，4K HEVC 21 vs 69fps——
+    # 管道开销远大于硬解收益，而本项目解码从来不是瓶颈）；cuda = 强制 NVDEC
+    # 管道硬解（实验选项，探测失败自动回退软解）；cpu = cv2 软解
+    videoDecoder = OptionsConfigItem("Main", "VideoDecoder", DecoderMode.AUTO, OptionsValidator(DecoderMode), EnumSerializer(DecoderMode))
+
     # 【设置像素点偏差】
     # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)
     subtitleYXAxisDifferencePixel = RangeConfigItem("Main", "SubtitleYXAxisDifferencePixel", 10, RangeValidator(0, 100))
@@ -127,6 +133,10 @@ class Config(QConfig):
     # （selectionAsMask 关）自动抑制。残留二遍裁到第一遍联合带不受此限（兜底趟）。
     # margin = max(64, 帧高/8) 覆盖 DB unclip 外扩与跨界文字。关闭后全部回退整帧检测
     detectCropToArea = ConfigItem("Main", "DetectCropToArea", True, BoolValidator())
+
+    # 检测批处理：一次送 N 个采样帧给 OCR，摊薄 paddle 每次调用的固定开销
+    # （前置/后处理管线启动）。1 = 关闭（逐帧检测）。批内结果与逐帧逐位一致
+    detectBatchSize = RangeConfigItem("Main", "DetectBatchSize", 4, RangeValidator(1, 16))
     # 选区整片擦除：手动框选了字幕区域时，选区整体并入每帧掩膜（检测框 ∪ 选区），
     # 选区内一律视为字幕——不依赖"每个字都被检出"，根治描边/艺术字/淡入淡出的
     # 字形鬼影残留。代价：选区内非字幕的背景也会被重绘（选区画得越大重绘越多）。
@@ -204,6 +214,12 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
+
+    # TF32 矩阵加速（Tensor Core，RTX 30/40/50 系支持）：fp32 矩阵乘用 10 位尾数
+    # 替代 23 位，推理提速，但输出可能有细微数值差。默认关——fp32 模型（LAMA）
+    # 收益最明显；MiniMax 主体 fp16 仅 RoPE/VAE 等 fp32 部分受益。开启前请拿
+    # 典型样片人眼抽样确认画质（项目对数值稳定性敏感，RoPE 都保持 fp32）
+    useTF32 = ConfigItem("Main", "UseTF32", False, BoolValidator())
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())

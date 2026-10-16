@@ -29,7 +29,7 @@ from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
-from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter, resolve_h264_encoder
+from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter, resolve_h264_encoder, open_video_reader
 from backend.tools.constant import EncoderMode
 import tempfile
 import multiprocessing
@@ -54,7 +54,7 @@ class SubtitleRemover:
         self.is_picture = is_image_file(str(vd_path))
         # 视频路径
         self.video_path = vd_path
-        self.video_cap = cv2.VideoCapture(get_readable_path(vd_path))
+        self.video_cap = open_video_reader(get_readable_path(vd_path))
         # 通过视频路径获取视频名称
         self.vd_name = Path(self.video_path).stem
         # 视频帧总数
@@ -1014,7 +1014,7 @@ class SubtitleRemover:
             else:
                 model, batch_size = self.lama_inpaint, config.getSttnMaxLoadNum()
             tbar.write(f"[Residue] repairing frames {start}-{end} with {type(model).__name__}")
-            cap = cv2.VideoCapture(get_readable_path(self.video_temp_file.name))
+            cap = open_video_reader(get_readable_path(self.video_temp_file.name))
             cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)
             frames = []
             for _ in range(end - start + 1):
@@ -1044,7 +1044,7 @@ class SubtitleRemover:
         except Exception:
             writer = cv2.VideoWriter(get_readable_path(new_temp.name), cv2.VideoWriter_fourcc(*'mp4v'),
                                      self.fps, self.size)
-        cap = cv2.VideoCapture(get_readable_path(self.video_temp_file.name))
+        cap = open_video_reader(get_readable_path(self.video_temp_file.name))
         n_repaired = len(repaired)
         fno = 0
         while True:

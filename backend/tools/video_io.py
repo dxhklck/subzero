@@ -11,6 +11,167 @@ from .video_encoder import resolve_h264_encoder, encoder_params
 from .common_tools import SUBPROCESS_CREATION_FLAGS
 
 
+class FFmpegFrameReader:
+    """NVDEC 硬解读取器：ffmpeg -hwaccel cuda 解码输出 rawvideo bgr24 管道。
+
+    接口兼容本项目对 cv2.VideoCapture 的使用面（read/grab/release/isOpened/
+    get/set）。与软解的关键差异：
+    - 帧已在管道中解码，grab() 与 read() 都必须取走一帧（grab 丢弃内容），
+      否则后续帧错位——「跳帧」省不掉解码，只省掉调用方拿到帧的拷贝；
+    - set(CAP_PROP_POS_FRAMES, n) 通过 -ss（解码到目标时间戳再输出）重开管道，
+      下一帧即 0-based 第 n 帧；n 等于当前位置时为 no-op；
+    - 元数据（帧数/尺寸/帧率）用 cv2 只解析容器头获得，不启动解码管道。
+    提前 EOF（解码中途死掉）时打 stderr 摘要，避免静默截断输出。
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.ffmpeg = FFmpegCLI.instance().ffmpeg_path
+        meta_cap = cv2.VideoCapture(path)
+        self._meta = {
+            cv2.CAP_PROP_FRAME_COUNT: meta_cap.get(cv2.CAP_PROP_FRAME_COUNT),
+            cv2.CAP_PROP_FRAME_WIDTH: meta_cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+            cv2.CAP_PROP_FRAME_HEIGHT: meta_cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+            cv2.CAP_PROP_FPS: meta_cap.get(cv2.CAP_PROP_FPS),
+        }
+        meta_cap.release()
+        self._w = int(self._meta[cv2.CAP_PROP_FRAME_WIDTH])
+        self._h = int(self._meta[cv2.CAP_PROP_FRAME_HEIGHT])
+        self._fps = self._meta[cv2.CAP_PROP_FPS] or 25.0
+        if self._w <= 0 or self._h <= 0:
+            raise ValueError(f'invalid video dimensions {self._w}x{self._h}: {path}')
+        self._proc = None
+        self._stderr = b''
+        self._pos = 0
+        self._open(0)
+
+    def _open(self, start_frame):
+        self._stop()
+        cmd = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-hwaccel', 'cuda']
+        if start_frame > 0:
+            # -ss 在 -i 前：定位关键帧后解码丢弃至目标时间戳，输出精确从该帧开始
+            cmd += ['-ss', f'{start_frame / self._fps:.6f}']
+        cmd += ['-i', self.path, '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-']
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      creationflags=SUBPROCESS_CREATION_FLAGS)
+        self._pos = start_frame
+
+    def _stop(self):
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            try:
+                _, err = self._proc.communicate(timeout=5)
+                if err:
+                    self._stderr = err
+            except Exception:
+                pass
+            self._proc = None
+
+    def _frame_bytes(self):
+        need = self._w * self._h * 3
+        buf = bytearray()
+        out = self._proc.stdout
+        while len(buf) < need:
+            chunk = out.read(need - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return np.frombuffer(bytes(buf), np.uint8).reshape(self._h, self._w, 3)
+
+    def isOpened(self):
+        return self._proc is not None
+
+    def read(self):
+        if self._proc is None:
+            return False, None
+        frame = self._frame_bytes()
+        if frame is None:
+            self._warn_truncated()
+            self._stop()
+            return False, None
+        self._pos += 1
+        return True, frame.copy()  # frombuffer 只读，调用方可能就地修改
+
+    def grab(self):
+        if self._proc is None:
+            return False
+        frame = self._frame_bytes()
+        if frame is None:
+            self._warn_truncated()
+            self._stop()
+            return False
+        self._pos += 1
+        return True
+
+    def _warn_truncated(self):
+        if self._pos < self._meta[cv2.CAP_PROP_FRAME_COUNT] and self._stderr:
+            print(f'[Decoder] NVDEC 提前结束于帧 {self._pos}: '
+                  f'{self._stderr[-200:].decode("utf-8", "replace")}')
+
+    def get(self, propId):
+        if propId == cv2.CAP_PROP_POS_FRAMES:
+            return float(self._pos)
+        return self._meta.get(propId, 0.0)
+
+    def set(self, propId, value):
+        if propId != cv2.CAP_PROP_POS_FRAMES:
+            return False
+        target = int(value)
+        if target == self._pos:
+            return True
+        try:
+            self._open(max(0, target))
+            return True
+        except Exception:
+            return False
+
+    def release(self):
+        self._stop()
+
+
+def nvdec_available(path, width=0):
+    """用与正式运行相同的方式实测解码 4 帧判断 NVDEC 可用性（每文件缓存）。"""
+    key = (path, os.path.getmtime(path) if os.path.exists(path) else 0)
+    cached = nvdec_available.__dict__.setdefault('_cache', {})
+    if key in cached:
+        return cached[key]
+    ffmpeg = FFmpegCLI.instance().ffmpeg_path
+    cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-hwaccel', 'cuda',
+           '-i', path, '-frames:v', '4', '-f', 'null', '-']
+    try:
+        r = subprocess.run(cmd, capture_output=True, creationflags=SUBPROCESS_CREATION_FLAGS,
+                           timeout=60)
+        ok = (r.returncode == 0)
+    except Exception:
+        ok = False
+    cached[key] = ok
+    return ok
+
+
+def open_video_reader(path):
+    """按 VideoDecoder 配置返回视频读取器（NVDEC 管道或 cv2 软解）。
+
+    实测数据（RTX 4070 Ti SUPER）：ffmpeg 管道 NVDEC 需逐帧 BGR 转换+管道
+    传输，720p H.264 约195fps、4K HEVC 约21fps，均慢于 cv2 软解（645/69fps）
+    ——解码在本项目从来不是瓶颈（OCR ~40fps、修复 ~1s/帧）。
+    因此 auto 选 CPU 软解；cuda 为实验选项（强制硬解，探测失败自动回退）。
+    """
+    from backend.config import config
+    mode = getattr(config.videoDecoder.value, 'value', config.videoDecoder.value)
+    if mode == 'cuda':
+        if nvdec_available(path):
+            try:
+                return FFmpegFrameReader(path)
+            except Exception as e:
+                print(f'[Decoder] NVDEC 启动失败，回退 CPU 软解: {e}')
+        else:
+            print('[Decoder] 配置为 cuda 但本机 NVDEC 探测失败，回退 CPU 软解')
+    return cv2.VideoCapture(path)
+
+
 class FramePrefetcher:
     """
     后台线程预解码视频帧，使 I/O 与模型推理重叠。

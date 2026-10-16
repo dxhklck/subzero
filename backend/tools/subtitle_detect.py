@@ -13,6 +13,7 @@ from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
 from backend.tools.inpaint_tools import is_frame_number_in_ab_sections, area_active_at
+from backend.tools.video_io import open_video_reader
 
 # 检测重复帧跳过阈值：相邻采样帧 160px 长边灰度均值差（0-255 标度）低于该值时，
 # 复用上一采样帧的 OCR 检出（相同像素 → 相同检测结果，零画质影响）。
@@ -167,31 +168,42 @@ class SubtitleDetect:
         self._prev_gray_small = small
 
     def detect_subtitle(self, img, frame_no=None):
-        temp_list = []
-        # 检测输入裁剪（惰性解析一次）：裁到字幕带+margin，检出框加偏移映射回原分辨率
-        if not self._crop_resolved:
-            h, w = img.shape[:2]
-            self._active_crop = self._resolve_crop_rect(h, w)
-            self._crop_resolved = True
-        offset_x = offset_y = 0
-        if self._active_crop is not None:
-            x0, y0, x1, y1 = self._active_crop
-            img = img[y0:y1, x0:x1]
-            offset_x, offset_y = x0, y0
-        proc_img, coord_scale = self._prepare_for_detection(img)
-        results = self.text_detector.predict(proc_img)
-        sub_areas = self.sub_areas
-        has_areas = sub_areas is not None and len(sub_areas) > 0
-        if has_areas:
-            # 选框时间过滤：6 元组选框 (…,t0,t1) 只在 [t0,t1) 帧内生效（无时间=全程；
-            # 帧号口径与 AB 区块一致）。该帧所有选框都不在时间窗内 → 不送检测、无检出
-            #（⇒ 带时间选框的场景里，窗外帧整帧跳过 OCR，检测随之提速）
-            active_areas = [a for a in sub_areas if area_active_at(a, frame_no)]
-            if len(active_areas) == 0:
-                return temp_list
-        else:
-            active_areas = sub_areas
-        for res in results:
+        return self.detect_subtitle_batch([(img, frame_no)])[0]
+
+    def detect_subtitle_batch(self, items):
+        """批量检测：items 为 [(img, frame_no), ...]，返回与输入同序的检出列表。
+
+        裁剪/缩放逐帧做（<1ms），OCR 一次送整批，摊薄 paddle 每次调用的
+        固定开销（前置/后处理管线启动）；框后处理（坐标还原/选区包含/
+        时间窗过滤）与单帧路径逐位一致。某帧全部选框都不在时间窗内时
+        跳过其 OCR 输入（无检出，与单帧路径的提前返回等价）。
+        """
+        temp_lists = [[] for _ in items]
+        if not items:
+            return temp_lists
+        prepared = []  # (输入序号, 处理图, 坐标还原倍数, offset_x, offset_y)
+        for idx, (img, frame_no) in enumerate(items):
+            if not self._crop_resolved:
+                h, w = img.shape[:2]
+                self._active_crop = self._resolve_crop_rect(h, w)
+                self._crop_resolved = True
+            if self.sub_areas and not any(area_active_at(a, frame_no) for a in self.sub_areas):
+                continue  # 该帧所有选框都不在时间窗内：无检出
+            offset_x = offset_y = 0
+            if self._active_crop is not None:
+                x0, y0, x1, y1 = self._active_crop
+                img = img[y0:y1, x0:x1]
+                offset_x, offset_y = x0, y0
+            proc_img, coord_scale = self._prepare_for_detection(img)
+            prepared.append((idx, proc_img, coord_scale, offset_x, offset_y))
+        if not prepared:
+            return temp_lists
+        results_list = self.text_detector.predict([p[1] for p in prepared])
+        for (idx, _img, coord_scale, offset_x, offset_y), res in zip(prepared, results_list):
+            frame_no = items[idx][1]
+            sub_areas = self.sub_areas
+            active_areas = ([a for a in sub_areas if area_active_at(a, frame_no)]
+                            if sub_areas else sub_areas)
             dt_polys = res['dt_polys']
             if dt_polys is None or len(dt_polys) == 0:
                 continue
@@ -207,22 +219,22 @@ class SubtitleDetect:
                                    for xmin, xmax, ymin, ymax in coordinate_list]
             if not coordinate_list:
                 continue
-            if not has_areas:
-                temp_list.extend(coordinate_list)
+            if not sub_areas:
+                temp_lists[idx].extend(coordinate_list)
             elif len(active_areas) == 1:
                 # 单区域快速路径（最常见场景）
                 s_ymin, s_ymax, s_xmin, s_xmax = active_areas[0][:4]
                 for xmin, xmax, ymin, ymax in coordinate_list:
                     if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                        temp_list.append((xmin, xmax, ymin, ymax))
+                        temp_lists[idx].append((xmin, xmax, ymin, ymax))
             else:
                 for xmin, xmax, ymin, ymax in coordinate_list:
                     for s_area in active_areas:
                         s_ymin, s_ymax, s_xmin, s_xmax = s_area[:4]
                         if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                            temp_list.append((xmin, xmax, ymin, ymax))
+                            temp_lists[idx].append((xmin, xmax, ymin, ymax))
                             break
-        return temp_list
+        return temp_lists
 
     def find_subtitle_frame_no(self, sub_remover=None, frame_start=None, frame_end=None):
         """采样检测帧窗口内的字幕。
@@ -231,7 +243,7 @@ class SubtitleDetect:
         未指定时沿用 sub_remover.frame_start/frame_end（原行为）。
         帧号体系：窗口为 1-based 的 (frame_start, frame_end]。
         """
-        video_cap = cv2.VideoCapture(get_readable_path(self.video_path))
+        video_cap = open_video_reader(get_readable_path(self.video_path))
         frame_count = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
         # 分段帧范围（与 SubtitleRemover.frame_start/frame_end 对齐）：
         # 检测只在段范围内进行，帧号保持全局绝对值（掩膜/路由按全局帧号一致）
@@ -253,8 +265,39 @@ class SubtitleDetect:
         sampled_results = {}  # frame_no -> temp_list
         prev_list = None      # 上一采样帧的检出（重复帧复用）
         dup_skipped = 0       # 重复帧跳过 OCR 的次数
+        # 检测批处理：攒批送 OCR 摊薄每次调用固定开销（1=关闭，逐帧检测）。
+        # 重复帧跳过的语义保持不变：批内相邻重复帧不再重复送 OCR，
+        # 待批检出出来后按链（dup_f -> src_f）回填——源帧与重复帧像素几乎
+        # 相同，检出必然相同
+        batch_size = max(1, int(getattr(config, 'detectBatchSize', None) and
+                                config.detectBatchSize.value or 1))
+        pending = []   # [(frame_no, frame)] 待批采样帧
+        dup_src = {}   # dup_frame_no -> src_frame_no（批内重复帧的复用来源）
         if sub_remover:
             sub_remover.append_output(tr['Main']['ProcessingStartFindingSubtitles'])
+
+        def flush_batch():
+            """把 pending 批送 OCR，回填批内重复帧，更新 prev_list/sampled_results。"""
+            nonlocal prev_list, dup_skipped
+            if not pending:
+                return
+            det = {}
+            lists = self.detect_subtitle_batch([(fr, f) for f, fr in pending])
+            for (f, _), lst in zip(pending, lists):
+                det[f] = lst
+                if lst:
+                    sampled_results[f] = lst
+            for dup_f, src_f in dup_src.items():
+                lst = det.get(src_f, [])
+                if lst:
+                    sampled_results[dup_f] = lst
+                det[dup_f] = lst
+                dup_skipped += 1
+            last_no = pending[-1][0]
+            prev_list = det.get(last_no, [])
+            pending.clear()
+            dup_src.clear()
+
         while video_cap.isOpened() and current_frame_no < frame_end:
             # current_frame_no 即下一帧的0-based序号；采样条件与原逻辑 (1-based序号-1)%step==0 等价
             in_ab_section = is_frame_number_in_ab_sections(current_frame_no, sub_remover.ab_sections) if sub_remover else True
@@ -267,19 +310,31 @@ class SubtitleDetect:
                 current_frame_no += 1
                 self._update_frame_diff(current_frame_no, frame)
                 # 重复帧跳过：与上一采样帧几乎相同（160px 长边灰度均值差 < 阈值，
-                # 约等于压缩噪声上限）时 OCR 结果必然相同，直接复用上一采样帧的
-                # 检出，省一次检测推理——相同像素 → 相同检测，零画质影响。
-                # 静止画面/录屏/定格场景成片命中；真实运动（字幕动画/镜头晃动/
-                # 胶片颗粒）帧差通常 > 3，不会误跳。置 DETECT_DUP_THRESHOLD=0 禁用
+                # 约等于压缩噪声上限）时 OCR 结果必然相同——上一采样帧若已在
+                # 批内，则登记复用链（dup -> 源帧），批检出后回填；上一帧已
+                # 处理完则直接复用其检出。相同像素 → 相同检测，零画质影响
                 diff = self.frame_diff_scores.get(current_frame_no)
-                if prev_list is not None and diff is not None and diff < DETECT_DUP_THRESHOLD:
-                    temp_list = list(prev_list)
-                    dup_skipped += 1
-                else:
-                    temp_list = self.detect_subtitle(frame, current_frame_no)
-                prev_list = temp_list
-                if len(temp_list) > 0:
-                    sampled_results[current_frame_no] = temp_list
+                dup_handled = False
+                if diff is not None and diff < DETECT_DUP_THRESHOLD and \
+                        (prev_list is not None or pending):
+                    src = pending[-1][0] if pending else None
+                    if src is not None:
+                        # 源帧在批内：等它检出后回填（源帧自身也可能是 dup，链式取根）
+                        while src in dup_src:
+                            src = dup_src[src]
+                        dup_src[current_frame_no] = src
+                        dup_handled = True
+                    elif prev_list is not None:
+                        temp_list = list(prev_list)
+                        dup_skipped += 1
+                        prev_list = temp_list
+                        if len(temp_list) > 0:
+                            sampled_results[current_frame_no] = temp_list
+                        dup_handled = True
+                if not dup_handled:
+                    pending.append((current_frame_no, frame))
+                if len(pending) >= batch_size:
+                    flush_batch()
             else:
                 if not video_cap.grab():
                     break
@@ -287,6 +342,7 @@ class SubtitleDetect:
             tbar.update(1)
             if sub_remover and seg_total > 0:
                 sub_remover.progress_total = (100 * float(current_frame_no - frame_start) / float(seg_total)) // 2
+        flush_batch()
         video_cap.release()
         self.detect_dup_skipped = dup_skipped
         if sub_remover and dup_skipped:

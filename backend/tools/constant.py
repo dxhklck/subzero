@@ -33,3 +33,14 @@ class EncoderMode(Enum):
     QSV = "h264_qsv"       # Intel 核显/独显
     AMF = "h264_amf"       # AMD 显卡
     X264 = "libx264"       # CPU 编码（保底，永远可用）
+
+
+@unique
+class DecoderMode(Enum):
+    """
+    视频解码器枚举（值即配置存储值）
+    注意：顺序即 GUI 下拉框与 ini [VideoDecoder] 段的索引序
+    """
+    AUTO = "auto"   # 实测探测 NVDEC，可用且分辨率 ≥720p 用硬解，否则 CPU 软解
+    CUDA = "cuda"   # 强制 NVDEC 硬解（探测失败自动回退 CPU）
+    CPU = "cpu"     # cv2 CPU 软解（原行为）

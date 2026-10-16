@@ -16,7 +16,7 @@ from backend.config import config
 from backend.inpaint.sttn.auto_sttn import InpaintGenerator
 from backend.inpaint.utils.sttn_utils import Stack, ToTorchFormatTensor
 from backend.tools.inpaint_tools import get_inpaint_area_by_mask, is_frame_number_in_ab_sections
-from backend.tools.video_io import FramePrefetcher
+from backend.tools.video_io import FramePrefetcher, open_video_reader
 from backend.tools.hardware_accelerator import HardwareAccelerator
 
 # 定义图像预处理方式
@@ -168,7 +168,7 @@ class STTNAutoInpaint:
 
     def read_frame_info_from_video(self):
         # 使用opencv读取视频
-        reader = cv2.VideoCapture(self.video_path)
+        reader = open_video_reader(self.video_path)
         # 获取视频的宽度, 高度, 帧率和帧数信息并存储在frame_info字典中
         frame_info = {
             'W_ori': int(reader.get(cv2.CAP_PROP_FRAME_WIDTH) + 0.5),  # 视频的原始宽度
