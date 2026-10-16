@@ -138,11 +138,8 @@ class AdvancedSettingInterface(ScrollArea):
             config.subtitleAreaPixelToleranceXPixel, tr['Setting']['SubtitleAreaPixelToleranceXPixel'],
             tr['Setting']['SubtitleAreaPixelToleranceXPixelDesc'], expert=True, icon=FluentIcon.ZOOM_IN, parent=card)
         vbox.addWidget(CompactParamRow(e1, e2, e3, e4, columns=4))
-        # 选区整片擦除：选区整体并入掩膜（检测框 ∪ 选区），根治字形鬼影残留
-        self.selection_mask_row = CompactSwitchRow(
-            config.selectionAsMask, gui['SelectionAsMask'], gui['SelectionAsMaskDesc'],
-            icon=FluentIcon.REMOVE_FROM, parent=card)
-        vbox.addWidget(CompactParamRow((self.selection_mask_row, 2), columns=4))
+        # 选区语义已改为全自动（掩膜跟随检测框、无检出组回落选区矩形），
+        # 原「选区整片擦除」开关随 selectionAsMask 配置一并移除
         self.rows_detect = [r1, r2, r3, r4, r5, r7]
         self.rows_detect_expert = [e1, e2, e3, e4]
 

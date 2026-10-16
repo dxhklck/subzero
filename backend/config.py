@@ -109,20 +109,16 @@ class Config(QConfig):
     residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
     # 检测输入裁剪：把待检测帧裁到「字幕带 + margin」再送 OCR，检出框映射回原分辨率。
     # ⚠ 实证（test2.mp4 真实帧）：检出框级不等价（模型输出依赖输入尺寸，裁剪后有
-    # ±2~18px 位移、偶发同行重组），但掩膜级在 selectionAsMask 开启时逐像素一致
-    # （掩膜=选区∪框，选区主导）。故首遍自动裁剪仅在该模式下启用；精确掩膜模式
-    # （selectionAsMask 关）自动抑制。残留二遍裁到第一遍联合带不受此限（兜底趟）。
+    # ±2~18px 位移、偶发同行重组），但掩膜级差异由 create_mask 自适应外扩
+    # （横向 8~40px/纵向 dev）吸收。残留二遍裁到第一遍联合带不受此限（兜底趟）。
     # margin = max(64, 帧高/8) 覆盖 DB unclip 外扩与跨界文字。关闭后全部回退整帧检测
     detectCropToArea = ConfigItem("Main", "DetectCropToArea", True, BoolValidator())
 
     # 检测批处理：一次送 N 个采样帧给 OCR，摊薄 paddle 每次调用的固定开销
     # （前置/后处理管线启动）。1 = 关闭（逐帧检测）。批内结果与逐帧逐位一致
     detectBatchSize = RangeConfigItem("Main", "DetectBatchSize", 4, RangeValidator(1, 16))
-    # 选区整片擦除：手动框选了字幕区域时，选区整体并入每帧掩膜（检测框 ∪ 选区），
-    # 选区内一律视为字幕——不依赖"每个字都被检出"，根治描边/艺术字/淡入淡出的
-    # 字形鬼影残留。代价：选区内非字幕的背景也会被重绘（选区画得越大重绘越多）。
-    # 关闭后回退为"仅检测框+外扩"的精确掩膜
-    selectionAsMask = ConfigItem("Main", "SelectionAsMask", True, BoolValidator())
+    # 选区语义（全自动，无开关）：掩膜跟随检测框动态缩放，整组无检出才回落选区矩形
+    # （见 main._group_interval_masks；原「选区整片擦除」开关已废弃移除）
     # 长视频分段时长（秒）：0=禁用分段；视频时长 ≤ 该值整片处理，
     # 超过则按此值切段逐段执行，支持中断续跑（checkpoint 保存在
     # 输出目录 <视频名>_no_sub_segments/，重跑同名任务自动续接）

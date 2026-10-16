@@ -296,21 +296,23 @@ class SubtitleRemover:
                 del groups[i + 1]
             else:
                 i += 1
-        # 组内坐标去重（静态字幕每帧同框会重复）；选区整片擦除：用户手绘选区
-        # （(ymin,ymax,xmin,xmax)）转换到掩膜口径 ((xmin,xmax,ymin,ymax)) 后并入
-        # 每组坐标——选区内一律视为字幕，不依赖"每个字都被检出"
-        # （描边/艺术字/淡入淡出的字形鬼影残留的根治手段）
+        # 组内坐标去重（静态字幕每帧同框会重复）
+        # 选区兜底（全自动，无开关）：掩膜跟随检测框动态缩放——有检出的组用
+        # 检测框并集（create_mask 再做横向 8~40px/纵向 dev 自适应外扩，覆盖
+        # 描边/艺术字笔画超出框沿的部分）；整组都无有效检出（时间线扩展段/
+        # OCR 漏检）才回落到手绘选区矩形。动态与兜底兼得，选区不再主导掩膜宽度
+        # （原「选区整片擦除」恒并入选区导致掩膜恒为整条带宽，已废弃）
         def _dedupe(seq):
             return list(dict.fromkeys(seq))
 
-        if config.selectionAsMask.value and self.sub_areas:
-            # 选框时间过滤：仅并入对组起点生效的选框——区间已按选框时间边界切分
-            # （split_ranges_at_area_bounds），组不跨边界，起点生效 = 整组生效
-            def _sel_for(g):
-                return [(a[2], a[3], a[0], a[1]) for a in self.sub_areas
-                        if area_active_at(a, g[0])]
-            return [(g[0], g[1], _dedupe(g[2] + _sel_for(g))) for g in groups]
-        return [(g[0], g[1], _dedupe(g[2])) for g in groups]
+        # 选框时间过滤：仅取对组起点生效的选框——区间已按选框时间边界切分
+        # （split_ranges_at_area_bounds），组不跨边界，起点生效 = 整组生效
+        def _sel_for(g):
+            return [(a[2], a[3], a[0], a[1]) for a in self.sub_areas
+                    if area_active_at(a, g[0])]
+
+        return [(g[0], g[1], _dedupe(g[2]) if g[2] else _sel_for(g))
+                for g in groups]
 
     @staticmethod
     def _split_duplicate_frames(frames, diff_threshold=1.0, probe_width=160):
@@ -396,7 +398,7 @@ class SubtitleRemover:
         if tbar is not None:
             tbar.write(f'Subtitle same-line intervals merged: {ranges}')
         # 选框时间边界切分：保证每个子区间内「活跃选框集」恒定——
-        # selectionAsMask 的选区合并按组起点过滤才精确（组不跨时间边界）
+        # 选区兜底按组起点过滤才精确（组不跨时间边界）
         ranges = split_ranges_at_area_bounds(ranges, self.sub_areas)
         lo = max(range_start, frame_start + 1)
         out = {}
@@ -765,14 +767,14 @@ class SubtitleRemover:
     def _collect_first_pass_regions(self, sub_list):
         """收集第一遍检测/修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定。
         剔除高瘦误检框（与第一遍修复同规则），保证"第一遍真正修过的区域"这个语义一致。
-        选区整片擦除开启时，用户选区同样属于第一遍修复区域（选区内检出按残留二修）。"""
+        用户选区同样计入（选区兜底会在无检出组修复选区矩形，属于第一遍修复区域）。"""
         for boxes in sub_list.values():
             for b in boxes:
                 xmin, xmax, ymin, ymax = b
                 if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
                     continue
                 self._first_pass_regions.append((xmin, xmax, ymin, ymax))
-        if config.selectionAsMask.value and self.sub_areas:
+        if self.sub_areas:
             for a in self.sub_areas:
                 # SUB_AREAS 为 (ymin,ymax,xmin,xmax)，统一到 (xmin,xmax,ymin,ymax)
                 self._first_pass_regions.append((a[2], a[3], a[0], a[1]))

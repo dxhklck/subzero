@@ -43,8 +43,8 @@ class SubtitleDetect:
         # 检测输入裁剪区（原图像素坐标 (x0,y0,x1,y1)，None=不裁剪）：
         # 显式传入（残留二遍传第一遍修复区域联合带）或缺省由 sub_areas 并集自动推导；
         # 真正生效前按首帧尺寸加 margin 并钳制（_resolve_crop_rect，惰性解析一次）。
-        # 质量边界见 _resolve_crop_rect 实证结论：框级有 ±18px 差异，掩膜级在
-        # selectionAsMask 开启时逐像素一致，故首遍自动裁剪仅该模式启用
+        # 质量边界见 _resolve_crop_rect 实证结论：框级有 ±18px 差异，掩膜级由
+        # create_mask 的自适应外扩（横向 8~40px/纵向 dev）吸收
         self.crop_rect = crop_rect
         self._active_crop = None
         self._crop_resolved = False
@@ -105,10 +105,10 @@ class SubtitleDetect:
         检出框级**不等价**——模型输出依赖输入尺寸/上下文，裁剪后检出框有
         ±2~18px 位移、偶发同一行重组（整帧 1 框 → 裁剪 2 框），且「先裁后缩」
         「先缩后裁」甚至原生纯切片都如此（非重采样相位问题）。
-        但掩膜级（真正进修复的东西）在 selectionAsMask 开启时**逐像素一致**：
-        掩膜 = 选区 ∪ 检出框，选区矩形主导，框级差异被完全吸收。
-        因此首遍自动裁剪仅在该模式下启用；精确掩膜模式（selectionAsMask 关）
-        的用户要的就是检测精度，回退整帧检测保持逐像素。
+        但掩膜级（真正进修复的东西）差异可被吸收：掩膜跟随检测框并叠加
+        create_mask 的自适应外扩（横向 8~40px、纵向 dev），框级 ±18px 位移
+        落在外扩余量内。故首遍自动裁剪在有选区带时即启用（裁剪检测提速 ~40%，
+        实测收益见 .workbuddy 2026-10-16 基准）。
         残留二遍显式传入的联合带裁剪不受此限（兜底清理趟，保留的框本就与
         第一遍修复带重叠，20px+ 外扩足以吸收边缘位移）。
         """
@@ -116,9 +116,8 @@ class SubtitleDetect:
             return None
         rect = self.crop_rect
         if rect is None:
-            # 自动裁剪（首遍）：仅当选区整片擦除开启时（掩膜由选区主导，
-            # 框级差异被吸收——掩膜级 0 像素差已验证）；精确掩膜模式回退整帧
-            if not self.sub_areas or not config.selectionAsMask.value:
+            # 自动裁剪（首遍）：有选区带即裁剪（无选区=全帧行为，裁剪无意义）
+            if not self.sub_areas:
                 return None
             # SUB_AREAS 口径 (ymin,ymax,xmin,xmax) → 并集转 (x0,y0,x1,y1)
             rect = (min(int(a[2]) for a in self.sub_areas), min(int(a[0]) for a in self.sub_areas),
