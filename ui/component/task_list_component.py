@@ -139,7 +139,8 @@ def _options_from_json(options):
         elif key == TaskOptions.SUB_AREAS.value and isinstance(value, list):
             rects = []
             for item in value:
-                if isinstance(item, (list, tuple)) and len(item) == 4:
+                # 4 元组=无时间范围（全程生效）；6 元组=(…,t0,t1) 帧范围 end 排他
+                if isinstance(item, (list, tuple)) and len(item) in (4, 6):
                     try:
                         rects.append(tuple(int(v) for v in item))
                     except (TypeError, ValueError):

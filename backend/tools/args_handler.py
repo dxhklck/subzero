@@ -5,17 +5,22 @@ from .constant import InpaintMode
 
 
 def _sub_area(value):
-    """解析 --sub-area 的 "ymin,ymax,xmin,xmax"（原图像素坐标，与 GUI SUB_AREAS 语义一致）"""
+    """解析 --sub-area 的 "ymin,ymax,xmin,xmax[,t0,t1]"（原图像素坐标，与 GUI
+    SUB_AREAS 语义一致；可选的 t0,t1 为 0-based 帧范围、end 排他——选框只在
+    该帧区间内生效，口径与 AB 区块一致）"""
     parts = [p.strip() for p in value.split(',')]
-    if len(parts) != 4:
+    if len(parts) not in (4, 6):
         raise argparse.ArgumentTypeError(
-            f"invalid sub-area '{value}': expected 'ymin,ymax,xmin,xmax' "
-            f"(4 comma-separated integers), got {len(parts)} value(s)")
+            f"invalid sub-area '{value}': expected 'ymin,ymax,xmin,xmax' or "
+            f"'ymin,ymax,xmin,xmax,t0,t1' (4 or 6 comma-separated integers), got {len(parts)} value(s)")
     try:
         coords = tuple(int(p) for p in parts)
     except ValueError:
         raise argparse.ArgumentTypeError(
             f"invalid sub-area '{value}': coordinates must be integers")
+    if len(coords) == 6 and coords[5] <= coords[4]:
+        raise argparse.ArgumentTypeError(
+            f"invalid sub-area '{value}': t1 must be greater than t0")
     return coords
 
 
@@ -61,8 +66,10 @@ def parse_args():
         help="Inpaint mode. If omitted, falls back to the mode selected in the GUI settings (config.json)"
     )
     parser.add_argument(
-        "--sub-area", action="append", type=_sub_area, metavar="YMIN,YMAX,XMIN,XMAX",
-        help="Subtitle area coordinates 'ymin,ymax,xmin,xmax' (original pixel coords). "
+        "--sub-area", action="append", type=_sub_area, metavar="YMIN,YMAX,XMIN,XMAX[,T0,T1]",
+        help="Subtitle area coordinates 'ymin,ymax,xmin,xmax' (original pixel coords), "
+             "optionally 'ymin,ymax,xmin,xmax,t0,t1' to restrict the area to frames "
+             "[t0,t1) (0-based, end-exclusive; same convention as AB sections). "
              "Can be specified multiple times for multiple areas. "
              "Use the equals form (--sub-area=...) when any coordinate is negative."
     )

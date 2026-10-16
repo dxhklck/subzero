@@ -102,11 +102,14 @@ Main window: task queue, video preview (letterbox, native aspect ratio with blac
 - **No-overwrite output**: if the output already exists (e.g. a previous result is still locked), a numbered copy is saved instead (`_no_sub_2.mp4`, `_3`, …) — old results are never overwritten.
 - **Failure triage**: on failure the Monitor tab holds the full traceback; a "崩溃报告_<name>_<timestamp>.txt" (environment + main-process log tail + traceback) is written next to the output; right-click a task → open the output folder.
 - **Subtitle area**: select a task and draw rectangles on the preview (multiple allowed); with no selection the app auto-detects full screen. Areas are stored in original-pixel coordinates and follow task selection.
-- **Time range (AB sections)**: mark ranges on the slider to process only those parts. **Task-level global**: frames outside the range are neither detected nor repainted (passed through as-is); all selection boxes of a task share the same AB sections — per-box start/end times are not supported yet.
+- **Time range (AB sections)**: mark ranges on the slider to process only those parts. **Task-level global**: frames outside the range are neither detected nor repainted (passed through as-is); all selection boxes of a task share the same AB sections.
+- **Per-box time range**: with a selection box selected (clicked), press `Alt+[` to set the current frame as its time start, `Alt+]` as its end, `Alt+\` to clear (unset = active for the whole video). Colored time bands for each box appear below the timeline. Different boxes can have different start/end positions; a box's region is not repainted outside its own time window.
 
-#### Subtitles at different positions in different time segments (two-task chaining)
+#### Subtitles at different positions in different time segments
 
-For "subtitle position changes over time" (e.g. a corner bug in the intro plus dialogue at the bottom), chain two tasks — no extra tools needed:
+For "subtitle position changes over time" (e.g. a corner bug in the intro plus dialogue at the bottom), the recommended way is **per-box time range**: draw the area for the corner bug → click to select it → mark its appearance window with `Alt+[` / `Alt+]` — one task does it all.
+
+Alternatively chain two tasks (older versions / special cases):
 
 1. **Task 1**: open the original video → draw only area A → set AB to the first segment (e.g. 0–120s) → run → result 1. Frames outside the range pass through untouched; only area A inside the range is erased.
 2. **Task 2**: open result 1 → draw only area B → set AB to the second segment (e.g. 120s–end) → run → final result.

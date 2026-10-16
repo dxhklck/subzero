@@ -294,6 +294,15 @@ class VideoDisplayComponent(QWidget):
         self.shortcut_delete_selection = QShortcut(QtGui.QKeySequence.Delete, self)
         self.shortcut_delete_selection.activated.connect(self.__handle_delete_selection)
         self.shortcut_delete_selection.setContext(Qt.ApplicationShortcut)
+        # 选框时间范围（per-box）：Alt+[ 起点 / Alt+] 终点 / Alt+\ 清除。
+        # 修饰键与全局 AB 的 [/]/\ 区分——教程的任务串联工作流同时用到
+        # 「选框 + 全局 AB」，两者必须能同时标记
+        self.shortcut_box_time_start = QShortcut(QtGui.QKeySequence("Alt+["), self)
+        self.shortcut_box_time_start.activated.connect(self.__handle_box_time_start)
+        self.shortcut_box_time_end = QShortcut(QtGui.QKeySequence("Alt+]"), self)
+        self.shortcut_box_time_end.activated.connect(self.__handle_box_time_end)
+        self.shortcut_box_time_clear = QShortcut(QtGui.QKeySequence("Alt+\\"), self)
+        self.shortcut_box_time_clear.activated.connect(self.__handle_box_time_clear)
 
         # 添加左右键控制slider的快捷键
         self.shortcut_right = QShortcut(QtGui.QKeySequence(Qt.Key_Right), self)
@@ -540,8 +549,8 @@ class VideoDisplayComponent(QWidget):
                 and self.render_offset_y <= y <= self.render_offset_y + self.render_height)
     
     def _rect_to_display(self, rect):
-        """选区（原图像素 ymin,ymax,xmin,xmax）→ 控件显示像素 QRect"""
-        ymin, ymax, xmin, xmax = rect
+        """选区（原图像素 ymin,ymax,xmin,xmax[,t0,t1]）→ 控件显示像素 QRect"""
+        ymin, ymax, xmin, xmax = rect[:4]
         if ymin > ymax:
             ymin, ymax = ymax, ymin
         if xmin > xmax:
@@ -641,7 +650,28 @@ class VideoDisplayComponent(QWidget):
             ab_line_height = 5
             ab_line_y = pixmap_copy.height() - ab_line_height
             painter.drawLine(start_x, ab_line_y, start_x, pixmap_copy.height())
-        
+
+        # 绘制选框时间范围条带（AB 行上方的第二行，彩色，活动选框高亮）。
+        # 每个设了时间范围（6元组）的选框一条；未设时间的选框=全程，不绘制
+        if total_frames > 0 and any(len(r) >= 6 for r in self.selection_rects):
+            band_h = 4
+            band_y = pixmap_copy.height() - 10   # AB 行（底部5px）上方
+            colors = [(66, 133, 244), (219, 68, 55), (244, 180, 0), (15, 157, 88), (140, 90, 220)]
+            left_margin = 15
+            right_margin = 15
+            available_width = pixmap_copy.width() - left_margin - right_margin
+            painter.setPen(Qt.NoPen)
+            for i, rect in enumerate(self.selection_rects):
+                if len(rect) < 6:
+                    continue
+                t0, t1 = rect[4], rect[5]
+                x0 = left_margin + int((t0 / total_frames) * available_width)
+                x1 = left_margin + int((t1 / total_frames) * available_width)
+                cr, cg, cb = colors[i % len(colors)]
+                alpha = 230 if i == self.active_selection_index else 130
+                painter.setBrush(QtGui.QColor(cr, cg, cb, alpha))
+                painter.drawRect(x0, band_y, max(2, x1 - x0), band_h)
+
         painter.end()
         
         # 更新显示
@@ -785,21 +815,22 @@ class VideoDisplayComponent(QWidget):
             self.selection_rect = (start_y, orig_y, start_x, orig_x)
             self.update_preview_with_rect()
         elif self.resize_edge and self.active_selection_index >= 0:  # 调整选择框大小或位置
-            ymin, ymax, xmin, xmax = self.selection_rects[self.active_selection_index]
+            ymin, ymax, xmin, xmax = self.selection_rects[self.active_selection_index][:4]
             start_y, start_x = self.drag_start_pos
-            
+
             if self.resize_edge == "move":
                 # 移动整个选择框
                 dy = orig_y - start_y
                 dx = orig_x - start_x
-                
+
                 # 计算新位置，确保不超出图像边界
                 new_ymin = max(0, min(self.frame_height - (ymax - ymin), ymin + dy))
                 new_ymax = min(self.frame_height, max(new_ymin + (ymax - ymin), new_ymin))
                 new_xmin = max(0, min(self.frame_width - (xmax - xmin), xmin + dx))
                 new_xmax = min(self.frame_width, max(new_xmin + (xmax - xmin), new_xmin))
-                
-                self.selection_rects[self.active_selection_index] = (new_ymin, new_ymax, new_xmin, new_xmax)
+
+                self.selection_rects[self.active_selection_index] = \
+                    (new_ymin, new_ymax, new_xmin, new_xmax) + self.selection_rects[self.active_selection_index][4:]
                 self.drag_start_pos = (orig_y, orig_x)
             else:
                 # 调整选择框大小（原图像素坐标，最小边距 1px）
@@ -823,9 +854,13 @@ class VideoDisplayComponent(QWidget):
                     xmin, xmax = xmax, xmin
                 if ymin > ymax:
                     ymin, ymax = ymax, ymin
-                
-                self.selection_rects[self.active_selection_index] = (ymin, ymax, xmin, xmax)
-            
+
+                # 保留时间字段（若有）：调整大小/移动不改时间范围
+                tail = self.selection_rects[self.active_selection_index][4:] \
+                    if len(self.selection_rects[self.active_selection_index]) >= 6 else ()
+                self.selection_rects[self.active_selection_index] = \
+                    (ymin, ymax, xmin, xmax) + tail
+
             self.update_preview_with_rect()
         else:
             # 更新鼠标光标形状
@@ -864,14 +899,17 @@ class VideoDisplayComponent(QWidget):
             self.selection_rect = (0, 0, 0, 0)  # 重置为空选区
         elif self.resize_edge and self.active_selection_index >= 0:
             # 标准化选择框
-            ymin, ymax, xmin, xmax = self.selection_rects[self.active_selection_index]
+            ymin, ymax, xmin, xmax = self.selection_rects[self.active_selection_index][:4]
             if ymin > ymax:
                 ymin, ymax = ymax, ymin
             if xmin > xmax:
                 xmin, xmax = xmax, xmin
-            
-            # 更新标准化后的选区
-            self.selection_rects[self.active_selection_index] = (ymin, ymax, xmin, xmax)
+
+            # 更新标准化后的选区（保留时间字段）
+            tail = self.selection_rects[self.active_selection_index][4:] \
+                if len(self.selection_rects[self.active_selection_index]) >= 6 else ()
+            self.selection_rects[self.active_selection_index] = \
+                (ymin, ymax, xmin, xmax) + tail
                         
             # 发送选择框变化信号
             self.selections_changed.emit(self.selection_rects)
@@ -962,9 +1000,10 @@ class VideoDisplayComponent(QWidget):
         return self.selection_rect
     
     def set_selection_rects(self, rects):
-        """设置选择框（原图像素坐标）"""
+        """设置选择框（原图像素坐标；条目可为 4 元组或带时间范围的 6 元组）"""
         self.selection_rects = list(rects)
-        self.selection_rect = rects[-1] if rects else (0, 0, 0, 0)
+        # 进行中的拖拽矩形恒为 4 元组（时间范围不属于拖拽状态）
+        self.selection_rect = (rects[-1][:4] if rects else (0, 0, 0, 0))
         self.active_selection_index = len(rects) - 1
         self.update_preview_with_rect()
     
@@ -1024,11 +1063,13 @@ class VideoDisplayComponent(QWidget):
         
         if self.frame_width and self.frame_height:
             for rect in self.selection_rects:
-                ymin, ymax, xmin, xmax = rect
+                ymin, ymax, xmin, xmax = rect[:4]
                 # 原图像素 → 相对图像的比率，四舍五入到4位小数
                 areas_str_parts.append(
                     f"{round(ymin / self.frame_height, 4)},{round(ymax / self.frame_height, 4)},"
                     f"{round(xmin / self.frame_width, 4)},{round(xmax / self.frame_width, 4)}")
+        # 注：config 默认选区只存空间比率；选框时间范围是任务级属性（任务选项 JSON），
+        # 不落入全局配置
         
         # 更新配置
         config.subtitleSelectionAreas.value = ";".join(areas_str_parts)
@@ -1072,6 +1113,56 @@ class VideoDisplayComponent(QWidget):
             global_pos = QCursor.pos()
             pos = self.video_display.mapFromGlobal(global_pos)
             self.update_cursor_shape(pos)
+
+    # ---------- 选框时间范围（per-box） ----------
+
+    def _set_box_time(self, index, t0, t1):
+        """设置活动选框的时间范围（0-based、end 排他，与 AB 区块同口径）；
+        t1 <= t0 视为无效忽略。选框存为 6 元组 (…,t0,t1)"""
+        if not (0 <= index < len(self.selection_rects)) or t1 <= t0:
+            return
+        rect = self.selection_rects[index]
+        self.selection_rects[index] = (rect[0], rect[1], rect[2], rect[3], int(t0), int(t1))
+        self.update_preview_with_rect()
+        self.selections_changed.emit(self.selection_rects)
+
+    def __handle_box_time_start(self):
+        """Alt+[：当前帧设为活动选框的时间起点（已有有效终点则保留，否则到片尾）"""
+        i = self.active_selection_index
+        if not (0 <= i < len(self.selection_rects)):
+            return
+        cur = self.video_slider.value()
+        if cur < 0:
+            return
+        old = self.selection_rects[i]
+        old_t1 = old[5] if len(old) >= 6 else None
+        t1 = old_t1 if (old_t1 is not None and old_t1 > cur) else self.video_slider.maximum()
+        self._set_box_time(i, cur, t1)
+
+    def __handle_box_time_end(self):
+        """Alt+]：当前帧+1 设为活动选框的时间终点（已有有效起点则保留，否则从头）"""
+        i = self.active_selection_index
+        if not (0 <= i < len(self.selection_rects)):
+            return
+        cur = self.video_slider.value()
+        if cur < 0:
+            return
+        old = self.selection_rects[i]
+        old_t0 = old[4] if len(old) >= 6 else None
+        t0 = old_t0 if (old_t0 is not None and old_t0 < cur + 1) else 0
+        self._set_box_time(i, t0, cur + 1)
+
+    def __handle_box_time_clear(self):
+        """Alt+\\：清除活动选框的时间范围（恢复全程有效）"""
+        i = self.active_selection_index
+        if not (0 <= i < len(self.selection_rects)):
+            return
+        rect = self.selection_rects[i]
+        if len(rect) < 6:
+            return
+        self.selection_rects[i] = rect[:4]
+        self.update_preview_with_rect()
+        self.selections_changed.emit(self.selection_rects)
 
     def __handle_mark_for_ab_start(self):
         """处理标记AB分区起点的逻辑"""
@@ -1186,6 +1277,19 @@ class VideoDisplayComponent(QWidget):
         self.action_mark_ab_delete.setShortcut("\\")
         self.action_mark_ab_delete.triggered.connect(self.__handle_delete_ab_section)
         self.context_menu.addAction(self.action_mark_ab_delete)
+        # 选框时间范围（per-box）：仅对当前选中（活动）的选框生效
+        self.action_box_time_start = QAction(tr['SubtitleExtractorGUI']['MarkBoxTimeStart'], self)
+        self.action_box_time_start.setShortcut("Alt+[")
+        self.action_box_time_start.triggered.connect(self.__handle_box_time_start)
+        self.context_menu.addAction(self.action_box_time_start)
+        self.action_box_time_end = QAction(tr['SubtitleExtractorGUI']['MarkBoxTimeEnd'], self)
+        self.action_box_time_end.setShortcut("Alt+]")
+        self.action_box_time_end.triggered.connect(self.__handle_box_time_end)
+        self.context_menu.addAction(self.action_box_time_end)
+        self.action_box_time_clear = QAction(tr['SubtitleExtractorGUI']['ClearBoxTime'], self)
+        self.action_box_time_clear.setShortcut("Alt+\\")
+        self.action_box_time_clear.triggered.connect(self.__handle_box_time_clear)
+        self.context_menu.addAction(self.action_box_time_clear)
 
         self.action_delete_selection = QAction(tr['SubtitleExtractorGUI']['DeleteSelection'], self)
         self.action_delete_selection.setShortcut("DELETE")
@@ -1219,6 +1323,9 @@ class VideoDisplayComponent(QWidget):
             self.action_mark_ab_delete.triggered.disconnect(self.__handle_delete_ab_section)
             self.action_delete_selection.triggered.disconnect(self.__handle_delete_selection)
             self.shortcut_delete_selection.activated.disconnect(self.__handle_delete_selection)
+            self.action_box_time_start.triggered.disconnect(self.__handle_box_time_start)
+            self.action_box_time_end.triggered.disconnect(self.__handle_box_time_end)
+            self.action_box_time_clear.triggered.disconnect(self.__handle_box_time_clear)
         except Exception as e:
             print("Error during close window:", e)
         super().closeEvent(event)

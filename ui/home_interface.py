@@ -1428,9 +1428,10 @@ class HomeInterface(QWidget):
             if len(subtitle_areas) > 0:
                 if frame_ori is frame_comp:
                     frame_ori = frame_ori.copy()
-                # SUB_AREAS 为原图像素坐标，直接在原图上绘制（取整防 float 坐标）
+                # SUB_AREAS 为原图像素坐标（可能带时间范围的 6 元组，取前 4 项），
+                # 直接在原图上绘制（取整防 float 坐标）
                 for rect in subtitle_areas:
-                    ymin, ymax, xmin, xmax = rect
+                    ymin, ymax, xmin, xmax = rect[:4]
                     cv2.rectangle(frame_ori, (int(xmin), int(ymin)),
                                   (int(xmax), int(ymax)), (0, 255, 0), 2)
         # A/B 双框：结果帧进 B 框（分段处理时同样实时更新）

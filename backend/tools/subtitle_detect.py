@@ -12,7 +12,7 @@ from .ocr import get_coordinates
 from backend.config import config, tr
 from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
-from backend.tools.inpaint_tools import is_frame_number_in_ab_sections
+from backend.tools.inpaint_tools import is_frame_number_in_ab_sections, area_active_at
 
 # 检测重复帧跳过阈值：相邻采样帧 160px 长边灰度均值差（0-255 标度）低于该值时，
 # 复用上一采样帧的 OCR 检出（相同像素 → 相同检测结果，零画质影响）。
@@ -166,7 +166,7 @@ class SubtitleDetect:
             self.frame_diff_scores[frame_no] = float(np.mean(cv2.absdiff(self._prev_gray_small, small)))
         self._prev_gray_small = small
 
-    def detect_subtitle(self, img):
+    def detect_subtitle(self, img, frame_no=None):
         temp_list = []
         # 检测输入裁剪（惰性解析一次）：裁到字幕带+margin，检出框加偏移映射回原分辨率
         if not self._crop_resolved:
@@ -182,6 +182,15 @@ class SubtitleDetect:
         results = self.text_detector.predict(proc_img)
         sub_areas = self.sub_areas
         has_areas = sub_areas is not None and len(sub_areas) > 0
+        if has_areas:
+            # 选框时间过滤：6 元组选框 (…,t0,t1) 只在 [t0,t1) 帧内生效（无时间=全程；
+            # 帧号口径与 AB 区块一致）。该帧所有选框都不在时间窗内 → 不送检测、无检出
+            #（⇒ 带时间选框的场景里，窗外帧整帧跳过 OCR，检测随之提速）
+            active_areas = [a for a in sub_areas if area_active_at(a, frame_no)]
+            if len(active_areas) == 0:
+                return temp_list
+        else:
+            active_areas = sub_areas
         for res in results:
             dt_polys = res['dt_polys']
             if dt_polys is None or len(dt_polys) == 0:
@@ -200,15 +209,16 @@ class SubtitleDetect:
                 continue
             if not has_areas:
                 temp_list.extend(coordinate_list)
-            elif len(sub_areas) == 1:
+            elif len(active_areas) == 1:
                 # 单区域快速路径（最常见场景）
-                s_ymin, s_ymax, s_xmin, s_xmax = sub_areas[0]
+                s_ymin, s_ymax, s_xmin, s_xmax = active_areas[0][:4]
                 for xmin, xmax, ymin, ymax in coordinate_list:
                     if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
                         temp_list.append((xmin, xmax, ymin, ymax))
             else:
                 for xmin, xmax, ymin, ymax in coordinate_list:
-                    for s_ymin, s_ymax, s_xmin, s_xmax in sub_areas:
+                    for s_area in active_areas:
+                        s_ymin, s_ymax, s_xmin, s_xmax = s_area[:4]
                         if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
                             temp_list.append((xmin, xmax, ymin, ymax))
                             break
@@ -266,7 +276,7 @@ class SubtitleDetect:
                     temp_list = list(prev_list)
                     dup_skipped += 1
                 else:
-                    temp_list = self.detect_subtitle(frame)
+                    temp_list = self.detect_subtitle(frame, current_frame_no)
                 prev_list = temp_list
                 if len(temp_list) > 0:
                     sampled_results[current_frame_no] = temp_list

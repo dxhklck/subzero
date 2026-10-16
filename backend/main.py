@@ -24,7 +24,9 @@ from backend.inpaint.sttn_det_inpaint import STTNDetInpaint
 from backend.inpaint.lama_inpaint import LamaInpaint
 from backend.inpaint.minimax_inpaint import MiniMaxInpaint
 from backend.inpaint.opencv_inpaint import OpenCVInpaint
-from backend.tools.inpaint_tools import create_mask, batch_generator, expand_frame_ranges
+from backend.tools.inpaint_tools import (create_mask, batch_generator, expand_frame_ranges,
+                                         area_active_at, split_ranges_at_area_bounds,
+                                         compute_box_time_segments)
 from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
@@ -208,18 +210,35 @@ class SubtitleRemover:
         pass
 
     def sttn_auto_mode(self, tbar):
-        """
-        使用sttn对选中区域进行重绘，不进行字幕检测
-        """
+        """使用sttn对选中区域进行重绘，不进行字幕检测
+
+        选框带时间范围（6元组 …,t0,t1）时按时间边界把处理范围切段：
+        每段用该段「活跃选框集」建掩膜、限定帧范围调用 STTN——段内掩膜恒定，
+        选框时间窗外的帧不重绘该选框区域（消除多选框场景的系统性过度重绘）。
+        无选框带时间时单段=整片，与旧行为逐帧一致。段 ⊆ 全局 AB ∩ 分段范围。"""
         self.append_output(tr['Main']['ProcessingStartRemovingSubtitles'])
-        mask_area_coordinates = []
-        for sub_area in self.sub_areas:
-            ymin, ymax, xmin, xmax = sub_area
-            mask_area_coordinates.append((xmin, xmax, ymin, ymax))
-        self._first_pass_regions.extend(mask_area_coordinates)
-        mask = create_mask(self.mask_size, mask_area_coordinates)
         sttn_video_inpaint = STTNAutoInpaint(self.hardware_accelerator.device, self.model_config.STTN_AUTO_MODEL_PATH, self.video_path)
-        sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar)
+        frame_start = int(getattr(self, 'frame_start', 0) or 0)
+        frame_end = self.frame_end if self.frame_end is not None else self.frame_count
+        segments = compute_box_time_segments(self.sub_areas, frame_end, self.ab_sections)
+        # 与分段处理范围相交（分段续跑时只处理本段）
+        segments = [(max(f0, frame_start), min(f1, frame_end)) for f0, f1 in segments]
+        segments = [(f0, f1) for f0, f1 in segments if f1 > f0]
+        if len(segments) > 1:
+            self.append_output(f'[BoxTime] 选框时间分段: {segments}')
+        for f0, f1 in segments:
+            mask_area_coordinates = []
+            for sub_area in self.sub_areas:
+                if not area_active_at(sub_area, f0):
+                    continue
+                ymin, ymax, xmin, xmax = sub_area[:4]
+                mask_area_coordinates.append((xmin, xmax, ymin, ymax))
+            # 段与段的空间并集有重叠也没关系：_overlaps_first_pass 只做空间判定
+            self._first_pass_regions.extend(mask_area_coordinates)
+            mask = create_mask(self.mask_size, mask_area_coordinates)
+            # frame_range 限定本段读写帧范围（段 ⊆ 全局 AB，段内 ab_sections 门控天然满足）；
+            # 各段共用同一 STTN 模型实例与写通道，顺序调用无缝拼接
+            sttn_video_inpaint(input_mask=mask, input_sub_remover=self, tbar=tbar, frame_range=(f0, f1))
 
     def _route_pick_model(self, start, end, motion_scores):
         """AUTO路由：按区间帧差均值选算法。静态区间走LAMA（快，静态背景≈无损），
@@ -334,8 +353,12 @@ class SubtitleRemover:
             return list(dict.fromkeys(seq))
 
         if config.selectionAsMask.value and self.sub_areas:
-            sel = [(a[2], a[3], a[0], a[1]) for a in self.sub_areas]
-            return [(g[0], g[1], _dedupe(g[2] + sel)) for g in groups]
+            # 选框时间过滤：仅并入对组起点生效的选框——区间已按选框时间边界切分
+            # （split_ranges_at_area_bounds），组不跨边界，起点生效 = 整组生效
+            def _sel_for(g):
+                return [(a[2], a[3], a[0], a[1]) for a in self.sub_areas
+                        if area_active_at(a, g[0])]
+            return [(g[0], g[1], _dedupe(g[2] + _sel_for(g))) for g in groups]
         return [(g[0], g[1], _dedupe(g[2])) for g in groups]
 
     @staticmethod
@@ -432,6 +455,9 @@ class SubtitleRemover:
             i += 1
         if tbar is not None:
             tbar.write(f'Subtitle same-line intervals merged: {ranges}')
+        # 选框时间边界切分：保证每个子区间内「活跃选框集」恒定——
+        # selectionAsMask 的选区合并按组起点过滤才精确（组不跨时间边界）
+        ranges = split_ranges_at_area_bounds(ranges, self.sub_areas)
         lo = max(range_start, frame_start + 1)
         out = {}
         for start, end in ranges:
@@ -727,6 +753,8 @@ class SubtitleRemover:
         tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
         continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
         tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
+        # 选框时间边界切分（与 _plan_intervals 同理：组不跨时间边界）
+        continuous_frame_no_list = split_ranges_at_area_bounds(continuous_frame_no_list, self.sub_areas)
         # AUTO路由需要在删除检测器前取出帧差分数
         motion_scores = sub_detector.frame_diff_scores if route else None
         del sub_detector
@@ -868,7 +896,8 @@ class SubtitleRemover:
             # 未指定时按第一遍检测流程在输入上采样检测收集（与 video_inpaint 一致），
             # 使未传 --sub-area 的契约调用（GUI 分段成片二修兜底）也能生效
             if len(self.sub_areas) > 0:
-                for ymin, ymax, xmin, xmax in self.sub_areas:
+                for area in self.sub_areas:
+                    ymin, ymax, xmin, xmax = area[:4]
                     self._first_pass_regions.append((xmin, xmax, ymin, ymax))
             else:
                 self.append_output(tr['Main']['ProcessingStartFindingSubtitles'])

@@ -196,7 +196,7 @@ class STTNAutoInpaint:
         else:
             self.clip_gap = clip_gap
 
-    def __call__(self, input_mask=None, input_sub_remover=None, tbar=None):
+    def __call__(self, input_mask=None, input_sub_remover=None, tbar=None, frame_range=None):
         reader = None
         writer = None
         prefetcher = None
@@ -224,6 +224,15 @@ class STTNAutoInpaint:
                 writer = cv2.VideoWriter(self.video_out_path, cv2.VideoWriter_fourcc(*"mp4v"), frame_info['fps'], (frame_info['W_ori'], frame_info['H_ori']))
             if frame_end is None:
                 frame_end = frame_info['len']
+            # 显式帧范围覆盖（per-box 时间分段，sttn_auto_mode 传入）：
+            # 本调用只读/写 [f0, f1)，段外帧由其他分段调用负责——各段顺序调用
+            # 共用同一写通道，无缝拼接。段 ⊆ 全局 AB 时既有 ab_sections 门控天然满足
+            if frame_range is not None:
+                _f0, _f1 = int(frame_range[0]), int(frame_range[1])
+                if _f1 <= _f0:
+                    return
+                frame_start, frame_end = _f0, _f1
+                frame_write_start = _f0
             seg_total = max(1, frame_end - frame_start)
             if frame_start > 0:
                 reader.set(cv2.CAP_PROP_POS_FRAMES, frame_start)

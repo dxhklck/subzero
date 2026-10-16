@@ -310,6 +310,63 @@ def expand_frame_ranges(frame_ranges, backward_frame_count, forward_frame_count)
     
     return expanded_ranges
 
+def area_active_at(area, frame_no):
+    """选框在该帧是否生效。
+
+    选框 4 元组 (ymin,ymax,xmin,xmax) 无时间范围，恒生效；
+    6 元组 (..., t0, t1) 仅在 [t0, t1) 帧内生效——口径与 AB 区块一致
+    （0-based、end 排他，判定帧号体系与 AB 相同，边界 ±1 帧由时间线
+    外扩吸收）。frame_no 为 None（图片路径）时恒生效。
+    """
+    if frame_no is None or len(area) < 6:
+        return True
+    return area[4] <= frame_no < area[5]
+
+
+def split_ranges_at_area_bounds(ranges, sub_areas):
+    """把帧区间列表按选框时间边界切分，使每个子区间内「活跃选框集」恒定。
+
+    ranges 为 (start, end) 闭区间列表；无时间范围的选框(4元组)不产生边界。
+    用途：selectionAsMask 选区合并（组不跨边界 → 按组起点过滤选区即精确）
+    与 STTN 智能擦除分段建掩膜（段内掩膜恒定）。
+    """
+    bounds = set()
+    for a in sub_areas or []:
+        if len(a) >= 6:
+            bounds.add(int(a[4]))
+            bounds.add(int(a[5]))
+    if not bounds:
+        return list(ranges)
+    out = []
+    for start, end in ranges:
+        cur = start
+        for b in sorted(bounds):
+            if cur < b < end:      # 严格内部边界才切（边界帧归后一段）
+                out.append((cur, b - 1))
+                cur = b
+        if cur <= end:
+            out.append((cur, end))
+    return out
+
+
+def compute_box_time_segments(sub_areas, frame_count, ab_sections=None):
+    """STTN 智能擦除的处理分段：返回 [(f0, f1)]（0-based、end 排他）。
+
+    - ab_sections 非空 → 处理范围 = 各 AB 区间；否则 = [0, frame_count)
+    - 范围再按选框时间边界切分 → 每段内「活跃选框集」恒定，段内掩膜恒定
+    - 无选框带时间时退化为原处理范围（与旧行为逐帧一致）
+    """
+    ranges = []
+    if ab_sections:
+        for r in ab_sections:
+            f0, f1 = max(0, int(r.start)), min(int(frame_count), int(r.stop))
+            if f1 > f0:
+                ranges.append((f0, f1))
+    else:
+        ranges.append((0, int(frame_count)))
+    return split_ranges_at_area_bounds(ranges, sub_areas)
+
+
 def is_frame_number_in_ab_sections(frame_no, ab_sections):
     """
     检查给定的帧号是否在指定的A/B区间内。
