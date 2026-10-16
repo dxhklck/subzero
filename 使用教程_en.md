@@ -102,7 +102,16 @@ Main window: task queue, video preview (letterbox, native aspect ratio with blac
 - **No-overwrite output**: if the output already exists (e.g. a previous result is still locked), a numbered copy is saved instead (`_no_sub_2.mp4`, `_3`, …) — old results are never overwritten.
 - **Failure triage**: on failure the Monitor tab holds the full traceback; a "崩溃报告_<name>_<timestamp>.txt" (environment + main-process log tail + traceback) is written next to the output; right-click a task → open the output folder.
 - **Subtitle area**: select a task and draw rectangles on the preview (multiple allowed); with no selection the app auto-detects full screen. Areas are stored in original-pixel coordinates and follow task selection.
-- **Time range (AB sections)**: mark ranges on the slider to process only those parts.
+- **Time range (AB sections)**: mark ranges on the slider to process only those parts. **Task-level global**: frames outside the range are neither detected nor repainted (passed through as-is); all selection boxes of a task share the same AB sections — per-box start/end times are not supported yet.
+
+#### Subtitles at different positions in different time segments (two-task chaining)
+
+For "subtitle position changes over time" (e.g. a corner bug in the intro plus dialogue at the bottom), chain two tasks — no extra tools needed:
+
+1. **Task 1**: open the original video → draw only area A → set AB to the first segment (e.g. 0–120s) → run → result 1. Frames outside the range pass through untouched; only area A inside the range is erased.
+2. **Task 2**: open result 1 → draw only area B → set AB to the second segment (e.g. 120s–end) → run → final result.
+
+Cost: two full encodes (crf 20 tier; the second-generation loss is visually invisible) plus one residue pass per run. Frames outside AB are never repainted, so the two segments compose correctly.
 
 ### 2.2 Inpainting algorithms (Settings page)
 

@@ -14,6 +14,12 @@ from backend.scenedetect import scene_detect
 from backend.scenedetect.detectors import ContentDetector
 from backend.tools.inpaint_tools import is_frame_number_in_ab_sections
 
+# 检测重复帧跳过阈值：相邻采样帧 160px 长边灰度均值差（0-255 标度）低于该值时，
+# 复用上一采样帧的 OCR 检出（相同像素 → 相同检测结果，零画质影响）。
+# 与修复阶段 _split_duplicate_frames 同一标度（1.0 ≈ 压缩噪声上限）。
+# 置 0 禁用（diff < 0 永不成立）
+DETECT_DUP_THRESHOLD = 1.0
+
 class SubtitleDetect:
     """
     文本框检测类，用于检测视频帧中是否存在文本框
@@ -41,6 +47,8 @@ class SubtitleDetect:
         self.crop_rect = crop_rect
         self._active_crop = None
         self._crop_resolved = False
+        # 上一次 find_subtitle_frame_no 中重复帧跳过的次数（日志/测试用）
+        self.detect_dup_skipped = 0
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
         # 供 AUTO 路由判定区间运动量用，不影响检测结果
         self.frame_diff_scores = {}
@@ -233,6 +241,8 @@ class SubtitleDetect:
         # 阶段1：采样检测，仅对每隔 sample_step 帧执行 OCR；
         # 非采样帧与AB区间外帧只用 grab() 跳过（不解码为BGR，实测比 read() 快约8倍）
         sampled_results = {}  # frame_no -> temp_list
+        prev_list = None      # 上一采样帧的检出（重复帧复用）
+        dup_skipped = 0       # 重复帧跳过 OCR 的次数
         if sub_remover:
             sub_remover.append_output(tr['Main']['ProcessingStartFindingSubtitles'])
         while video_cap.isOpened() and current_frame_no < frame_end:
@@ -246,7 +256,18 @@ class SubtitleDetect:
                     break
                 current_frame_no += 1
                 self._update_frame_diff(current_frame_no, frame)
-                temp_list = self.detect_subtitle(frame)
+                # 重复帧跳过：与上一采样帧几乎相同（160px 长边灰度均值差 < 阈值，
+                # 约等于压缩噪声上限）时 OCR 结果必然相同，直接复用上一采样帧的
+                # 检出，省一次检测推理——相同像素 → 相同检测，零画质影响。
+                # 静止画面/录屏/定格场景成片命中；真实运动（字幕动画/镜头晃动/
+                # 胶片颗粒）帧差通常 > 3，不会误跳。置 DETECT_DUP_THRESHOLD=0 禁用
+                diff = self.frame_diff_scores.get(current_frame_no)
+                if prev_list is not None and diff is not None and diff < DETECT_DUP_THRESHOLD:
+                    temp_list = list(prev_list)
+                    dup_skipped += 1
+                else:
+                    temp_list = self.detect_subtitle(frame)
+                prev_list = temp_list
                 if len(temp_list) > 0:
                     sampled_results[current_frame_no] = temp_list
             else:
@@ -257,6 +278,10 @@ class SubtitleDetect:
             if sub_remover and seg_total > 0:
                 sub_remover.progress_total = (100 * float(current_frame_no - frame_start) / float(seg_total)) // 2
         video_cap.release()
+        self.detect_dup_skipped = dup_skipped
+        if sub_remover and dup_skipped:
+            sub_remover.append_output(
+                f'[Skip] 检测重复帧跳过 {dup_skipped} 帧（与相邻采样帧几乎相同，复用检出）')
         # 阶段2：插值填充 — 两个采样帧之间都有字幕时，中间帧也标记为有字幕
         subtitle_frame_no_box_dict = {}
         detected_nos = sorted(sampled_results.keys())

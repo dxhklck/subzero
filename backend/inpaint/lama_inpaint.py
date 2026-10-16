@@ -33,8 +33,9 @@ class LamaInpaint:
             return [self.inpaint(images[0], masks[0])]
 
         orig_height, orig_width = images[0].shape[:2]
-        # 分小批次推理，每批最多 4 帧
-        mini_batch_size = 4
+        # 微批上限：1080p/1440p 条带（≤1.5M 像素）用 8 帧摊薄内核启动开销；
+        # 4K 级大条带回落 4 帧，防低显存机器 OOM。16G 卡实测 1080p/8 帧峰值 <1G
+        mini_batch_size = 8 if orig_height * orig_width <= 1_500_000 else 4
         results = [None] * len(images)
         for start in range(0, len(images), mini_batch_size):
             end = min(start + mini_batch_size, len(images))
@@ -59,9 +60,9 @@ class LamaInpaint:
             for i in range(end - start):
                 results[start + i] = batch_results[i][:orig_height, :orig_width]
 
+            # 批间不调 empty_cache：caching allocator 本就会复用已分配显存，
+            # 主动释放只会引发重新 cudaMalloc 与显存碎片（纯浪费）；组末统一清一次
             del img_tensor, mask_tensor, padded_imgs, padded_masks
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
         return results
 

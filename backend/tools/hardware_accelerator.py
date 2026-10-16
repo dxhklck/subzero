@@ -7,6 +7,12 @@ import torch
 from backend.config import tr
 from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
 
+# cuDNN 自动调优：同一任务内张量形状恒定（LAMA 条带高度只取决于画面宽度、
+# STTN 固定 640x120、MiniMax 按 16 对齐且分块尺寸只有几种），首次形状探测后
+# 每次推理自动选最快算法。数值差异 1e-6 量级（视觉无损）；仅在有 CUDA 时生效，
+# CPU 路径无影响。放在模块级：所有流水线入口（main/检测/STTN）都经此导入
+torch.backends.cudnn.benchmark = True
+
 class HardwareAccelerator:
 
     # 类变量，用于存储单例实例
