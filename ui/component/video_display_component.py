@@ -1,3 +1,5 @@
+import time
+
 import cv2
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QMenu, QBoxLayout, QLabel
 from PySide6.QtCore import Qt, Signal, QRect, QRectF, QObject, QEvent, QTimer
@@ -6,6 +8,89 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from qfluentwidgets import qconfig, CardWidget, HollowHandleStyle, ToolButton, FluentIcon
 
 from backend.config import config, tr
+
+
+class _RangeBar(QWidget):
+    """播放条区间可视化条：滑块上方的窄条，把「选区在时间轴上的范围」画出来。
+
+    两行条带（自上而下）：
+    - 选框局部范围：当前活动选框的时间段（6 元组的 t0/t1），彩色，
+      色序与预览画面内的选框条带一致；刚用 Alt+[ / Alt+] 标记时高亮约 1 秒
+    - 全局区间：[/] 标记的 AB 处理区块，半透明白色
+
+    另画两条竖线：待定 AB 起点（[ 按下、] 未按）与当前播放位置。
+    无任何区间数据时整体隐藏（由 _refresh_range_bar 按需显隐），不占视觉噪音。
+    """
+
+    # 与预览画面选框条带同一色序（按选框索引取色）
+    BOX_COLORS = [(66, 133, 244), (219, 68, 55), (244, 180, 0), (15, 157, 88), (140, 90, 220)]
+    BAR_H = 12
+    _FLASH_MS = 900
+
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self._owner = owner
+        self.setFixedHeight(self.BAR_H)
+        self._flash_until = 0.0
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self.update)
+
+    def flash(self):
+        """局部条带高亮 _FLASH_MS 毫秒：Alt+[ / Alt+] 标记选框时间时的即时反馈，
+        同时提示「全局范围 + 选框局部范围」两条都在播放条上可见"""
+        self._flash_until = time.monotonic() + self._FLASH_MS / 1000.0
+        self._flash_timer.start(self._FLASH_MS + 50)
+        self.update()
+
+    def paintEvent(self, event):
+        owner = self._owner
+        total = owner.video_slider.maximum()
+        # 活动选框局部范围（6 元组才带时间）
+        box = None
+        i = owner.active_selection_index
+        if 0 <= i < len(owner.selection_rects):
+            r = owner.selection_rects[i]
+            if len(r) >= 6 and r[5] > r[4]:
+                box = (r[4], r[5])
+        ab = [s for s in owner.ab_sections if s.stop > s.start]
+        pend = owner.current_ab_start if owner.current_ab_start >= 0 else None
+        if total <= 1 or (box is None and not ab and pend is None):
+            return
+        w = self.width()
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        # 下行：全局 AB 区间（半透明白，与预览画面内的 AB 标记同色系）
+        if ab:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QtGui.QColor(255, 255, 255, 150))
+            for s in ab:
+                x0 = int(s.start / total * w)
+                x1 = int(s.stop / total * w)
+                p.drawRect(x0, 7, max(2, x1 - x0), 4)
+        # 上行：活动选框局部范围（彩色，刚标记时高亮）
+        if box is not None:
+            t0, t1 = box
+            x0 = int(t0 / total * w)
+            x1 = int(t1 / total * w)
+            cr, cg, cb = self.BOX_COLORS[i % len(self.BOX_COLORS)]
+            alpha = 255 if time.monotonic() < self._flash_until else 230
+            p.setPen(Qt.NoPen)
+            p.setBrush(QtGui.QColor(cr, cg, cb, alpha))
+            p.drawRect(x0, 1, max(2, x1 - x0), 4)
+        # 待定 AB 起点竖线（[ 已按、] 未按）
+        if pend is not None and 0 <= pend < total:
+            x = int(pend / total * w)
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 220), 1))
+            p.drawLine(x, 0, x, self.BAR_H)
+        # 播放位置竖线（1-based 帧号 → 全宽映射，压在最上层）
+        v = owner.video_slider.value()
+        if total > 1:
+            x = int((v - 1) / (total - 1) * max(0, w - 1))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
+            p.drawLine(x, 0, x, self.BAR_H)
+        p.end()
+
 
 class VideoDisplayComponent(QWidget):
     size_changed = Signal(int)  # 预览区需按窗口宽度重设尺寸
@@ -256,6 +341,17 @@ class VideoDisplayComponent(QWidget):
         control_container = QWidget(self)
         control_layout = QVBoxLayout()
         control_layout.setContentsMargins(8, 8, 8, 8)
+        control_layout.setSpacing(2)
+        # 播放条区间可视化条：与滑块同宽（右侧留出播放按钮 28px + 间距 8），
+        # 无区间数据时自动隐藏（见 _refresh_range_bar）；创建先隐藏——
+        # 首帧渲染前 update_preview_with_rect 尚未跑过，默认可见会露空条
+        self.range_bar = _RangeBar(self)
+        self.range_bar.setVisible(False)
+        range_row = QHBoxLayout()
+        range_row.setSpacing(8)
+        range_row.addWidget(self.range_bar, 1)
+        range_row.addSpacing(36)  # 28px 按钮 + 8px 间距，与下行滑块右缘对齐
+        control_layout.addLayout(range_row)
         slider_row = QHBoxLayout()
         slider_row.setSpacing(8)
         self.play_button = ToolButton(FluentIcon.PLAY, self)
@@ -310,30 +406,32 @@ class VideoDisplayComponent(QWidget):
         self.shortcut_box_time_clear.activated.connect(self.__handle_box_time_clear)
 
         # 添加左右键控制slider的快捷键
+        # 方向键 = 可配置帧步长（默认 1 帧逐帧，设置项 previewFrameStep）；
+        # 旧行为 ±1 秒跳转过大，精确定位字幕帧困难，秒级跳改由 Ctrl/Shift 承担
         self.shortcut_right = QShortcut(QtGui.QKeySequence(Qt.Key_Right), self)
-        self.shortcut_right.activated.connect(lambda: self.__adjust_slider_value(self.fps))
+        self.shortcut_right.activated.connect(lambda: self.__nudge_slider(1))
         self.shortcut_right.setContext(Qt.ApplicationShortcut)
         
         self.shortcut_left = QShortcut(QtGui.QKeySequence(Qt.Key_Left), self)
-        self.shortcut_left.activated.connect(lambda: self.__adjust_slider_value(-self.fps))
+        self.shortcut_left.activated.connect(lambda: self.__nudge_slider(-1))
         self.shortcut_left.setContext(Qt.ApplicationShortcut)
         
-        # 添加Ctrl+左右键控制slider的快捷键
+        # 添加Ctrl+左右键控制slider的快捷键（±1秒）
         self.shortcut_ctrl_right = QShortcut(QtGui.QKeySequence("Ctrl+Right"), self)
-        self.shortcut_ctrl_right.activated.connect(lambda: self.__adjust_slider_value(self.fps*5))
+        self.shortcut_ctrl_right.activated.connect(lambda: self.__adjust_slider_value(self._second_frames()))
         self.shortcut_ctrl_right.setContext(Qt.ApplicationShortcut)
         
         self.shortcut_ctrl_left = QShortcut(QtGui.QKeySequence("Ctrl+Left"), self)
-        self.shortcut_ctrl_left.activated.connect(lambda: self.__adjust_slider_value(-self.fps*5))
+        self.shortcut_ctrl_left.activated.connect(lambda: self.__adjust_slider_value(-self._second_frames()))
         self.shortcut_ctrl_left.setContext(Qt.ApplicationShortcut)
         
-        # 添加Shift+左右键控制slider的快捷键
+        # 添加Shift+左右键控制slider的快捷键（±5秒）
         self.shortcut_shift_right = QShortcut(QtGui.QKeySequence("Shift+Right"), self)
-        self.shortcut_shift_right.activated.connect(lambda: self.__adjust_slider_value(1))
+        self.shortcut_shift_right.activated.connect(lambda: self.__adjust_slider_value(self._second_frames() * 5))
         self.shortcut_shift_right.setContext(Qt.ApplicationShortcut)
         
         self.shortcut_shift_left = QShortcut(QtGui.QKeySequence("Shift+Left"), self)
-        self.shortcut_shift_left.activated.connect(lambda: self.__adjust_slider_value(-1))
+        self.shortcut_shift_left.activated.connect(lambda: self.__adjust_slider_value(-self._second_frames() * 5))
         self.shortcut_shift_left.setContext(Qt.ApplicationShortcut)
 
     def resizeEvent(self, event):
@@ -573,8 +671,33 @@ class VideoDisplayComponent(QWidget):
         x1d, y1d = self.original_to_display(xmax, ymax)
         return QRect(int(x0d), int(y0d), int(x1d - x0d), int(y1d - y0d))
 
+    def _refresh_range_bar(self):
+        """推送区间数据到播放条可视化条并按需显隐。
+
+        在 update_preview_with_rect 开头调用——该方法是所有选区/AB/渲染
+        路径的公共汇点（含滑块拖动与 A/B 同步播放），一处挂钩全覆盖。
+        """
+        bar = getattr(self, 'range_bar', None)
+        if bar is None:
+            return
+        total = self.video_slider.maximum()
+        box = None
+        i = self.active_selection_index
+        if 0 <= i < len(self.selection_rects):
+            r = self.selection_rects[i]
+            if len(r) >= 6 and r[5] > r[4]:
+                box = (r[4], r[5])
+        has_ab = any(s.stop > s.start for s in self.ab_sections)
+        pend = self.current_ab_start >= 0
+        visible = total > 1 and (box is not None or has_ab or pend)
+        if bar.isVisible() != visible:
+            bar.setVisible(visible)
+        if visible:
+            bar.update()
+
     def update_preview_with_rect(self, rect=None, draw_selection=True):
         """更新带有选择框的预览"""
+        self._refresh_range_bar()
         if not hasattr(self, 'current_pixmap') or self.current_pixmap is None:
             return
         
@@ -1157,6 +1280,9 @@ class VideoDisplayComponent(QWidget):
         rect = self.selection_rects[index]
         self.selection_rects[index] = (rect[0], rect[1], rect[2], rect[3], int(t0), int(t1))
         self.update_preview_with_rect()
+        # 播放条高亮局部条带：提示「全局范围 + 选框局部范围」同时在播放条可见
+        if getattr(self, 'range_bar', None) is not None and self.range_bar.isVisible():
+            self.range_bar.flash()
         self.selections_changed.emit(self.selection_rects)
 
     def __handle_box_time_start(self):
@@ -1265,6 +1391,21 @@ class VideoDisplayComponent(QWidget):
                     return True
         return False
     
+    def _second_frames(self):
+        """1 秒对应的帧数：Ctrl/Shift 秒级跳转用。
+        fps 读不到（0/异常）时回退 25，避免跳转化成 0 帧（按了没反应）"""
+        fps = self.fps if self.fps and self.fps > 0 else 25
+        return max(1, int(round(fps)))
+
+    def __nudge_slider(self, direction):
+        """方向键移动：步长取配置项 previewFrameStep（帧），默认 1 = 逐帧。
+        在快捷键 lambda 里实时读配置——用户在设置里改步长无需重启即生效"""
+        try:
+            step = int(config.previewFrameStep.value)
+        except (TypeError, ValueError):
+            step = 1
+        self.__adjust_slider_value(direction * max(1, step))
+
     def __adjust_slider_value(self, delta):
         """调整视频滑块的值"""
         current_value = self.video_slider.value()

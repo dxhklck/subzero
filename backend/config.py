@@ -55,6 +55,11 @@ class Config(QConfig):
     # 默认值为一个选区，格式为："ymin,ymax,xmin,xmax;ymin,ymax,xmin,xmax;..."，分号分隔不同选区
     subtitleSelectionAreas = ConfigItem("Main", "SubtitleSelectionAreas", "0.88,0.99,0.15,0.85")
 
+    # 预览方向键步长（帧）：按左/右方向键在视频预览中移动的帧数。
+    # 1 = 逐帧（默认；旧行为为 ±1 秒的大跳转，精确定位字幕帧困难）；
+    # Ctrl+左/右 = ±1 秒、Shift+左/右 = ±5 秒（固定秒级跳转，与本设置无关）
+    previewFrameStep = RangeConfigItem("Main", "PreviewFrameStep", 1, RangeValidator(1, 300))
+
     # 专业模式：高级设置页是否显示专家参数（容差像素/STTN细节/MiniMax次要项）
     expertMode = ConfigItem("Window", "ExpertMode", False, BoolValidator())
 

@@ -307,6 +307,7 @@ class HomeInterface(QWidget):
         self.task_list_component = TaskListComponent(self)
         self.task_list_component.task_selected.connect(self.on_task_selected)
         self.task_list_component.task_deleted.connect(self.on_task_deleted)
+        self.task_list_component.task_run_single.connect(self._on_run_single_task)
         task_list_layout.addWidget(self.task_list_component)
         task_list_container.setLayout(task_list_layout)
         right_layout.addWidget(task_list_container, 1)  # 占满剩余空间
@@ -777,7 +778,46 @@ class HomeInterface(QWidget):
                 content=gui['ProcessWidthHintText'].format(widest, pw if pw else gui['ProcessWidthNative']),
                 parent=self.window(), duration=8000)
 
-    def run_button_clicked(self):
+    def _on_run_single_task(self, row):
+        """任务列表右键「运行此任务」：仅处理该条视频，不影响其他文件。
+
+        - 已有任务在跑（worker 存活）→ 拒绝并提示（与菜单置灰互为双保险）
+        - 非待处理状态（已完成/失败）→ 先复位为待处理再跑；
+          重跑不覆盖旧成果：resolve_output_path 会自动加序号另存
+        - 以任务对象（而非行号）下发：菜单点击到 worker 取任务之间若发生
+          删除/重排，对象过滤不会错位到别的文件上
+        """
+        gui = tr['SubtitleExtractorGUI']
+        if self._worker_thread and self._worker_thread.is_alive():
+            InfoBar.warning(
+                title=gui['RunThisTaskBusyTitle'],
+                content=gui['RunThisTaskBusy'],
+                parent=self.window(), duration=4000)
+            return
+        task = self.task_list_component.get_task(row)
+        if task is None:
+            return
+        if task.status != TaskStatus.PENDING:
+            self.task_list_component.update_task_status(row, TaskStatus.PENDING)
+            self.task_list_component.update_task_progress(row, 0)
+        self.run_button_clicked(only_tasks=[task])
+
+    def run_button_clicked(self, only_tasks=None):
+        """开始处理。
+
+        only_tasks=None：处理全部待处理任务（原有行为，队列依次跑完）；
+        only_tasks=[task, ...]：仅处理指定任务对象（右键「运行此任务」），
+        跑完即止，不影响列表中其他文件。
+        """
+        # 重复启动守卫：处理中（worker 存活）时拒绝。运行按钮此时本应隐藏，
+        # 但右键入口可在任意时刻触发，必须显式拦截，否则两个 worker 会争抢
+        # video_cap / running_process / 任务状态
+        if self._worker_thread and self._worker_thread.is_alive():
+            InfoBar.warning(
+                title=tr['SubtitleExtractorGUI']['RunThisTaskBusyTitle'],
+                content=tr['SubtitleExtractorGUI']['RunThisTaskBusy'],
+                parent=self.window(), duration=4000)
+            return
         if not self.task_list_component.get_pending_tasks():
             self.append_output(tr['SubtitleExtractorGUI']['OpenVideoFirst'])
             return
@@ -812,6 +852,12 @@ class HomeInterface(QWidget):
                     while not self._stop_event.is_set():
                         try:
                             pending_tasks = self.task_list_component.get_pending_tasks()
+                            if only_tasks is not None:
+                                # 单跑模式：按任务对象过滤，只处理指定任务；
+                                # 目标跑完（状态离开 PENDING）自然退出循环，
+                                # 不会顺手把队列里其他文件也处理掉
+                                pending_tasks = [pt for pt in pending_tasks
+                                                 if any(pt[1] is t for t in only_tasks)]
                             if not pending_tasks:
                                 break
                             pending_task = pending_tasks[0]

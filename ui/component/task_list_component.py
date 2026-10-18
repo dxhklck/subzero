@@ -676,6 +676,7 @@ class TaskListComponent(QWidget):
     task_selected = Signal(int, str)  # 任务被选中时发出信号，参数为任务索引和视频路径
     task_deleted = Signal(int)  # 任务被删除时发出信号，参数为任务索引
     task_moved = Signal(int, int)  # 拖拽重排：任务从 from_row 移动到 insert_index
+    task_run_single = Signal(int)  # 右键「运行此任务」：仅处理该条（参数为行索引）
     snapshot_log = Signal(str)  # 快照加载过程日志（GUI 线程接到监控输出）
     
     def __init__(self, parent=None):
@@ -1114,6 +1115,17 @@ class TaskListComponent(QWidget):
 
         # 处理模型：任务级覆盖全局设置（置顶，最常用入口）
         self._build_model_submenu(menu, [row])
+
+        # 运行此任务：仅处理该条视频，不影响列表中其他文件。
+        # 有任务处理中时置灰（worker 占用中，排队无意义）；已完成的任务
+        # 允许重跑（输出自动加序号另存，不覆盖旧成果）
+        run_action = QAction(tr['TaskList']['RunThisTask'], self)
+        busy = any(t.status == TaskStatus.PROCESSING for t in self.tasks)
+        run_action.setEnabled(not busy)
+        if busy:
+            run_action.setToolTip(tr['SubtitleExtractorGUI']['RunThisTaskBusy'])
+        run_action.triggered.connect(lambda: self.task_run_single.emit(row))
+        menu.addAction(run_action)
 
         # 打开视频文件位置
         open_video_location_action = QAction(tr['TaskList']['OpenSourceVideoLocation'], self)

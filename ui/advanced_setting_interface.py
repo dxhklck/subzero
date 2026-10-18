@@ -278,6 +278,13 @@ class AdvancedSettingInterface(ScrollArea):
                                        self.encoder_row, self.bitrate_row,
                                        columns=4))
 
+        # 预览帧步长：左/右方向键在预览中移动的帧数（1=逐帧）。
+        # 独立成行：与处理参数无关，属预览交互类，放下方避免挤占处理参数行
+        self.preview_step_row = CompactRangeRow(
+            config.previewFrameStep, gui['PreviewFrameStep'],
+            gui['PreviewFrameStepDesc'], icon=FluentIcon.LEFT_ARROW, parent=card)
+        vbox.addWidget(CompactParamRow((self.preview_step_row, 2), columns=4))
+
     def _build_about_group(self):
         """关于卡：信息类内容集中展示（从通用组抽出）。
 
