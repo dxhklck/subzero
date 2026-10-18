@@ -325,7 +325,11 @@ class HomeInterface(QWidget):
 
         self.run_button = PrimaryPushButton(tr['SubtitleExtractorGUI']['Run'], self)
         self.run_button.setIcon(FluentIcon.PLAY)
-        self.run_button.clicked.connect(self.run_button_clicked)
+        # ⚠ PySide6 陷阱：QAbstractButton.clicked 信号自带 checked=False 形参，
+        # 直连带默认形参的槽会把 False 塞进第一个参数——曾致 only_tasks=False →
+        # worker 抛 'bool' object is not iterable（见 run_button_clicked 防御）。
+        # 无参 lambda 显式丢弃布尔参数；其余 clicked 连接的槽均无参形参，可自动截断
+        self.run_button.clicked.connect(lambda: self.run_button_clicked())
         button_layout.addWidget(self.run_button)
 
         self.stop_button = PrimaryPushButton(tr['SubtitleExtractorGUI']['Stop'], self)
@@ -815,6 +819,12 @@ class HomeInterface(QWidget):
         only_tasks=[task, ...]：仅处理指定任务对象（右键「运行此任务」），
         跑完即止，不影响列表中其他文件。
         """
+        # 防御：only_tasks 只接受任务对象列表。Qt 的 clicked(bool) 信号曾把
+        # checked=False 直塞进本参数（根因见 run_button 连接处注释），导致
+        # worker 的 `for t in only_tasks` 抛 'bool' object is not iterable；
+        # 此处按契约归一，任何非列表值一律视为「处理全部」
+        if only_tasks is not None and not isinstance(only_tasks, (list, tuple)):
+            only_tasks = None
         # 重复启动守卫：处理中（worker 存活）时拒绝。运行按钮此时本应隐藏，
         # 但右键入口可在任意时刻触发，必须显式拦截，否则两个 worker 会争抢
         # video_cap / running_process / 任务状态
