@@ -21,6 +21,25 @@ from backend.tools.video_io import open_video_reader
 # 置 0 禁用（diff < 0 永不成立）
 DETECT_DUP_THRESHOLD = 1.0
 
+#: 检出框保留判定：与活跃选区的重叠面积占框面积比例阈值（替代旧「全包含」规则）。
+#: 全包含太脆——OCR 框含 DB unclip 外扩（比可见字形大 2~6px），手绘选区上沿
+#: 稍紧就会把双行字幕的上行整框丢弃：mask 覆盖不到上行 → 成片上行残留
+#: （用户实测「双行字幕 mask 并不能对字幕全部覆盖，上行检测不到」）。
+#: 按重叠比例判定：探出选区一点点的框保留，远离选区的背景文字/误检仍拒绝。
+AREA_OVERLAP_KEEP_RATIO = 0.5
+
+
+def _box_area_in_selection(xmin, xmax, ymin, ymax, sel):
+    """检出框 (xmin,xmax,ymin,ymax) 与选区 (ymin,ymax,xmin,xmax) 的重叠面积
+    是否达到框面积的保留阈值（AREA_OVERLAP_KEEP_RATIO）。"""
+    s_ymin, s_ymax, s_xmin, s_xmax = sel[:4]
+    ix = min(xmax, s_xmax) - max(xmin, s_xmin)
+    iy = min(ymax, s_ymax) - max(ymin, s_ymin)
+    if ix <= 0 or iy <= 0:
+        return False
+    box_area = max(1, (xmax - xmin) * (ymax - ymin))
+    return (ix * iy) / float(box_area) >= AREA_OVERLAP_KEEP_RATIO
+
 class SubtitleDetect:
     """
     文本框检测类，用于检测视频帧中是否存在文本框
@@ -221,18 +240,16 @@ class SubtitleDetect:
             if not sub_areas:
                 temp_lists[idx].extend(coordinate_list)
             elif len(active_areas) == 1:
-                # 单区域快速路径（最常见场景）
-                s_ymin, s_ymax, s_xmin, s_xmax = active_areas[0][:4]
-                for xmin, xmax, ymin, ymax in coordinate_list:
-                    if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                        temp_lists[idx].append((xmin, xmax, ymin, ymax))
+                # 单区域快速路径（最常见场景）：重叠比例判定（见 AREA_OVERLAP_KEEP_RATIO）
+                sel = active_areas[0]
+                for box in coordinate_list:
+                    if _box_area_in_selection(box[0], box[1], box[2], box[3], sel):
+                        temp_lists[idx].append(box)
             else:
-                for xmin, xmax, ymin, ymax in coordinate_list:
-                    for s_area in active_areas:
-                        s_ymin, s_ymax, s_xmin, s_xmax = s_area[:4]
-                        if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                            temp_lists[idx].append((xmin, xmax, ymin, ymax))
-                            break
+                for box in coordinate_list:
+                    if any(_box_area_in_selection(box[0], box[1], box[2], box[3], s)
+                           for s in active_areas):
+                        temp_lists[idx].append(box)
         return temp_lists
 
     def find_subtitle_frame_no(self, sub_remover=None, frame_start=None, frame_end=None):

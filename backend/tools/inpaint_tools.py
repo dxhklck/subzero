@@ -28,34 +28,37 @@ def batch_generator(data, max_batch_size):
     if last_batch_start < n_samples:
         yield data[last_batch_start:]
 
+def expand_box(box):
+    """检测框 (xmin,xmax,ymin,ymax) → create_mask 实际外扩后的框（同一公式）。
+
+    横向 = 字幕区域外扩像素(dev) + 字高÷maskXExpandDivisor 的自适应附加
+    （下限 8px、上限 40px）；纵向 = dev。供二遍残留兜底记录「第一遍真正
+    修复的区域」用——旧实现存的是未外扩的原始检测框，落在框沿与外扩沿
+    之间的残留会被 _overlaps_first_pass(margin=30) 拒掉（用户实测
+    「第二次反检没有去除这个残影」）。
+    """
+    xmin, xmax, ymin, ymax = box
+    # 坐标必须是整数（cv2.rectangle 不接受 float；选区经比例换算/显示坐标换算
+    # 可能是浮点），先四舍五入再算字高——与 create_mask 原实现逐位一致
+    xmin, xmax = int(round(float(xmin))), int(round(float(xmax)))
+    ymin, ymax = int(round(float(ymin))), int(round(float(ymax)))
+    dev = int(config.subtitleAreaDeviationPixel.value)
+    x_div = int(config.maskXExpandDivisor.value)
+    h = max(0, ymax - ymin)
+    x_dev = dev + (min(40, max(8, h // x_div)) if x_div > 0 else 0)
+    return (xmin - x_dev, xmax + x_dev, ymin - dev, ymax + dev)
+
+
 def create_mask(size, coords_list):
     mask = np.zeros(size, dtype="uint8")
     if coords_list:
-        dev = int(config.subtitleAreaDeviationPixel.value)
-        # 横向附加外扩除数（0=不加；见 config.maskXExpandDivisor 注释）
-        x_div = int(config.maskXExpandDivisor.value)
         for coords in coords_list:
-            xmin, xmax, ymin, ymax = coords
             # 坐标必须是整数（cv2.rectangle 不接受 float；选区经比例换算/
-            # 显示坐标换算可能是浮点），统一四舍五入兜底
-            xmin, xmax = int(round(float(xmin))), int(round(float(xmax)))
-            ymin, ymax = int(round(float(ymin))), int(round(float(ymax)))
-            # 横向自适应外扩：描边/艺术字/斜体的笔画横向超出检测框的比例明显高于
-            # 纵向（实测两端残留的形态），按字高 ÷ x_div 附加（下限 8px、上限 40px）；
-            # 纵向仍用「字幕区域外扩像素」。行合并/同行掩膜已保证框宽为该行最宽帧，
-            # 此处只补笔画超出框沿的部分
-            h = max(0, ymax - ymin)
-            x_dev = dev + (min(40, max(8, h // x_div)) if x_div > 0 else 0)
-            x1 = xmin - x_dev
-            if x1 < 0:
-                x1 = 0
-            y1 = ymin - dev
-            if y1 < 0:
-                y1 = 0
-            x2 = xmax + x_dev
-            y2 = ymax + dev
-            cv2.rectangle(mask, (x1, y1),
-                          (x2, y2), (255, 255, 255), thickness=-1)
+            # 显示坐标换算可能是浮点），expand_box 内统一四舍五入兜底
+            exmin, exmax, eymin, eymax = expand_box(coords)
+            # 左/上沿钳到帧内（cv2 会自己裁剪右/下，无需显式 clamp）
+            cv2.rectangle(mask, (max(0, exmin), max(0, eymin)),
+                          (exmax, eymax), (255, 255, 255), thickness=-1)
     return mask
 
 def get_inpaint_area_by_mask(W, H, h, mask, multiple=1):

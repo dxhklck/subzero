@@ -22,13 +22,13 @@ from backend.inpaint.minimax_inpaint import MiniMaxInpaint
 from backend.inpaint.opencv_inpaint import OpenCVInpaint
 from backend.tools.inpaint_tools import (create_mask, batch_generator, expand_frame_ranges,
                                          area_active_at, split_ranges_at_area_bounds,
-                                         compute_box_time_segments)
+                                         compute_box_time_segments, expand_box)
 from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
 from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter, resolve_h264_encoder, open_video_reader
-from backend.tools.constant import EncoderMode
+from backend.tools.constant import EncoderMode, InpaintMode
 import tempfile
 import multiprocessing
 import time
@@ -778,17 +778,20 @@ class SubtitleRemover:
     def _collect_first_pass_regions(self, sub_list):
         """收集第一遍检测/修复覆盖的区域（xmin,xmax,ymin,ymax），供二遍残留兜底做重叠判定。
         剔除高瘦误检框（与第一遍修复同规则），保证"第一遍真正修过的区域"这个语义一致。
-        用户选区同样计入（选区兜底会在无检出组修复选区矩形，属于第一遍修复区域）。"""
+        用户选区同样计入（选区兜底会在无检出组修复选区矩形，属于第一遍修复区域）。
+        ⚠ 记录的是 expand_box 外扩后的区域（= create_mask 实际修复范围），不是原始
+        检测框：残影若落在框沿与外扩沿之间，旧实现存原始框会被 _overlaps_first_pass
+        (margin=30) 拒掉，二遍白检（用户实测「第二次反检没有去除这个残影」）。"""
         for boxes in sub_list.values():
             for b in boxes:
                 xmin, xmax, ymin, ymax = b
                 if (ymax - ymin) - (xmax - xmin) > config.subtitleYXAxisDifferencePixel.value:
                     continue
-                self._first_pass_regions.append((xmin, xmax, ymin, ymax))
+                self._first_pass_regions.append(expand_box(b))
         if self.sub_areas:
             for a in self.sub_areas:
-                # SUB_AREAS 为 (ymin,ymax,xmin,xmax)，统一到 (xmin,xmax,ymin,ymax)
-                self._first_pass_regions.append((a[2], a[3], a[0], a[1]))
+                # SUB_AREAS 为 (ymin,ymax,xmin,xmax)，统一到 (xmin,xmax,ymin,ymax) 再外扩
+                self._first_pass_regions.append(expand_box((a[2], a[3], a[0], a[1])))
 
     def _overlaps_first_pass(self, box, margin=30):
         """残留判定：输出视频中新检出的框与第一遍修复区域（外扩 margin 容差）重叠。
@@ -1038,7 +1041,10 @@ if __name__ == '__main__':
         sr.video_out_path = os.path.abspath(args.output)
     # 显式传参时仅覆盖内存值（不写盘，不污染 GUI 设置）；不传则沿用 config.json 中 GUI 选择的模式
     if args.inpaint_mode is not None:
-        config.inpaintMode.value = args.inpaint_mode
+        # args_handler 已把 --inpaint-mode 转成枚举成员；此处仍走 config.set 而非
+        # 裸 .value =：裸赋字符串会被 EnumSerializer 静默打回默认 STTN_AUTO
+        # （实测 'minimax' → <InpaintMode.STTN_AUTO>），枚举/字符串双输入都安全
+        config.set(config.inpaintMode, InpaintMode(args.inpaint_mode))
     # 分段帧范围（可选）：由分段续跑执行器或用户手工分段使用
     if args.frame_start is not None:
         sr.frame_start = max(0, args.frame_start)
