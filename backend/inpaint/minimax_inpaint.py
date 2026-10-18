@@ -124,6 +124,16 @@ class MiniMaxInpaint:
         16 对齐、宽不低于 _MIN_PROC_W，只缩不增；缩到下限仍放不下返回
         None（调用方抛出明确错误，不再带着 OOM 风险硬跑）。
 
+        2026-10-18 修复（用户实测误报「显存不足」）：
+        1. 缩放系数必须作用于**当前处理分辨率**（proc_w/proc_h），不能作用
+           于条带原尺寸（W_ori/H_ori）——ProcessWidth 设限时 proc 已小于
+           条带，从条带起算缩出的 new_w 会 ≥ proc_w，被「new_w >= proc_w
+           判定为无法再缩」误伤而直接抛错；而其实在 cap 之内再降一档就放得下
+           （实测：条带 720x503 + ProcessWidth=688，free 10.6~11.7G 必误报，
+           报错文本正是用户看到的「条带 688x480 即使降到 256px 也超预算」）
+        2. 16 对齐取整后可能仍超预算，必须逐档下探复验，不能取整完就直接返回
+           （旧实现返回的尺寸普遍仍超预算 0.1~0.9G，只是把 OOM 留给后面）
+
         返回 (proc_h, proc_w)；非 CUDA / 查询失败时原样返回（不干预）。
         """
         if not (torch.cuda.is_available() and str(self.device).startswith('cuda')):
@@ -136,14 +146,24 @@ class MiniMaxInpaint:
         mp = (proc_h * proc_w) / 1e6
         if mp <= 0 or self._VRAM_GB_PER_MP * mp <= budget:
             return proc_h, proc_w
-        # 面积比 = max_mp/mp → 线性比开根号（等比缩放保条带宽高比）
+        # 预算内最大处理面积 → 缩放系数（作用于当前处理分辨率，见 docstring 缺陷 1）
         max_mp = budget / self._VRAM_GB_PER_MP
-        scale = min(1.0, max((max_mp / mp) ** 0.5, self._MIN_PROC_W / max(1, W_ori)))
-        new_w = self._align_16(W_ori * scale)
-        new_h = self._align_16(H_ori * scale)
+        scale = (max_mp / mp) ** 0.5
+        # 目标宽：proc_w × scale，向下对齐 16（只缩不增），不低于下限
+        new_w = max(self._MIN_PROC_W, (int(proc_w * scale) // 16) * 16)
+        # 逐档下探：对齐取整/宽高比偏差可能仍超预算，每次降 16 直到放得下或触底
+        while True:
+            new_h = self._align_16(H_ori * new_w / W_ori)
+            if (self._VRAM_GB_PER_MP * (new_h * new_w) / 1e6 <= budget
+                    or new_w <= self._MIN_PROC_W):
+                break
+            new_w = ((new_w - 1) // 16) * 16
+        # 降不动（proc_w 已贴下限）或触底仍放不下才放弃
         if new_w >= proc_w or new_w < self._MIN_PROC_W:
-            return None  # 已无法再缩
-        print(f'[MiniMax] 显存预算不足：条带 {proc_w}x{proc_h} ({mp:.2f}MP) 预计激活 '
+            return None
+        if self._VRAM_GB_PER_MP * (new_h * new_w) / 1e6 > budget:
+            return None
+        print(f'[MiniMax] 显存预算不足：条带处理 {proc_w}x{proc_h} ({mp:.2f}MP) 预计激活 '
               f'{self._VRAM_GB_PER_MP * mp:.1f}G / 预算 {budget:.1f}G，'
               f'处理分辨率自动降至 {new_w}x{new_h}（推理后放大回原尺寸，画质略降）')
         return new_h, new_w
