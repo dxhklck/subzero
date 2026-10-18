@@ -53,7 +53,10 @@ class _RangeBar(QWidget):
             r = owner.selection_rects[i]
             if len(r) >= 6 and r[5] > r[4]:
                 box = (r[4], r[5])
-        ab = [s for s in owner.ab_sections if s.stop > s.start]
+        # 类型守卫：ab_sections 恒为 list（set_ab_sections 归一），异常态下
+        # 跳过 AB 行绘制而非让迭代抛错——paint 异常会直接打死重绘链路
+        ab = ([s for s in owner.ab_sections if s.stop > s.start]
+              if isinstance(owner.ab_sections, (list, tuple)) else [])
         pend = owner.current_ab_start if owner.current_ab_start >= 0 else None
         if total <= 1 or (box is None and not ab and pend is None):
             return
@@ -687,7 +690,11 @@ class VideoDisplayComponent(QWidget):
             r = self.selection_rects[i]
             if len(r) >= 6 and r[5] > r[4]:
                 box = (r[4], r[5])
-        has_ab = any(s.stop > s.start for s in self.ab_sections)
+        # 类型守卫：ab_sections 理论上恒为 list；异常态（脏任务选项）下按
+        # 「无 AB 区间」处理，绝不让 any(...) 迭代抛出 'bool' object is not
+        # iterable——该异常会经 worker 的 load_video 链路冒到任务循环外
+        has_ab = (any(s.stop > s.start for s in self.ab_sections)
+                  if isinstance(self.ab_sections, (list, tuple)) else False)
         pend = self.current_ab_start >= 0
         visible = total > 1 and (box is not None or has_ab or pend)
         if bar.isVisible() != visible:
@@ -1138,6 +1145,11 @@ class VideoDisplayComponent(QWidget):
     
     def set_selection_rects(self, rects):
         """设置选择框（原图像素坐标；条目可为 4 元组或带时间范围的 6 元组）"""
+        # 类型守卫：非 list/tuple（脏任务选项/异常态）归一为空，避免 list(rects)
+        # 对布尔值抛 'bool' object is not iterable 把调用链（on_task_selected →
+        # GUI 事件循环）炸掉
+        if not isinstance(rects, (list, tuple)):
+            rects = []
         self.selection_rects = list(rects)
         # 进行中的拖拽矩形恒为 4 元组（时间范围不属于拖拽状态）
         self.selection_rect = (rects[-1][:4] if rects else (0, 0, 0, 0))
@@ -1476,6 +1488,11 @@ class VideoDisplayComponent(QWidget):
 
     def set_ab_sections(self, sections):
         """设置AB分区标记"""
+        # 类型守卫：非 list/tuple（脏任务选项）归一为空——ab_sections 被
+        # _refresh_range_bar/_RangeBar.paintEvent 迭代，布尔值会抛
+        # 'bool' object is not iterable
+        if not isinstance(sections, (list, tuple)):
+            sections = []
         self.ab_sections = sections
         self.update_preview_with_rect()
 

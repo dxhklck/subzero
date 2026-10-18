@@ -670,9 +670,13 @@ class HomeInterface(QWidget):
         if processing_active:
             self.video_display_component.set_compare_mode(True)
         ab_sections = self.task_list_component.get_task_option(index, TaskOptions.AB_SECTIONS, [])
+        # 类型守卫：快照/任务选项理论上恒为 list，异常态（脏数据）下降级为空，
+        # 不让 len()/迭代把 GUI 线程的异常冒到事件循环（表现为无 traceback 的卡死/报错）
+        if not isinstance(ab_sections, (list, tuple)):
+            ab_sections = []
         self.video_display_component.set_ab_sections(ab_sections)
         selections = self.task_list_component.get_task_option(index, TaskOptions.SUB_AREAS, [])
-        if len(selections) <= 0:
+        if not isinstance(selections, (list, tuple)) or len(selections) <= 0:
             self.video_display_component.load_selections_from_config()
         else:
             self.video_display_component.set_selection_rects(selections)
@@ -765,6 +769,8 @@ class HomeInterface(QWidget):
         if eff_value != InpaintMode.MINIMAX.value:
             return
         areas = self.task_list_component.get_task_option(idx, TaskOptions.SUB_AREAS, [])
+        if not isinstance(areas, (list, tuple)):
+            return
         # 条目可为 4/6 元组，前 4 项为 (ymin,ymax,xmin,xmax)
         widths = [a[3] - a[2] for a in areas if len(a) >= 4 and a[3] > a[2]]
         if not widths:
@@ -901,7 +907,9 @@ class HomeInterface(QWidget):
 
                             self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.PROCESSING)
                             # SUB_AREAS 在组件内即按原图像素坐标存储，无需二次转换，直接下发
-                            options = dict(task_item.options)
+                            # 类型守卫：options 恒为 dict（Task.from_dict/_options_from_json 保证），
+                            # 但快照脏数据/异常态下宁降级为空选项，不让 dict() 抛错掩盖真正故障点
+                            options = dict(task_item.options) if isinstance(task_item.options, dict) else {}
                             # 输出同名不覆盖：上次输出可能仍被残留的 python 子进程
                             # 占用（合并后进程退出/句柄释放有延迟），且不应覆盖旧成果；
                             # 存在同名输出时加序号另存（_no_sub_2.mp4、_3…）
@@ -933,12 +941,24 @@ class HomeInterface(QWidget):
                                 self.task_done_signal.emit(task_item.name, False)
 
                         except Exception as e:
+                            # 完整 traceback 进监控/日志：仅 print(e) 会丢掉调用栈，
+                            # 现场类错误（如 TypeError）无法定位——堆栈逐行入监控标签，
+                            # 与子进程 remover_process 的报错方式一致
+                            tb = traceback.format_exc()
+                            for ln in tb.splitlines():
+                                print(ln)
+                                self.console_signal.emit(ln)
                             print(e)
                             self.append_log_signal.emit([f"Error: {e}"])
-                            # 更新任务状态为失败
-                            if self.current_processing_task_index >= 0:
-                                self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
-                                self.task_done_signal.emit(task_item.name, False)
+                            # 更新任务状态为失败（task_item 可能尚未绑定：
+                            # 异常发生在取任务之前时， NameError 不能让处理器
+                            # 自己再崩——那会把整个 worker 线程静默打死）
+                            try:
+                                if self.current_processing_task_index >= 0:
+                                    self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
+                                    self.task_done_signal.emit(task_item.name, False)
+                            except NameError:
+                                pass
                             break
                         finally:
                             with self._video_cap_lock:
@@ -952,7 +972,11 @@ class HomeInterface(QWidget):
             self._worker_thread = threading.Thread(target=task, daemon=True)
             self._worker_thread.start()
         except Exception as e:
-            print(traceback.format_exc())
+            tb = traceback.format_exc()
+            for ln in tb.splitlines():
+                print(ln)
+                self.console_signal.emit(ln)
+            print(e)
             self.append_log_signal.emit([f"Error: {e}"])
             self.toggle_buttons_signal.emit(True)
 
@@ -1448,7 +1472,7 @@ class HomeInterface(QWidget):
         self._b_live_arrived = True
         if self.current_processing_task_index >= 0:
             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
-            if len(subtitle_areas) > 0:
+            if isinstance(subtitle_areas, (list, tuple)) and len(subtitle_areas) > 0:
                 if frame_ori is frame_comp:
                     frame_ori = frame_ori.copy()
                 # SUB_AREAS 为原图像素坐标（可能带时间范围的 6 元组，取前 4 项），

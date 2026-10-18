@@ -182,29 +182,37 @@ def _options_to_json(options):
 
 
 def _options_from_json(options):
-    """JSON options 还原为内存结构（ab_sections -> range，sub_areas -> 元组）。"""
+    """JSON options 还原为内存结构（ab_sections -> range，sub_areas -> 元组）。
+
+    两个列表型键（ab_sections/sub_areas）只接受 JSON 数组：非数组值
+    （布尔/数字/字符串/null，多见于手改或旧格式快照）一律归一为空列表，
+    绝不让脏值原样进入内存——历史上 'bool' object is not iterable 正来自
+    布尔值流入后续的 len()/迭代链路（on_task_selected / _refresh_range_bar）。
+    """
     out = {}
     if not isinstance(options, dict):
         return out
     for key, value in options.items():
-        if key == TaskOptions.AB_SECTIONS.value and isinstance(value, list):
+        if key == TaskOptions.AB_SECTIONS.value:
             sections = []
-            for item in value:
-                if isinstance(item, (list, tuple)) and len(item) >= 2:
-                    try:
-                        sections.append(range(int(item[0]), int(item[1])))
-                    except (TypeError, ValueError):
-                        continue
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        try:
+                            sections.append(range(int(item[0]), int(item[1])))
+                        except (TypeError, ValueError):
+                            continue
             out[key] = sections
-        elif key == TaskOptions.SUB_AREAS.value and isinstance(value, list):
+        elif key == TaskOptions.SUB_AREAS.value:
             rects = []
-            for item in value:
-                # 4 元组=无时间范围（全程生效）；6 元组=(…,t0,t1) 帧范围 end 排他
-                if isinstance(item, (list, tuple)) and len(item) in (4, 6):
-                    try:
-                        rects.append(tuple(int(v) for v in item))
-                    except (TypeError, ValueError):
-                        continue
+            if isinstance(value, list):
+                for item in value:
+                    # 4 元组=无时间范围（全程生效）；6 元组=(…,t0,t1) 帧范围 end 排他
+                    if isinstance(item, (list, tuple)) and len(item) in (4, 6):
+                        try:
+                            rects.append(tuple(int(v) for v in item))
+                        except (TypeError, ValueError):
+                            continue
             out[key] = rects
         else:
             out[key] = value
@@ -1396,6 +1404,10 @@ class TaskListComponent(QWidget):
             value: 选项值
         """
         if 0 <= index < len(self.tasks):
+            # options 恒为 dict；异常态（不应发生）下自愈重建，避免把整个
+            # options 变成非字典后连锁炸出后续所有 .get/赋值点
+            if not isinstance(self.tasks[index].options, dict):
+                self.tasks[index].options = {}
             self.tasks[index].options[task_option.value] = value
             self.save_tasks()
 
