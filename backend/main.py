@@ -633,18 +633,24 @@ class SubtitleRemover:
         else:
             # 精准模式下，获取场景分割的帧号，进一步切割
             self.log_model()
-            if config.inpaintMode.value == InpaintMode.STTN_AUTO:
-                self.sttn_auto_mode(tbar)
-            elif config.inpaintMode.value == InpaintMode.STTN_DET:
-                self.video_inpaint(tbar, self.sttn_det_inpaint)
-            elif config.inpaintMode.value == InpaintMode.LAMA:
-                self.video_inpaint(tbar, self.lama_inpaint)
-            elif config.inpaintMode.value == InpaintMode.MINIMAX:
-                self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
-            elif config.inpaintMode.value == InpaintMode.OPENCV:
-                self.video_inpaint(tbar, OpenCVInpaint())
-            else:
-                raise Exception(f'inpaint mode: {config.inpaintMode.value} not implemented')
+            try:
+                if config.inpaintMode.value == InpaintMode.STTN_AUTO:
+                    self.sttn_auto_mode(tbar)
+                elif config.inpaintMode.value == InpaintMode.STTN_DET:
+                    self.video_inpaint(tbar, self.sttn_det_inpaint)
+                elif config.inpaintMode.value == InpaintMode.LAMA:
+                    self.video_inpaint(tbar, self.lama_inpaint)
+                elif config.inpaintMode.value == InpaintMode.MINIMAX:
+                    self.video_inpaint(tbar, self.minimax_inpaint, config.minimaxMaxLoadNum.value)
+                elif config.inpaintMode.value == InpaintMode.OPENCV:
+                    self.video_inpaint(tbar, OpenCVInpaint())
+                else:
+                    raise Exception(f'inpaint mode: {config.inpaintMode.value} not implemented')
+            finally:
+                # 任一步抛错也要收编码管道：否则 ffmpeg 子进程成孤儿
+                # （stdin 未关会一直等输入，临时文件句柄被占，影响后续运行）。
+                # release 幂等，与下方正常路径的重复调用无害
+                self.video_writer.release()
 
         self.video_cap.release()
         self.video_writer.release()

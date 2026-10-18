@@ -1,3 +1,4 @@
+import collections
 import os
 import queue
 import subprocess
@@ -239,6 +240,11 @@ class FFmpegVideoWriter:
     保证同一次运行的所有 writer（主流程/残留二遍/分段）编码器一致
     （分段 concat 的 -c copy 以此为前提）。
     接口兼容 cv2.VideoWriter（write/release）。
+
+    生命周期契约：writer 可能被跨分段共享（BoxTime 分段顺序写同一通道），
+    由所有者（SubtitleRemover.run）在全部段写完后统一 release；写前体检
+    stdin 关闭/编码器退出，把「write to closed file」式的静默故障变成
+    带 ffmpeg stderr 的可定位报错。
     """
 
     def __init__(self, output_path, fps, size, encoder_override=None, bitrate_kbps=0):
@@ -265,35 +271,66 @@ class FFmpegVideoWriter:
             '-loglevel', 'error',
             output_path
         ]
+        # stderr 改管道收集（原 DEVNULL）：编码器猝死（磁盘满/NVENC 掉驱动/
+        # 参数非法）时 -loglevel error 的输出是唯一线索；不排空会撑满管道缓冲
+        # 把 ffmpeg 自己堵死，故用守护线程持续读空
+        self._stderr_lines = collections.deque(maxlen=32)
         self._process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             creationflags=SUBPROCESS_CREATION_FLAGS,
         )
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         # 编码器秒死（参数非法/磁盘满等）时立即暴露，让上层走 cv2 回退，而不是静默产出空文件
         if self._process.poll() is not None:
-            raise RuntimeError(f'ffmpeg encoder exited immediately (rc={self._process.returncode})')
+            raise RuntimeError(f'ffmpeg encoder exited immediately (rc={self._process.returncode}): {self._stderr_tail()}')
+
+    def _drain_stderr(self):
+        try:
+            for raw in self._process.stderr:
+                self._stderr_lines.append(raw.decode('utf-8', 'replace').rstrip())
+        except Exception:
+            pass  # 进程退出/管道被关：收集线程只是诊断用途，静默退场
+
+    def _stderr_tail(self, n=4):
+        lines = [ln for ln in self._stderr_lines if ln]
+        return ' / '.join(lines[-n:]) if lines else '(ffmpeg stderr empty)'
 
     def write(self, frame):
         """写入一帧（numpy BGR 数组）。"""
         if frame.dtype != np.uint8:
             frame = np.clip(frame, 0, 255).astype(np.uint8)
+        # 写前体检：把两种「写不进去」变成可定位报错——
+        # ① stdin 已关：writer 被 release 后又被写（跨段共享 writer 被提前释放的典型症状）
+        # ② 编码器已退出：磁盘满/编码器崩溃，继续写只会静默丢帧
+        if self._process.stdin.closed:
+            raise RuntimeError('ffmpeg writer stdin already closed '
+                               '(writer released before write; shared writers must not be released between segments)')
+        rc = self._process.poll()
+        if rc is not None:
+            raise RuntimeError(f'ffmpeg encoder exited before write (rc={rc}): {self._stderr_tail()}')
         try:
             self._process.stdin.write(frame.tobytes())
-        except BrokenPipeError:
-            # 管道断裂 = ffmpeg 已退出，继续写只会静默丢帧；抛出让任务显式失败
-            raise RuntimeError('ffmpeg encoder died mid-write (BrokenPipeError)')
+        except (BrokenPipeError, ValueError) as e:
+            # 管道断裂/句柄已关 = ffmpeg 已退出，继续写只会静默丢帧；抛出让任务显式失败
+            raise RuntimeError(f'ffmpeg encoder died mid-write ({type(e).__name__}): {self._stderr_tail()}')
 
     def release(self):
-        """关闭管道并等待编码完成。"""
+        """关闭管道并等待编码完成（幂等：重复调用/对已退出进程安全）。"""
         try:
             self._process.stdin.close()
-        except BrokenPipeError:
+        except (BrokenPipeError, ValueError):
             pass
         try:
             self._process.wait(timeout=600)
         except subprocess.TimeoutExpired:
             self._process.terminate()
             self._process.wait(timeout=5)
+        # 收 stderr 管道（收集线程随之退场），避免句柄泄漏
+        try:
+            self._process.stderr.close()
+        except Exception:
+            pass

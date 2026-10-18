@@ -200,6 +200,12 @@ class STTNAutoInpaint:
         reader = None
         writer = None
         prefetcher = None
+        # 写入对象归属：input_sub_remover 注入（GUI/分段续跑）时 writer 由其创建、
+        # 跨 BoxTime 分段共享，由 SubtitleRemover.run() 末尾统一 release——本调用
+        # 只借用。在 finally 里释放会毒化后续分段：stdin 已关，下一段第一帧即
+        # ValueError: write to closed file（曾导致多选框时间分段从第 2 段起必崩）。
+        # 独立运行（无注入）时自建 cv2.VideoWriter，才由本调用释放。
+        writer_owned = input_sub_remover is None
         try:
             # 读取视频帧信息
             reader, frame_info = self.read_frame_info_from_video()
@@ -308,49 +314,51 @@ class STTNAutoInpaint:
                     else:
                         comps[k] = []
                 
-                # 如果有要修复的区域
+                # 修复帧映射：仅当本段有修复区域时构建。段内无活跃选框时掩膜为空、
+                # inpaint_area 为 []——此时映射为空，所有帧原样透写；绝不能因为
+                # 没有掩膜就把读到的帧吞掉（旧代码把写循环整个裹在 if inpaint_area
+                # 里，选框时间分段产生的透传段会整段丢帧，单个带时间框时连片头
+                # [0, t0) 段一起丢）
+                processed_frames_map = {}
                 if inpaint_area and valid_frames_count > 0:
-                    # 创建一个映射，记录哪些帧被处理了以及它们在frames[k]中的索引
-                    processed_frames_map = {}
                     processed_idx = 0
-                    
                     # 构建映射关系
                     for j in range(start_f, end_f):
                         if j - start_f < valid_frames_count and is_frame_number_in_ab_sections(frame_start + j, ab_sections):
                             processed_frames_map[j - start_f] = processed_idx
                             processed_idx += 1
-                    
-                    # 应用修复结果
-                    for j in range(valid_frames_count):
-                        if input_sub_remover is not None and input_sub_remover.gui_mode:
-                            original_frame = frames_hr[j].copy()
-                        else:
-                            original_frame = None
-                            
-                        frame = frames_hr[j]
-                        
-                        # 只有被处理过的帧才应用修复结果
-                        if j in processed_frames_map:
-                            comp_idx = processed_frames_map[j]
-                            for k in range(len(inpaint_area)):
-                                if comp_idx < len(comps[k]):  # 确保索引有效
-                                    # 将修复的图像重新扩展到原始分辨率，并融合到原始帧
-                                    comp = cv2.resize(comps[k][comp_idx], (frame_info['W_ori'], split_h))
-                                    comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
-                                    mask_area = mask[inpaint_area[k][0]:inpaint_area[k][1], :]
-                                    frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
 
-                        # 段间重叠：全局帧号（1-based）= frame_start + start_f + j + 1
-                        # （j 为块内相对下标），<= frame_write_start 的帧只作上下文
-                        # （已送入上方推理），不写入、不计进度
-                        if frame_start + start_f + j + 1 > frame_write_start:
-                            writer.write(frame)
+                # 应用修复结果并写出（无修复区域时全部透写）
+                for j in range(valid_frames_count):
+                    if input_sub_remover is not None and input_sub_remover.gui_mode:
+                        original_frame = frames_hr[j].copy()
+                    else:
+                        original_frame = None
 
-                            if input_sub_remover is not None:
-                                if tbar is not None:
-                                    input_sub_remover.update_progress(tbar, increment=1)
-                                if original_frame is not None and input_sub_remover.gui_mode:
-                                    input_sub_remover.update_preview_with_comp(original_frame, frame)
+                    frame = frames_hr[j]
+
+                    # 只有被处理过的帧才应用修复结果
+                    if j in processed_frames_map:
+                        comp_idx = processed_frames_map[j]
+                        for k in range(len(inpaint_area)):
+                            if comp_idx < len(comps[k]):  # 确保索引有效
+                                # 将修复的图像重新扩展到原始分辨率，并融合到原始帧
+                                comp = cv2.resize(comps[k][comp_idx], (frame_info['W_ori'], split_h))
+                                comp = cv2.cvtColor(comp.astype(np.uint8), cv2.COLOR_BGR2RGB)
+                                mask_area = mask[inpaint_area[k][0]:inpaint_area[k][1], :]
+                                frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
+
+                    # 段间重叠：全局帧号（1-based）= frame_start + start_f + j + 1
+                    # （j 为块内相对下标），<= frame_write_start 的帧只作上下文
+                    # （已送入上方推理），不写入、不计进度
+                    if frame_start + start_f + j + 1 > frame_write_start:
+                        writer.write(frame)
+
+                        if input_sub_remover is not None:
+                            if tbar is not None:
+                                input_sub_remover.update_progress(tbar, increment=1)
+                            if original_frame is not None and input_sub_remover.gui_mode:
+                                input_sub_remover.update_preview_with_comp(original_frame, frame)
                 # 每个chunk处理完后清理GPU缓存
                 del frames_hr, frames, comps
                 gc.collect()
@@ -366,7 +374,7 @@ class STTNAutoInpaint:
         finally:
             if prefetcher:
                 prefetcher.release()
-            if writer:
+            if writer and writer_owned:
                 writer.release()
 
 

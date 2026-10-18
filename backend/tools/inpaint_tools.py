@@ -357,6 +357,12 @@ def compute_box_time_segments(sub_areas, frame_count, ab_sections=None):
     - ab_sections 非空 → 处理范围 = 各 AB 区间；否则 = [0, frame_count)
     - 范围再按选框时间边界切分 → 每段内「活跃选框集」恒定，段内掩膜恒定
     - 无选框带时间时退化为原处理范围（与旧行为逐帧一致）
+
+    口径转换：split_ranges_at_area_bounds 按闭区间切（每段含 end 帧），
+    而本函数契约是 end 排他（下游直接当 frame_range 用）。闭区间直接当
+    半开用会漏写每个切段的末帧——片头帧与段间帧被静默丢弃，成片缺帧、
+    与原始音频不同步（多选框时间分段曾因此每段末帧丢失）。故切段 +1
+    转半开；尾段 end 即输入区间的 stop（本就是排他口径），不再 +1。
     """
     ranges = []
     if ab_sections:
@@ -366,7 +372,12 @@ def compute_box_time_segments(sub_areas, frame_count, ab_sections=None):
                 ranges.append((f0, f1))
     else:
         ranges.append((0, int(frame_count)))
-    return split_ranges_at_area_bounds(ranges, sub_areas)
+    out = []
+    for lo, hi in ranges:
+        for f0, f1 in split_ranges_at_area_bounds([(lo, hi)], sub_areas):
+            # 切段（f1 < hi）末帧被闭区间口径包含，+1 补回；尾段 f1 == hi 保持排他
+            out.append((f0, f1 + 1 if f1 < hi else f1))
+    return out
 
 
 def is_frame_number_in_ab_sections(frame_no, ab_sections):
