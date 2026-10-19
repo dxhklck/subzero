@@ -434,3 +434,6 @@ packaging/output/
 
 # 安装版 pyd 编译发行目录（build_pyd.py 产物，含 junction 不入库）
 /packaging/pyd-dist/
+
+# B站推广视频物料（不进库）
+generated-videos/
