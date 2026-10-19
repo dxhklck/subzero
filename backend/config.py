@@ -7,7 +7,7 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode,
 import configparser
 
 # 项目版本号
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 # 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
 PROJECT_HOME_URL = "https://github.com/dxhklck/subzero"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
@@ -206,6 +206,11 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
+    # SageAttention 加速：True = 自注意力走 SageAttention（INT8 量化 K，约1.1~1.3x 注意力提速、
+    # 显存下降），False = PyTorch SDPA（flash 后端，数值最稳）。
+    # 软依赖：环境未装 sageattention 时自动回落 SDPA；本机编译方法见 .workbuddy/memory。
+    # ⚠ 量化有理论精度损失，补背景任务对边缘敏感——默认关，A/B 验证后再按需开。
+    minimaxUseSageAttention = ConfigItem("MiniMax", "UseSageAttention", False, BoolValidator())
 
     # 是否使用硬件加速
     hardwareAcceleration = ConfigItem("Main", "HardwareAcceleration", HARDWARD_ACCELERATION_OPTION, BoolValidator())

@@ -173,9 +173,12 @@ class AdvancedSettingInterface(ScrollArea):
         m7 = CompactSwitchRow(
             config.minimaxVaeDecodeFp32, tr['Setting']['MiniMaxVaeDecodeFp32'],
             tr['Setting']['MiniMaxVaeDecodeFp32Desc'], expert=True, icon=FluentIcon.PALETTE, parent=card)
-        vbox.addWidget(CompactParamRow(m5, m6, m7, columns=4))
+        m8 = CompactSwitchRow(
+            config.minimaxUseSageAttention, tr['Setting']['MiniMaxUseSageAttention'],
+            tr['Setting']['MiniMaxUseSageAttentionDesc'], expert=True, icon=FluentIcon.SPEED_HIGH, parent=card)
+        vbox.addWidget(CompactParamRow(m5, m6, m7, m8, columns=4))
         self.rows_minimax = [m1, m2, m3]
-        self.rows_minimax_expert = [m4, m5, m6, m7]
+        self.rows_minimax_expert = [m4, m5, m6, m7, m8]
 
     def _build_sttn_group(self):
         """STTN：四列布局（1 行 × 4）"""

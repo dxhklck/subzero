@@ -14,6 +14,29 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import FP32LayerNorm
 
+# ---- SageAttention 软依赖（可选注意力加速）----
+# 有 sageattention 且 config.minimaxUseSageAttention=True 时，自注意力走
+# sageattn（INT8 量化 K，注意力约 1.1~1.3x、显存下降）；否则/异常一律回落
+# PyTorch SDPA（flash 后端）。数值敏感链路，默认关，见 config.py 注释。
+try:
+    from sageattention import sageattn as _sageattn
+except Exception:
+    _sageattn = None
+
+try:
+    from backend.config import config as _bz_config
+except Exception:
+    _bz_config = None
+
+
+def _sage_attention_enabled():
+    if _sageattn is None or _bz_config is None:
+        return False
+    try:
+        return bool(_bz_config.minimaxUseSageAttention.value)
+    except Exception:
+        return False
+
 class AttnProcessor2_0:
     def __init__(self):
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -56,9 +79,22 @@ class AttnProcessor2_0:
             query = apply_rotary_emb(query, rotary_emb)
             key = apply_rotary_emb(key, rotary_emb)
 
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False
-        )
+        if _sage_attention_enabled():
+            # SageAttention：q/k/v 为 (B,H,N,D) fp16/bf16 非因果全注意力——正是其标准场景；
+            # QK-norm 与 RoPE 已在上面完成，此处仅替换核心注意力算子。
+            # 任何异常（精度不支持/head_dim 不兼容/OOM 等）回落 SDPA，保证出片。
+            try:
+                hidden_states = _sageattn(
+                    query, key, value, tensor_layout="HND", is_causal=False
+                )
+            except Exception:
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False
+                )
+        else:
+            hidden_states = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False
+            )
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
 
