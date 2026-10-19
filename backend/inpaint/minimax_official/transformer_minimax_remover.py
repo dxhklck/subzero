@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Dict, Optional, Tuple, Union
 
 import torch
@@ -16,12 +17,40 @@ from diffusers.models.normalization import FP32LayerNorm
 
 # ---- SageAttention 软依赖（可选注意力加速）----
 # 有 sageattention 且 config.minimaxUseSageAttention=True 时，自注意力走
-# sageattn（INT8 量化 K，注意力约 1.1~1.3x、显存下降）；否则/异常一律回落
-# PyTorch SDPA（flash 后端）。数值敏感链路，默认关，见 config.py 注释。
+# sageattn（INT8 量化 K，端到端约 41% 提速，画质有轻微量化损失）；
+# 否则/异常一律回落精确注意力 _sdpa_exact（见下）。
 try:
     from sageattention import sageattn as _sageattn
 except Exception:
     _sageattn = None
+
+# cuDNN SDPA 后端（torch >= 2.3）：数学精确（与默认 SDPA 误差同为 fp16 噪声级），
+# Ada 卡实测比自动选择的 mem_efficient 后端快约 60%（12000/128 形状 10.5 vs 16.9ms）。
+# 旧 torch / 异常时回退默认 SDPA。
+try:
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+    _SDPA_CTX = (sdpa_kernel, SDPBackend)
+except Exception:
+    _SDPA_CTX = None
+
+
+def _sdpa_exact(q, k, v):
+    """精确注意力：CUDA 上优先钉 cuDNN 后端，不可用回退默认 SDPA。
+
+    诊断覆盖：环境变量 VSR_ATTENTION_BACKEND=auto 强制走默认 SDPA（跳过 cuDNN 钉定）。
+    """
+    if os.environ.get('VSR_ATTENTION_BACKEND', '').lower() == 'auto':
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+    if q.is_cuda and _SDPA_CTX is not None:
+        try:
+            with _SDPA_CTX[0](_SDPA_CTX[1].CUDNN_ATTENTION):
+                return F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+        except Exception:
+            pass
+    return F.scaled_dot_product_attention(
+        q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
 
 try:
     from backend.config import config as _bz_config
@@ -82,19 +111,15 @@ class AttnProcessor2_0:
         if _sage_attention_enabled():
             # SageAttention：q/k/v 为 (B,H,N,D) fp16/bf16 非因果全注意力——正是其标准场景；
             # QK-norm 与 RoPE 已在上面完成，此处仅替换核心注意力算子。
-            # 任何异常（精度不支持/head_dim 不兼容/OOM 等）回落 SDPA，保证出片。
+            # 任何异常（精度不支持/head_dim 不兼容/OOM 等）回落精确 SDPA，保证出片。
             try:
                 hidden_states = _sageattn(
                     query, key, value, tensor_layout="HND", is_causal=False
                 )
             except Exception:
-                hidden_states = F.scaled_dot_product_attention(
-                    query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False
-                )
+                hidden_states = _sdpa_exact(query, key, value)
         else:
-            hidden_states = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False
-            )
+            hidden_states = _sdpa_exact(query, key, value)
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.type_as(query)
 

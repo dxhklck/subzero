@@ -71,6 +71,46 @@ class MiniMaxInpaint:
         self.pipe.to(device)
         if vae_decode is not None:
             vae_decode.to(device)
+        # cuDNN 卷积自动调优：VAE 卷积形状在任务内固定，cuDNN 试跑选最快算法。
+        # 纯算法选择，数学不变、零画质影响；首块略慢（试跑），其后稳定受益
+        if device.type == 'cuda':
+            torch.backends.cudnn.benchmark = True
+        self._log_sage_status()
+
+    def _log_sage_status(self):
+        """SageAttention 生效状态一行日志（用户反馈：开了开关看不到任何迹象）。
+
+        开关开 + 已安装 → 报版本与按显卡架构选中的内核档位；
+        开关开 + 未安装 → 明示回落 SDPA（GUI/CLI 均可见，不再静默）。"""
+        try:
+            from transformer_minimax_remover import _sage_attention_enabled, _sageattn
+            if not _sage_attention_enabled():
+                print('[MiniMax] SageAttention 加速未启用（自注意力走默认 SDPA；'
+                      '设置页专家模式可开启）')
+                return
+            if _sageattn is None:
+                print('[MiniMax] SageAttention 开关已开启，但当前环境未安装 '
+                      'sageattention —— 自动使用默认 SDPA，功能不受影响')
+                return
+            try:
+                import importlib.metadata as _md
+                ver = _md.version('sageattention')
+            except Exception:
+                ver = 'unknown'
+            kernel = 'SageAttention2 CUDA 内核'
+            try:
+                if str(self.device).startswith('cuda'):
+                    cap = torch.cuda.get_device_capability(self.device)
+                    if cap in ((8, 9), (12, 0)):
+                        kernel = 'SageAttention2++ 内核（fp8 累加，最快档）'
+                    elif cap == (7, 5):
+                        kernel = 'Triton 内核（SM75）'
+            except Exception:
+                pass
+            print(f'[MiniMax] SageAttention 已启用：sageattention {ver}（{kernel}），'
+                  f'自注意力量化加速生效中')
+        except Exception:
+            pass  # 状态提示失败绝不阻断模型加载
 
     def _align_16(self, value: int) -> int:
         return max(16, int(round(value / 16)) * 16)
@@ -175,7 +215,7 @@ class MiniMaxInpaint:
             return self._align_16(int(round(h * scale))), self._align_16(self.process_width)
         return self._align_16(h), self._align_16(w)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _inpaint_chunk(self, frames_bgr: List[np.ndarray], mask_gray: np.ndarray,
                        proc_h: int, proc_w: int) -> List[np.ndarray]:
         """推理一个块（≤4k+1 帧），返回该块全部帧（原分辨率 BGR uint8）"""

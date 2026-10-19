@@ -27,7 +27,7 @@ from backend.tools.strip_inpaint import StripCropInpaint
 from backend.tools.model_config import ModelConfig
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.subtitle_detect import SubtitleDetect
-from backend.tools.video_io import FramePrefetcher, FFmpegVideoWriter, resolve_h264_encoder, open_video_reader
+from backend.tools.video_io import FramePrefetcher, FFmpegFrameReader, FFmpegVideoWriter, resolve_h264_encoder, open_video_reader
 from backend.tools.constant import EncoderMode, InpaintMode
 import tempfile
 import multiprocessing
@@ -901,8 +901,17 @@ class SubtitleRemover:
                 continue
             model, batch_size = self.lama_inpaint, config.getSttnMaxLoadNum()
             tbar.write(f"[Residue] repairing frames {start}-{end} with {type(model).__name__}")
-            cap = open_video_reader(get_readable_path(self.video_temp_file.name))
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)
+            # 帧精确读取（关键正确性）：cv2 的 CAP_PROP_POS_FRAMES seek 会吸附关键帧
+            # （长 GOP 的第一遍输出上实测 set(50) 直接失败/吸附，修错帧 = 把别帧的
+            # 字幕盖到本帧上——用户实测「修完后反而多出字幕残影」即此因）。
+            # FFmpegFrameReader 经 -ss 重开管道输出精确帧；启动失败则跳过本区间——
+            # 宁可漏修（残留兜底本来就是概率性补救），不可修错（主动制造残影）。
+            try:
+                cap = FFmpegFrameReader(get_readable_path(self.video_temp_file.name))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start - 1)
+            except Exception as e:
+                tbar.write(f'[Residue] 帧精确读取器启动失败，跳过区间 {start}-{end}: {e}')
+                continue
             frames = []
             for _ in range(end - start + 1):
                 ret, frame = cap.read()
@@ -910,6 +919,10 @@ class SubtitleRemover:
                     break
                 frames.append(frame)
             cap.release()
+            if len(frames) < end - start + 1:
+                # 读不满（seek/解码异常）：本区间整体放弃，禁止半截帧错位写回
+                tbar.write(f'[Residue] 区间 {start}-{end} 读取不完整（{len(frames)}/{end - start + 1}），跳过')
+                continue
             if not frames:
                 continue
             mask = create_mask(self.mask_size, coords)

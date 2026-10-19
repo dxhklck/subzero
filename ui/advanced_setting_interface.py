@@ -242,11 +242,17 @@ class AdvancedSettingInterface(ScrollArea):
         self.env_row.add_button(st['EnvCheckBtn'], on_click=self.run_env_check)
         self.save_dir_row = CompactActionRow(
             st['SaveDirectory'], '', icon=FluentIcon.DOWNLOAD, parent=card)
-        self.save_dir_row.add_path_label(width=330)
+        self.save_dir_row.add_path_label(width=96)
         self.save_dir_row.add_button(st['ChooseDirectory'], on_click=self.choose_save_directory)
         self._update_save_dir_display()
+        # 2026-10-19 用户要求：插入「视频保存目录」之后，本行作 4 等列
+        # （主题 | 环境自检 | 保存目录 | 预览帧步长），列边界与上下两行对齐
+        self.preview_step_row = CompactRangeRow(
+            config.previewFrameStep, gui['PreviewFrameStep'],
+            gui['PreviewFrameStepDesc'], icon=FluentIcon.LEFT_ARROW, parent=card)
         vbox.addWidget(CompactParamRow(self.theme_row, self.env_row,
-                                       (self.save_dir_row, 2), columns=4))
+                                       self.save_dir_row, self.preview_step_row,
+                                       columns=4))
 
         # 段间重叠帧数：分段处理时为邻帧模型提供段边界上下文（0=关闭）
         self.segment_overlap_row = CompactRangeRow(
@@ -277,16 +283,10 @@ class AdvancedSettingInterface(ScrollArea):
         #   auto 即最优，无可调项；任务完成提醒自独立行挪入此空位。
         #   流水线分块/预取已移除——2026-10-16 实测负优化，代码一并删除；
         #   信息类行见「关于」卡；修复多线程已移除——并行修复无收益）
+        # （预览帧步长 2026-10-19 移入首行保存目录之后）
         vbox.addWidget(CompactParamRow(self.segment_overlap_row, self.notify_row,
                                        self.encoder_row, self.bitrate_row,
                                        columns=4))
-
-        # 预览帧步长：左/右方向键在预览中移动的帧数（1=逐帧）。
-        # 独立成行：与处理参数无关，属预览交互类，放下方避免挤占处理参数行
-        self.preview_step_row = CompactRangeRow(
-            config.previewFrameStep, gui['PreviewFrameStep'],
-            gui['PreviewFrameStepDesc'], icon=FluentIcon.LEFT_ARROW, parent=card)
-        vbox.addWidget(CompactParamRow((self.preview_step_row, 2), columns=4))
 
     def _build_about_group(self):
         """关于卡：信息类内容集中展示（从通用组抽出）。

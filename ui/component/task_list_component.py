@@ -257,12 +257,25 @@ def collect_segment_info(task):
         return None
 
 
+def _sum_elapsed_seconds(tasks):
+    """全部任务累计用时（秒）：完成/失败取定格 elapsed，处理中按起点实算。"""
+    total = 0.0
+    for t in tasks:
+        if (getattr(t, 'status', None) == TaskStatus.PROCESSING
+                and getattr(t, 'started_at', None) is not None):
+            total += max(0.0, time.time() - t.started_at)
+        else:
+            total += max(0.0, float(getattr(t, 'elapsed', 0.0) or 0.0))
+    return total
+
+
 def save_tasks_file(tasks, path=None):
     """任务队列原子写盘（先写 .tmp 再 os.replace），返回写入的 payload。"""
     path = path or TASKS_FILE
     payload = {
         'version': TASKS_VERSION,
         'updated_at': datetime.now().isoformat(timespec='seconds'),
+        'total_elapsed': round(_sum_elapsed_seconds(tasks), 1),
         'tasks': [t.to_dict() for t in tasks],
     }
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
@@ -277,29 +290,32 @@ def load_tasks_file(path=None):
     """读取任务队列文件；文件损坏/字段缺失时优雅降级。
 
     Returns:
-        (tasks, warnings): tasks 为有效 Task 列表；warnings 为降级说明
+        (tasks, warnings, total_elapsed): total_elapsed 为文件里的
+        全部任务总用时（缺失/旧格式返回 None，调用方按任务实算兜底）
     """
     path = path or TASKS_FILE
     warnings = []
     if not os.path.exists(path):
-        return [], warnings
+        return [], warnings, None
     try:
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        return [], [f'任务队列文件损坏或无法读取（{path}）：{e}']
+        return [], [f'任务队列文件损坏或无法读取（{path}）：{e}'], None
     if not isinstance(data, dict):
-        return [], ['任务队列文件格式不正确（根节点应为对象），已忽略']
+        return [], ['任务队列文件格式不正确（根节点应为对象），已忽略'], None
     raw = data.get('tasks')
     if not isinstance(raw, list):
-        return [], ['任务队列文件缺少 tasks 列表，已忽略']
+        return [], ['任务队列文件缺少 tasks 列表，已忽略'], None
+    total = data.get('total_elapsed')
+    total = float(total) if isinstance(total, (int, float)) and total >= 0 else None
     tasks = []
     for i, item in enumerate(raw):
         try:
             tasks.append(Task.from_dict(item))
         except Exception as e:
             warnings.append(f'任务队列第 {i + 1} 条记录无效，已跳过：{e}')
-    return tasks, warnings
+    return tasks, warnings, total
 
 
 class _ClickableLabel(QLabel):
@@ -348,10 +364,16 @@ class TaskProgressCell(QWidget):
         self.bar.setValue(0)
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(5)
+        # 底部总耗时行：任务完成/失败后浮现定格（处理中/待处理隐藏）
+        self.total_label = QLabel("")
+        self.total_label.setStyleSheet("font-size:11px; font-family:'Consolas';")
+        self.total_label.hide()
+        lay.addWidget(self.total_label)
         self._status_color = "#A9A8A0"
         self._status_text = ""
         self._time_text = ""
         self._pct_text = "0%"
+        self._total_text = ""
         self._apply_theme()
         qconfig.themeChanged.connect(self._apply_theme)
 
@@ -364,6 +386,8 @@ class TaskProgressCell(QWidget):
             QProgressBar::chunk {{ background: #1D9E75; border-radius: 2px; }}
         """)
         self.time_label.setStyleSheet(
+            f"font-size:11px; color:{time_color}; font-family:'Consolas';")
+        self.total_label.setStyleSheet(
             f"font-size:11px; color:{time_color}; font-family:'Consolas';")
         self._render_status()
 
@@ -400,6 +424,16 @@ class TaskProgressCell(QWidget):
             self._time_text = text
             self.time_label.setText(text)
             self.time_label.setToolTip(text)
+            self.content_changed.emit()
+
+    def set_total_time(self, text):
+        """底部总耗时行（空串隐藏）：任务完成/失败后浮现并定格，
+        重置任务（回到待处理）后清除。"""
+        text = text or ""
+        if text != self._total_text:
+            self._total_text = text
+            self.total_label.setText(text)
+            self.total_label.setVisible(bool(text))
             self.content_changed.emit()
 
 class _TaskTable(TableWidget):
@@ -696,6 +730,9 @@ class TaskListComponent(QWidget):
         self.current_task_index = -1  # 当前选中的任务索引
         # 快照管理：最近一次手动保存快照的时刻（状态行显示）
         self._last_snapshot_time = None
+        # 总耗时：快照/队列文件里带的 total_elapsed（优先显示，任务状态
+        # 变化后清除改回实时累计）；None = 无存档值，按任务实算
+        self._loaded_total_elapsed = None
 
         # 计时/预估：历史处理速度 EMA（秒/帧，按完成任务回填）+ 秒级刷新定时器
         self._sec_per_frame_ema = 0.0
@@ -786,12 +823,14 @@ class TaskListComponent(QWidget):
 
         layout.addWidget(self.table, 1)
 
-        # 底部拖入提示
-        hint = QLabel(tr["Setting"]["DropHint"])
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet("color:#A9A8A0; font-size:11px; border:1px dashed #5F5E5A;"
-                           "border-radius:6px; margin:6px 10px 8px 10px; padding:5px;")
-        layout.addWidget(hint)
+        # 总耗时悬浮条：半透明浮在任务条（表格视口）下方，鼠标穿透，
+        # 随视口 resize 贴底居中；主题切换时跟随换肤
+        self.total_bar = QLabel('', self.table.viewport())
+        self.total_bar.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.total_bar.hide()
+        self.table.viewport().installEventFilter(self)
+        qconfig.themeChanged.connect(self._apply_total_bar_theme)
+        self._apply_total_bar_theme()
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         """拖入校验：只接受包含媒体文件的拖放"""
@@ -826,6 +865,8 @@ class TaskListComponent(QWidget):
         dup_rows = [row for row, task in enumerate(self.tasks) if task.path == video_path]
         for row in reversed(dup_rows):
             self.delete_task(row)
+        # 新任务入队改变总耗时，快照带来的存档值作废，改回实时累计
+        self._loaded_total_elapsed = None
                 
         # 获取文件名
         file_name = os.path.basename(video_path)
@@ -992,6 +1033,8 @@ class TaskListComponent(QWidget):
         if 0 <= index < len(self.tasks):
             task = self.tasks[index]
             task.status = status
+            # 任务状态流转后，快照带来的总耗时存档作废，改回实时累计
+            self._loaded_total_elapsed = None
             # 计时：进入 PROCESSING 记起点；完成/失败定格用时；
             # 回到 PENDING（重置/停止）清零重计
             if status == TaskStatus.PROCESSING:
@@ -1217,6 +1260,8 @@ class TaskListComponent(QWidget):
         if 0 <= row < len(self.tasks):
             # 从列表中删除
             del self.tasks[row]
+            # 任务集变化后，快照带来的总耗时存档作废，改回实时累计
+            self._loaded_total_elapsed = None
             
             # 从表格中删除
             self.table.removeRow(row)
@@ -1462,6 +1507,48 @@ class TaskListComponent(QWidget):
                 text += ' · ' + tl['QueueSavedAt'].format(self._last_snapshot_time)
         self.queue_status.setText(text)
         self.queue_status.setToolTip(tl['QueueSnapshotTip'])
+        self._update_total_bar()
+
+    # ------------------------------------------------------------------ #
+    # 总耗时悬浮条
+    # ------------------------------------------------------------------ #
+
+    def _apply_total_bar_theme(self):
+        """悬浮条配色随主题：半透明胶囊底 + 22px 品牌绿加粗（醒目）"""
+        color = '#2BBF8E' if isDarkTheme() else '#1D9E75'
+        self.total_bar.setStyleSheet(
+            f"QLabel {{ background: rgba(128,128,128,0.15); color:{color};"
+            f" font-size:22px; font-weight:600; border-radius:14px;"
+            f" padding:5px 22px; }}")
+
+    def _reposition_total_bar(self):
+        """悬浮条贴视口底部居中（半透明浮在任务条下方）"""
+        vp = self.table.viewport()
+        self.total_bar.adjustSize()
+        vp_w, vp_h = vp.width(), vp.height()
+        self.total_bar.move(max(6, (vp_w - self.total_bar.width()) // 2),
+                            max(0, vp_h - self.total_bar.height() - 6))
+
+    def _update_total_bar(self):
+        """刷新总耗时悬浮条：存档值优先（快照恢复），否则按任务实算。
+
+        有任务即显示（全部未跑时显示 0:00，作为稳定锚点）；列表为空隐藏。"""
+        if not self.tasks:
+            self.total_bar.hide()
+            return
+        total = (self._loaded_total_elapsed
+                 if self._loaded_total_elapsed is not None
+                 else _sum_elapsed_seconds(self.tasks))
+        self.total_bar.setText(
+            tr['TaskList']['TasksTotal'].format(self._fmt_duration(total)))
+        self.total_bar.show()
+        self._reposition_total_bar()
+
+    def eventFilter(self, obj, event):
+        """表格视口 resize 时跟随重定位悬浮条"""
+        if obj is self.table.viewport() and event.type() == event.Type.Resize:
+            self._reposition_total_bar()
+        return super().eventFilter(obj, event)
 
     def _open_queue_dir(self):
         """状态行入口：打开快照目录（不存在则打开 config 目录）"""
@@ -1479,6 +1566,19 @@ class TaskListComponent(QWidget):
         """手动保存当前任务队列为快照文件（格式与旧 tasks.json 兼容）。
 
         返回写入路径；失败抛异常（对话框层捕获提示）。"""
+        # 所见即所存兜底：保存前把当前屏幕上的选框同步进当前任务的
+        # sub_areas。正常链路 selections_changed 已实时写入；此兜底覆盖
+        # 「框来自全局默认回填/信号时序缝隙」等边角，保证快照里绝不缺框。
+        provider = getattr(self, 'snapshot_boxes_provider', None)
+        if callable(provider):
+            try:
+                idx = self.get_current_task_index()
+                rects = provider()
+                if idx != -1 and isinstance(rects, list) and rects:
+                    self.update_task_option(idx, TaskOptions.SUB_AREAS,
+                                            [tuple(r) for r in rects])
+            except Exception:
+                pass  # 兜底失败不阻断保存，任务原有 options 仍照常落盘
         for task in self.tasks:
             task.segment_info = collect_segment_info(task)
         save_tasks_file(self.tasks, path)
@@ -1561,7 +1661,10 @@ class TaskListComponent(QWidget):
         Returns:
             (restored_count, warnings)
         """
-        tasks, warnings = load_tasks_file(path)
+        tasks, warnings, total = load_tasks_file(path)
+        # 文件里带的总耗时存档优先显示（覆盖快照保存时处理中任务的
+        # 实时用时——该部分不落单任务 elapsed，实算会丢）
+        self._loaded_total_elapsed = total
         # 整表替换：不发逐条 task_deleted（调用方保证不在处理中）
         self.table.setRowCount(0)
         self.tasks = []
@@ -1649,6 +1752,7 @@ class TaskListComponent(QWidget):
             return
         tl = tr['TaskList']
         text = ''
+        total_text = ''
         if task.status == TaskStatus.PROCESSING and task.started_at is not None:
             elapsed = time.time() - task.started_at
             # 总预估：进度 ≥3% 用本任务实测外推（最准）；
@@ -1666,8 +1770,13 @@ class TaskListComponent(QWidget):
             if est:
                 text = tl['TimeEst'].format(self._fmt_duration(est))
         elif task.elapsed > 0:
-            text = tl['TimeUsed'].format(self._fmt_duration(task.elapsed))
+            # 完成/失败：总耗时从顶行移到底部浮现（进度条下方，定格显示）
+            total_text = tl['TimeTotal'].format(self._fmt_duration(task.elapsed))
         cell.set_time(text)
+        cell.set_total_time(total_text)
+        # 行高随底部总耗时行显隐伸缩（46=标准两行，62=多一行总耗时）
+        if 0 <= index < self.table.rowCount():
+            self.table.setRowHeight(index, 62 if total_text else 46)
 
     def _refresh_pending_estimates(self):
         """速度模型变化后刷新所有待处理行的预估"""

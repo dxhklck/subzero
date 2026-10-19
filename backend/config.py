@@ -120,7 +120,7 @@ class Config(QConfig):
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
-    residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
+    residueCheck = ConfigItem("Main", "ResidueCheck", False, BoolValidator())
     # 检测输入裁剪：把待检测帧裁到「字幕带 + margin」再送 OCR，检出框映射回原分辨率。
     # ⚠ 实证（test2.mp4 真实帧）：检出框级不等价（模型输出依赖输入尺寸，裁剪后有
     # ±2~18px 位移、偶发同行重组），但掩膜级差异由 create_mask 自适应外扩
@@ -206,9 +206,10 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
-    # SageAttention 加速：True = 自注意力走 SageAttention（INT8 量化 K），False = PyTorch SDPA（flash 后端）。
+    # SageAttention 加速：True = 自注意力走 SageAttention（INT8 量化 K），False = PyTorch SDPA。
     # 实测（81帧/12步 A/B）：端到端 0.986 -> 0.578 s/帧（约快 41%），显存峰值持平，
-    # 输出 PSNR 57.5dB（视觉无损）。
+    # 输出 PSNR 57.5dB；但平坦区/细纹理内容有量化劣化倾向（用户实测），默认关。
+    # 关闭时回落 _sdpa_exact（cuDNN 后端，0.986 -> 0.849 s/帧，数学精确零损失）。
     # 软依赖：环境未装 sageattention 或运行异常（精度不支持/head_dim 不兼容/OOM）时自动回落 SDPA。
     # 预编译 wheel 见 woct0rdho/SageAttention（GitHub Releases），安装须 --no-deps。
     minimaxUseSageAttention = ConfigItem("MiniMax", "UseSageAttention", False, BoolValidator())

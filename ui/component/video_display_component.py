@@ -218,6 +218,14 @@ class VideoDisplayComponent(QWidget):
         self.video_display.mousePressEvent = self.selection_mouse_press
         self.video_display.mouseMoveEvent = self.selection_mouse_move
         self.video_display.mouseReleaseEvent = self.selection_mouse_release
+
+        # 视频基本信息悬浮条（任务条点击/换视频时显示：分辨率/帧率/时长/码率/大小）
+        # 挂在 video_display 内部左上角，半透明黑底白字，不随窗口缩放跳动
+        self.video_info_label = QtWidgets.QLabel(self.video_display)
+        self.video_info_label.setStyleSheet(
+            'QLabel{background-color: rgba(0,0,0,150); color:#FFFFFF;'
+            'padding:4px 10px; border-radius:6px; font-size:12px;}')
+        self.video_info_label.hide()
         
         # 视频滑块
         self.video_slider = QtWidgets.QSlider(Qt.Horizontal)
@@ -513,6 +521,19 @@ class VideoDisplayComponent(QWidget):
         self.b_video_display.setMinimumSize(min(240, b_size[0]), min(135, b_size[1]))
         self.black_container.setFixedWidth(total_w + 4)
         return True
+
+    def set_video_info(self, text):
+        """预览区左上角视频基本信息悬浮条（任务条点击/换视频时更新）。
+
+        传入空串/None 隐藏。信息由 home_interface 采集，本组件只管显示。"""
+        if text:
+            self.video_info_label.setText(text)
+            self.video_info_label.adjustSize()
+            self.video_info_label.move(8, 8)
+            self.video_info_label.raise_()
+            self.video_info_label.show()
+        else:
+            self.video_info_label.hide()
 
     def set_compare_mode(self, enabled):
         """切换单框 / A/B 对比布局。

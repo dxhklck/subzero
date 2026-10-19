@@ -113,7 +113,7 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
     def interrupt(self):
         return self._interrupt
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(
         self,
         height: int = 720,
@@ -170,7 +170,7 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
                 self.vae.device, torch.float16
             )
 
-        with torch.no_grad():
+        with torch.inference_mode():
             masked_latents = self.vae.encode(masked_images.half()).latent_dist.mode()
             masks_latents = self.vae.encode(2*masks.half()-1.0).latent_dist.mode()
 

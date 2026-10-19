@@ -267,6 +267,11 @@ class FFmpegVideoWriter:
             '-i', '-',
             '-c:v', encoder,
             *enc_params,
+            # 关键帧间隔 2s：编码器默认 GOP 很长（NVENC 250 帧 ≈8.3s@30fps），
+            # 播放器/预览对输出 seek 会吸附关键帧——GUI 的 A/B 对比拖滑杆
+            # 时 B 框长时间停在同一帧（用户实测），短 GOP 也让成片在播放器
+            # 里拖动更跟手；码率代价可忽略
+            '-g', str(max(12, int(round(fps * 2)))),
             '-pix_fmt', 'yuv420p',
             '-loglevel', 'error',
             output_path

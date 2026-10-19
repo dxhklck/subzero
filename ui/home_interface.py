@@ -28,6 +28,7 @@ from backend.tools.constant import InpaintMode
 from backend.tools.subtitle_remover_remote_call import SubtitleRemoverRemoteCall
 from backend.tools.process_manager import ProcessManager
 from backend.tools.common_tools import get_readable_path, is_image_file, read_image, SUBPROCESS_CREATION_FLAGS
+from backend.tools.video_io import FFmpegFrameReader
 
 
 def write_crash_report(video_path, output_path, tb_text):
@@ -308,6 +309,9 @@ class HomeInterface(QWidget):
         self.task_list_component.task_selected.connect(self.on_task_selected)
         self.task_list_component.task_deleted.connect(self.on_task_deleted)
         self.task_list_component.task_run_single.connect(self._on_run_single_task)
+        # 保存快照时的「所见即所存」兜底：任务列表保存前经此回调取当前屏幕选框
+        self.task_list_component.snapshot_boxes_provider = (
+            lambda: list(getattr(self.video_display_component, 'selection_rects', []) or []))
         task_list_layout.addWidget(self.task_list_component)
         task_list_container.setLayout(task_list_layout)
         right_layout.addWidget(task_list_container, 1)  # 占满剩余空间
@@ -476,14 +480,30 @@ class HomeInterface(QWidget):
 
     
     def slider_changed(self, value):
+        """拖滑杆：A 框取源帧 + B 框同步结果帧。
+
+        A/B 源为 FFmpegFrameReader（set 即精确帧，重开解码管道约几十 ms）。
+        快速拖动会触发密集 valueChanged——用单发定时器合并、只处理最新值，
+        避免管道风暴卡顿。"""
+        self._slider_seek_pending = int(value)
+        if getattr(self, '_slider_seek_timer', None) is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(80)
+            timer.timeout.connect(self._do_slider_seek)
+            self._slider_seek_timer = timer
+        self._slider_seek_timer.start()
+
+    def _do_slider_seek(self):
+        frame_no = self._slider_seek_pending
         frame = None
         with self._video_cap_lock:
-            if self.video_cap is not None and self.video_cap.isOpened():
-                frame_no = self.video_slider.value()
-                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-                ret, frame = self.video_cap.read()
-                if not ret:
-                    frame = None
+            cap = self.video_cap
+            if cap is not None and cap.isOpened():
+                if cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no):
+                    ret, frame = cap.read()
+                else:
+                    ret, frame = False, None
         if frame is not None:
             # 更新预览图像
             self.update_preview(frame)
@@ -499,8 +519,10 @@ class HomeInterface(QWidget):
         if self.b_video_cap is None or not self.b_video_cap.isOpened():
             return
         frame_no = self.video_slider.value()
-        self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-        ret, frame = self.b_video_cap.read()
+        if self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no):
+            ret, frame = self.b_video_cap.read()
+        else:
+            ret, frame = False, None
         self.video_display_component.set_b_frame(frame if ret else None)
 
     def _reopen_source_cap(self):
@@ -514,7 +536,10 @@ class HomeInterface(QWidget):
             if (self.video_cap is None or not self.video_cap.isOpened()) \
                     and self.video_path and os.path.isfile(self.video_path) \
                     and not is_image_file(self.video_path):
-                self.video_cap = cv2.VideoCapture(get_readable_path(self.video_path))
+                try:
+                    self.video_cap = FFmpegFrameReader(get_readable_path(self.video_path))
+                except Exception:
+                    self.video_cap = None
                 if not self.video_cap.isOpened():
                     self.video_cap = None
         return self.video_cap is not None and self.video_cap.isOpened()
@@ -552,8 +577,14 @@ class HomeInterface(QWidget):
                     content=tr['SubtitleExtractorGUI']['CompareOutputMissing'].format(output_path),
                     parent=self.window(), duration=5000)
             return
-        cap = cv2.VideoCapture(get_readable_path(output_path))
-        if not cap.isOpened():
+        # 帧精确读取器：cv2 的 CAP_PROP_POS_FRAMES seek 会吸附关键帧甚至失败
+        # （长 GOP 输出实测 8 秒窗口内 B 框停在同一帧），FFmpegFrameReader
+        # 经 -ss 重开管道输出精确帧，拖滑杆 A/B 才能逐帧对齐
+        try:
+            cap = FFmpegFrameReader(get_readable_path(output_path))
+        except Exception:
+            cap = None
+        if cap is None or not cap.isOpened():
             self.video_display_component.set_b_frame(None)
             self.video_display_component.play_button.setEnabled(False)
             InfoBar.warning(
@@ -682,6 +713,14 @@ class HomeInterface(QWidget):
         selections = self.task_list_component.get_task_option(index, TaskOptions.SUB_AREAS, [])
         if not isinstance(selections, (list, tuple)) or len(selections) <= 0:
             self.video_display_component.load_selections_from_config()
+            # 全局默认框回填任务选项（所见即所存）：否则屏幕上明明有框
+            # （来自全局 config 默认选区），任务 options 里却是空的——
+            # 保存快照时该任务的 sub_areas 落盘为空，用户核对快照文件
+            # 就会发现「框选没有保存」。
+            current_rects = getattr(self.video_display_component, 'selection_rects', None)
+            if isinstance(current_rects, list) and current_rects:
+                self.task_list_component.update_task_option(
+                    index, TaskOptions.SUB_AREAS, [tuple(r) for r in current_rects])
         else:
             self.video_display_component.set_selection_rects(selections)
         # B 框对比源：选中的任务已有完成输出 → 打开结果视频同步对比
@@ -1556,7 +1595,13 @@ class HomeInterface(QWidget):
         if is_image_file(video_path):
             return self.load_as_picture(video_path)
         with self._video_cap_lock:
-            self.video_cap = cv2.VideoCapture(get_readable_path(self.video_path))
+            # FFmpegFrameReader 对坏文件在构造时抛异常（cv2 是 isOpened=False），
+            # 统一转成「按图片路径兜底」的既有行为
+            try:
+                self.video_cap = FFmpegFrameReader(get_readable_path(self.video_path))
+            except Exception:
+                self.video_cap = None
+                return self.load_as_picture(video_path)
             if not self.video_cap.isOpened():
                 self.video_cap = None
                 return self.load_as_picture(video_path)
@@ -1574,9 +1619,28 @@ class HomeInterface(QWidget):
         self.video_slider.setMaximum(self.frame_count)
         self.video_slider.setValue(1)
         self.video_display_component.set_dragger_enabled(True)
+        # 预览区左上角显示视频基本信息（时长/分辨率/帧率/码率/大小）
+        self._show_video_info_overlay(video_path)
         # 视频模式下恢复用户原始的 inpaint 模式选择
         self._unlock_inpaint_mode()
         return True
+
+    def _show_video_info_overlay(self, video_path):
+        """采集并在预览区显示视频基本信息（用户需求：任务条点击视频时可见）。
+
+        码率为平均值 = 文件大小×8 ÷ 时长；任一环节数值异常时静默跳过，
+        不影响预览加载。"""
+        try:
+            size_b = os.path.getsize(video_path)
+            dur = self.frame_count / self.fps if self.fps else 0
+            h, m, s = int(dur // 3600), int(dur % 3600 // 60), int(dur % 60)
+            dur_s = f'{h}:{m:02d}:{s:02d}' if h else f'{m:02d}:{s:02d}'
+            mbps = (size_b * 8 / dur / 1e6) if dur > 0 else 0.0
+            self.video_display_component.set_video_info(
+                f'{self.frame_width}×{self.frame_height} · {self.fps:.0f}fps · '
+                f'{dur_s} · {mbps:.1f} Mbps · {size_b / 1048576:.0f}MB')
+        except Exception:
+            self.video_display_component.set_video_info(None)
 
     def load_as_picture(self, path):
         if not is_image_file(path):
@@ -1594,6 +1658,13 @@ class HomeInterface(QWidget):
         self.video_slider.setMaximum(self.frame_count)
         self.video_slider.setValue(1)
         self.video_display_component.set_dragger_enabled(True)
+        # 图片模式：信息条只显示分辨率与大小
+        try:
+            self.video_display_component.set_video_info(
+                f'{self.frame_width}×{self.frame_height} · 图片 · '
+                f'{os.path.getsize(path) / 1048576:.1f}MB')
+        except Exception:
+            pass
         # 图片模式锁定为 LAMA
         self._lock_inpaint_mode_to_lama()
         return True

@@ -1,3 +1,6 @@
+import os
+
+import cv2
 import numpy as np
 
 
@@ -11,12 +14,20 @@ class StripCropInpaint:
     整段帧序列统一裁剪该窗口 → 内层模型只修复条带 → 逐帧贴回原位。
 
     - 窗口在时间段内固定 → 无逐帧抖动；段间窗口随 mask 变化，与现有 mask 行为一致
-    - 窗口外像素原样保留，逐像素无损
+    - 贴回时按 mask 的羽化 alpha 合成（FEATHER 半径高斯渐变）：mask 内部取修复
+      像素、mask 外严格保留原像素、边界渐变过渡——否则模型重绘的窗口内背景
+      与原帧的细微差异会在矩形边缘留下可见痕迹（用户实测「隐隐有边框痕迹」）
     - mask 为空（检测全被过滤）时透传内层模型，保持既有行为
     """
 
     # 条带最小高度：过小会超出视频修复模型的舒适尺度
     MIN_HEIGHT = 160
+
+    # 羽化半径（像素）：掩膜边缘 alpha 从 1→0 的高斯渐变半宽。
+    # 16px：掩膜本已外扩（纵向 dev + 横向 8~40px），字幕笔画距边 ≥ 外扩量，
+    # 16px 渐变在笔画处 alpha≈0.97+（无笔画残影），又足以抹平接缝
+    # 诊断覆盖：环境变量 VSR_STRIP_FEATHER 可临时改羽化半径（0=硬合成）
+    FEATHER = max(0, int(os.environ.get('VSR_STRIP_FEATHER', '16')))
 
     def __init__(self, inner_model, padding: int = 128):
         self.inner = inner_model
@@ -60,9 +71,21 @@ class StripCropInpaint:
         crop_frames = [f[y0:y1, x0:x1] for f in input_frames]
         crop_out = self.inner(crop_frames, crop_mask)
 
+        # 羽化 alpha：二值 mask 高斯模糊 → 内部 1.0 / 外部 0.0 / 边缘渐变。
+        # 核尺寸奇数化并钳到 [3, 101]；FEATHER=0 时退回二值硬合成
+        if self.FEATHER > 0:
+            k = self.FEATHER * 2 + 1
+            alpha = cv2.GaussianBlur(crop_mask, (k, k), 0).astype(np.float32) / 255.0
+        else:
+            alpha = (crop_mask > 127).astype(np.float32)
+        alpha = alpha[:, :, np.newaxis]
+
         out = []
         for src, rep in zip(input_frames, crop_out):
             frame = src.copy()
-            frame[y0:y1, x0:x1] = rep
+            win_src = src[y0:y1, x0:x1].astype(np.float32)
+            win_rep = np.asarray(rep, dtype=np.float32)
+            blended = win_src * (1.0 - alpha) + win_rep * alpha
+            frame[y0:y1, x0:x1] = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
             out.append(frame)
         return out
