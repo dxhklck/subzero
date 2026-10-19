@@ -163,6 +163,7 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | StripPadding | 128 (0–300) | Padding above/below the subtitle strip for model context |
 | BlockOverlap | 8 (0–20) | Overlap frames between blocks to hide seams within long intervals (no cost when a single batch) |
 | VAE fp32 decode | On | Faster when off, but banding may appear in dark areas |
+| SageAttention | Off | Routes self-attention through SageAttention (INT8-quantized K): ~40% faster end-to-end with no change in peak VRAM; falls back automatically when sageattention is missing or fails. Slight quantization cost on flat areas / fine textures — keep off for quality-first workflows |
 
 **STTN**
 
@@ -176,6 +177,7 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 
 - 720p MiniMax: ~0.5 s/frame (strip cropping, ~7× faster than full-frame)
 - 480p 522 frames: STTN 25s / OpenCV 34s / LAMA 48s / MiniMax ~1 s/frame
+- MiniMax with SageAttention on: ~40% faster end-to-end (81-frame benchmark 0.986 → 0.578 s/frame, same peak VRAM); with it off, the cuDNN attention backend is already ~14% faster than earlier builds
 - Peak VRAM is dominated by strip resolution; for 4K lower ProcessWidth to 1280–1920
 
 ### 2.5 Monitor tab (a terminal)
