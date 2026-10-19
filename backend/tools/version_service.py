@@ -2,6 +2,8 @@
 import re
 import os
 import sys
+import json
+import hashlib
 import requests
 
 from PySide6.QtCore import QVersionNumber
@@ -24,6 +26,10 @@ class VersionService:
         self.backup_note = None
         # 更新说明（主源说明/提取码等，随 download_url 一起来自 version.json；弹窗中展示）
         self.release_notes = None
+        # 代码层补丁清单（魔搭 version.json 的 patches 数组；GitHub 端点无此字段）
+        # 每项：{'id': int 序号, 'target': 适用版本, 'url': zip 直链,
+        #        'sha256': 校验值, 'notes': 说明}
+        self.patches = []
 
     def get_latest_version(self):
         """ get latest version """
@@ -57,6 +63,7 @@ class VersionService:
                 self.backup_url = data.get('backup_url') or None
                 self.backup_note = data.get('backup_note') or None
                 self.release_notes = data.get('notes') or None
+                self.patches = data.get('patches') or []
                 print(tr['VersionService']['VersionInfo'].format(VERSION, self.lastest_version))
                 return self.lastest_version
             except Exception as e:
@@ -87,6 +94,80 @@ class VersionService:
         version = QVersionNumber.fromString(self.get_latest_version())
         current_version = QVersionNumber.fromString(self.current_version)
         return version > current_version
+
+    # ---------- 代码层补丁（小体积热更新：保留权重/运行时/配置） ----------
+
+    def _app_root(self):
+        """安装根目录（gui.py 所在层）。GUI/CLI 均以脚本路径启动，argv[0] 即入口。"""
+        try:
+            root = os.path.dirname(os.path.abspath(sys.argv[0]))
+            return root if os.path.isdir(root) else os.getcwd()
+        except Exception:
+            return os.getcwd()
+
+    def get_local_patch_level(self):
+        """本地补丁级别：安装根目录 patch_level.txt（补丁应用后由入口写入；
+        手动解压补丁包时该文件随包覆盖，同样生效）。"""
+        try:
+            with open(os.path.join(self._app_root(), 'patch_level.txt'), encoding='utf-8') as f:
+                return int(f.read().strip() or '0')
+        except Exception:
+            return 0
+
+    def get_pending_patch(self):
+        """待应用补丁：id 大于本地级别、且 target 匹配当前版本的最新一项。"""
+        for p in sorted(self.patches, key=lambda x: int(x.get('id', 0)), reverse=True):
+            try:
+                if p.get('target') == VERSION and int(p.get('id', 0)) > self.get_local_patch_level():
+                    return p
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def download_and_stage_patch(self, patch, progress_cb=None):
+        """下载补丁 zip → sha256 校验 → 暂存 config/pending_patch.zip(+.meta)。
+        实际覆盖在**下次启动时**由入口 stub 在导入任何业务 pyd 之前原子完成
+        （运行中 pyd 被 Windows 锁定，不能热覆盖）。"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36 Edg/112.0.1722.64"
+        }
+        proxy = self.get_system_proxy()
+        proxies = {"http": proxy, "https": proxy}
+        cfg_dir = os.path.join(self._app_root(), 'config')
+        os.makedirs(cfg_dir, exist_ok=True)
+        tmp = os.path.join(cfg_dir, 'pending_patch.zip.part')
+        done = os.path.join(cfg_dir, 'pending_patch.zip')
+        h = hashlib.sha256()
+        with requests.get(patch['url'], headers=headers, timeout=15, stream=True,
+                          allow_redirects=True, proxies=proxies) as r:
+            r.raise_for_status()
+            total = r.headers.get('Content-Length')
+            total = int(total) if total else None
+            got = 0
+            with open(tmp, 'wb') as f:
+                for chunk in r.iter_content(1 << 20):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    h.update(chunk)
+                    got += len(chunk)
+                    if progress_cb and total:
+                        progress_cb(min(100, int(got * 100 / total)))
+        digest = h.hexdigest()
+        expect = (patch.get('sha256') or '').lower()
+        if expect and digest != expect:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise ValueError('sha256 mismatch: %s != %s' % (digest, expect))
+        if os.path.exists(done):
+            os.remove(done)
+        os.replace(tmp, done)
+        with open(done + '.meta', 'w', encoding='utf-8') as f:
+            json.dump({'sha256': digest, 'id': int(patch.get('id', 0)),
+                       'notes': patch.get('notes', '')}, f, ensure_ascii=False)
+        return done
 
     def get_system_proxy(self):
         """ get system proxy """

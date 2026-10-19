@@ -459,6 +459,15 @@ class AdvancedSettingInterface(ScrollArea):
             lambda success: self.on_version_info_fetched(success, ignore))
 
     def on_version_info_fetched(self, success, ignore=False):
+        # 补丁优先：当前版本有可用代码补丁时走小体积热更新
+        # （保留权重/运行时/配置，免整包重下；重启时在导入业务 pyd 前原子应用）
+        try:
+            patch = self.version_manager.get_pending_patch()
+        except Exception:
+            patch = None
+        if patch is not None:
+            self._offer_patch(patch)
+            return
         if success:
             # 主下载源：魔搭 version.json 的 download_url（国内直链，确认按钮直接打开）；
             # GitHub API 端点无直链，回退 Releases 页
@@ -489,3 +498,37 @@ class AdvancedSettingInterface(ScrollArea):
                 tr["Setting"]["NoUpdatesAvailableTitle"],
                 tr["Setting"]["NoUpdatesAvailableDesc"],
             )
+
+    def _offer_patch(self, patch):
+        """发现可用补丁：确认后后台下载暂存，重启软件时自动应用"""
+        desc = tr['Setting']['PatchAvailableDesc']
+        notes = patch.get('notes') or ''
+        if notes:
+            desc += '\n' + notes
+        self.show_message_box(
+            tr['Setting']['PatchAvailableTitle'],
+            desc,
+            True,
+            lambda: self._start_patch_download(patch))
+
+    def _start_patch_download(self, patch):
+        def job():
+            try:
+                self.version_manager.download_and_stage_patch(patch)
+                return True, None
+            except Exception as e:
+                return False, str(e)
+        TaskExecutor.runTask(job).then(lambda r: self._on_patch_staged(r))
+
+    def _on_patch_staged(self, ok_err):
+        ok, err = ok_err
+        if ok:
+            InfoBar.success(
+                title=tr['Setting']['PatchStagedTitle'],
+                content=tr['Setting']['PatchStagedDesc'],
+                duration=8000, parent=self.window())
+        else:
+            InfoBar.error(
+                title=tr['Setting']['PatchFailedTitle'],
+                content=tr['Setting']['PatchFailedDesc'] + '\n' + str(err),
+                duration=8000, parent=self.window())
