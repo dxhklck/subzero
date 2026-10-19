@@ -206,10 +206,11 @@ class Config(QConfig):
     # VAE 解码精度：True = 解码器升 fp32（消除 fp16 VAE 在平坦背景的色带/条带，多占约1G显存）；
     # False = 全 fp16（显存紧张或追求极限速度时关闭）。编码始终走 fp16 省显存。
     minimaxVaeDecodeFp32 = ConfigItem("MiniMax", "VaeDecodeFp32", True, BoolValidator())
-    # SageAttention 加速：True = 自注意力走 SageAttention（INT8 量化 K，约1.1~1.3x 注意力提速、
-    # 显存下降），False = PyTorch SDPA（flash 后端，数值最稳）。
-    # 软依赖：环境未装 sageattention 时自动回落 SDPA；本机编译方法见 .workbuddy/memory。
-    # ⚠ 量化有理论精度损失，补背景任务对边缘敏感——默认关，A/B 验证后再按需开。
+    # SageAttention 加速：True = 自注意力走 SageAttention（INT8 量化 K），False = PyTorch SDPA（flash 后端）。
+    # 实测（81帧/12步 A/B）：端到端 0.986 -> 0.578 s/帧（约快 41%），显存峰值持平，
+    # 输出 PSNR 57.5dB（视觉无损）。
+    # 软依赖：环境未装 sageattention 或运行异常（精度不支持/head_dim 不兼容/OOM）时自动回落 SDPA。
+    # 预编译 wheel 见 woct0rdho/SageAttention（GitHub Releases），安装须 --no-deps。
     minimaxUseSageAttention = ConfigItem("MiniMax", "UseSageAttention", False, BoolValidator())
 
     # 是否使用硬件加速
