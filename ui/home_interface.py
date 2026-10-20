@@ -18,6 +18,7 @@ from datetime import datetime
 from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit, FluentIcon,
                             InfoBar, ComboBox, StrongBodyLabel)
 from ui.component.video_display_component import VideoDisplayComponent
+from ui.component.ab_fullscreen import AbFullscreenWindow
 from ui.component.task_list_component import (TaskListComponent, TaskStatus, TaskOptions,
                                               resolve_output_path)
 from ui.component.gpu_monitor_bar import GpuMonitorBar
@@ -172,6 +173,8 @@ class HomeInterface(QWidget):
         # A/B 同步对比：B 框结果视频源（当前任务的已完成输出）+ 播放定时器
         self.b_video_cap = None
         self._compare_playing = False
+        # 全屏 A/B 同步播放窗口（按需创建，关闭时置 None）
+        self._ab_fs_win = None
         # B 框实时修复帧是否已到达（到达后源帧预填不再回填，避免把结果帧冲掉）
         self._b_live_arrived = False
         self._compare_timer = QTimer(self)
@@ -240,6 +243,8 @@ class HomeInterface(QWidget):
         self.video_slider.valueChanged.connect(self.slider_changed)
         # A/B 同步播放按钮
         self.video_display_component.play_button.clicked.connect(self._toggle_compare_play)
+        # 全屏 A/B 同步播放入口
+        self.video_display_component.fullscreen_requested.connect(self._open_ab_fullscreen)
         
         # 输出文本区域
         self.output_text = TextEdit()
@@ -545,10 +550,10 @@ class HomeInterface(QWidget):
         return self.video_cap is not None and self.video_cap.isOpened()
 
     def _sync_play_button(self):
-        """按 A/B 两路源的实时可用性同步播放按钮启用态（消除「亮着却点不了」）"""
+        """按 A/B 两路源的实时可用性同步播放/全屏按钮启用态（消除「亮着却点不了」）"""
         ready = (self.video_cap is not None and self.video_cap.isOpened()
                  and self.b_video_cap is not None and self.b_video_cap.isOpened())
-        self.video_display_component.play_button.setEnabled(ready)
+        self.video_display_component.set_ab_controls_enabled(ready)
         return ready
 
     def _ensure_compare_sources(self):
@@ -609,12 +614,92 @@ class HomeInterface(QWidget):
     def _close_compare_output(self):
         """释放 B 框结果源并复位按钮/占位"""
         self._stop_compare_play()
+        self._close_ab_fullscreen()
         if self.b_video_cap is not None:
             self.b_video_cap.release()
             self.b_video_cap = None
-        self.video_display_component.play_button.setEnabled(False)
+        self.video_display_component.set_ab_controls_enabled(False)
         self.video_display_component.set_b_frame(None)
         self._b_live_arrived = False
+
+    # ---------- 全屏 A/B 同步播放 ----------
+
+    def _open_ab_fullscreen(self):
+        """打开全屏 A/B 同步播放窗（复用 compare 引擎：同一组 cap + 定时器）"""
+        if self._ab_fs_win is not None:
+            self._ab_fs_win.showFullScreen()
+            self._ab_fs_win.raise_()
+            self._ab_fs_win.activateWindow()
+            return
+        if not self._ensure_compare_sources():
+            InfoBar.warning(
+                title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
+                content=tr['SubtitleExtractorGUI']['CompareNotReady'],
+                parent=self.window(), duration=3000)
+            return
+        win = AbFullscreenWindow()
+        # 宽高比决定左右/上下分屏（取源视频尺寸）
+        try:
+            w = self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
+            h = self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+            win.set_layout(landscape=(w >= h))
+        except Exception:
+            win.set_layout(landscape=True)
+        win.set_fps(self.fps or 30)
+        win.set_total(self.frame_count or 0)
+        win.play_toggled.connect(self._ab_fs_play_toggled)
+        win.seek_requested.connect(self._ab_fs_seek)
+        win.closed.connect(self._on_ab_fs_closed)
+        self._ab_fs_win = win
+        win.showFullScreen()
+        # 先显示当前帧，再从当前位置起播
+        self._ab_fs_seek(self.video_slider.value())
+        if not self._compare_playing:
+            self._toggle_compare_play()
+
+    def _close_ab_fullscreen(self):
+        win = getattr(self, '_ab_fs_win', None)
+        if win is None:
+            return
+        self._ab_fs_win = None
+        try:
+            win.closed.disconnect()
+        except Exception:
+            pass
+        win.close()
+        win.deleteLater()
+
+    def _on_ab_fs_closed(self):
+        """用户关闭全屏窗：停播，回到普通预览"""
+        self._ab_fs_win = None
+        self._stop_compare_play()
+
+    def _ab_fs_play_toggled(self, want_play: bool):
+        if want_play and not self._compare_playing:
+            self._toggle_compare_play()
+        elif not want_play and self._compare_playing:
+            self._stop_compare_play()
+
+    def _ab_fs_seek(self, frame_no):
+        """全屏窗跳转：A/B 双路 seek 到同一帧并立即推画面"""
+        frame_no = max(1, int(frame_no))
+        if self.video_cap is None or not self.video_cap.isOpened():
+            return
+        if self.b_video_cap is None or not self.b_video_cap.isOpened():
+            return
+        with self._video_cap_lock:
+            if not self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1):
+                return
+            ret_a, frame_a = self.video_cap.read()
+        self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1)
+        ret_b, frame_b = self.b_video_cap.read()
+        if self._ab_fs_win is not None:
+            self._ab_fs_win.set_frames(frame_a if ret_a else None, frame_b if ret_b else None)
+            self._ab_fs_win.set_progress(frame_no, self.frame_count or 0)
+        # 主窗口滑块同步（blockSignals：避免跳转触发 slider_changed 再 seek 一次）
+        self.video_slider.blockSignals(True)
+        self.video_slider.setValue(max(1, min(self.video_slider.maximum(), frame_no)))
+        self.video_slider.blockSignals(False)
 
     def _toggle_compare_play(self):
         """A/B 同步播放/暂停：从滑块当前位置起，两路源逐帧同步推进"""
@@ -641,6 +726,8 @@ class HomeInterface(QWidget):
         interval = max(10, int(1000 / (self.fps or 30)))
         self._compare_timer.start(interval)
         self.video_display_component.play_button.setIcon(FluentIcon.PAUSE)
+        if self._ab_fs_win is not None:
+            self._ab_fs_win.set_playing(True)
 
     def _stop_compare_play(self):
         """停止 A/B 同步播放（复位为可播放状态）"""
@@ -648,6 +735,8 @@ class HomeInterface(QWidget):
             self._compare_timer.stop()
         self._compare_playing = False
         self.video_display_component.play_button.setIcon(FluentIcon.PLAY)
+        if self._ab_fs_win is not None:
+            self._ab_fs_win.set_playing(False)
 
     def _compare_tick(self):
         """播放步进：顺序读取两路下一帧并同步显示；任一路到结尾即停"""
@@ -664,13 +753,21 @@ class HomeInterface(QWidget):
         if not ret_a or not ret_b or frame_a is None or frame_b is None:
             # 播完：停在最后一帧并复位按钮
             self._stop_compare_play()
-            if frame_a is not None:
-                self.update_preview(frame_a)
-            if frame_b is not None:
-                self.video_display_component.set_b_frame(frame_b)
+            if self._ab_fs_win is not None:
+                self._ab_fs_win.set_frames(frame_a, frame_b)
+            else:
+                if frame_a is not None:
+                    self.update_preview(frame_a)
+                if frame_b is not None:
+                    self.video_display_component.set_b_frame(frame_b)
             return
-        self.update_preview(frame_a)
-        self.video_display_component.set_b_frame(frame_b)
+        if self._ab_fs_win is not None:
+            # 全屏播放中：只推全屏窗（主窗口在背后，跳过其渲染省 CPU）
+            self._ab_fs_win.set_frames(frame_a, frame_b)
+            self._ab_fs_win.set_progress(max(1, pos), self.frame_count or 0)
+        else:
+            self.update_preview(frame_a)
+            self.video_display_component.set_b_frame(frame_b)
         # 进度条跟随（不发 slider_changed，避免播放中被 seek 打断）
         if self.frame_count and pos != self.video_slider.value():
             self.video_slider.blockSignals(True)

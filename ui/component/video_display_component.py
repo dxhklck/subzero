@@ -102,6 +102,7 @@ class VideoDisplayComponent(QWidget):
     # 定义信号
     selections_changed = Signal(list)  # 选择框变化信号
     ab_sections_changed = Signal(list)  # AB分区变化信号
+    fullscreen_requested = Signal()     # 请求打开全屏 A/B 同步播放（宿主处理）
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -371,8 +372,15 @@ class VideoDisplayComponent(QWidget):
         # 常驻可见 + 未就绪置灰：用户始终知道这里有 A/B 同步播放入口
         # （旧实现隐藏按钮，完成任务后因 A 路源已释放永远不显示，被报「没有播放按钮」）
         self.play_button.setEnabled(False)
+        # 全屏 A/B 同步播放：与播放按钮同条件启用，宿主打开独立全屏窗
+        self.fullscreen_button = ToolButton(FluentIcon.FULL_SCREEN, self)
+        self.fullscreen_button.setFixedSize(28, 28)
+        self.fullscreen_button.setToolTip(tr['SubtitleExtractorGUI']['CompareFullscreenTip'])
+        self.fullscreen_button.setEnabled(False)
+        self.fullscreen_button.clicked.connect(self.fullscreen_requested)
         slider_row.addWidget(self.video_slider, 1)
         slider_row.addWidget(self.play_button)
+        slider_row.addWidget(self.fullscreen_button)
         control_layout.addLayout(slider_row)
         
         control_container.setLayout(control_layout)
@@ -694,6 +702,13 @@ class VideoDisplayComponent(QWidget):
         x0d, y0d = self.original_to_display(xmin, ymin)
         x1d, y1d = self.original_to_display(xmax, ymax)
         return QRect(int(x0d), int(y0d), int(x1d - x0d), int(y1d - y0d))
+
+    def set_ab_controls_enabled(self, enabled: bool):
+        """A/B 同步播放 + 全屏按钮的启用态（两者同条件：A/B 双源就绪）"""
+        self.play_button.setEnabled(enabled)
+        btn = getattr(self, 'fullscreen_button', None)
+        if btn is not None:
+            btn.setEnabled(enabled)
 
     def _refresh_range_bar(self):
         """推送区间数据到播放条可视化条并按需显隐。
