@@ -466,7 +466,9 @@ class AdvancedSettingInterface(ScrollArea):
         except Exception:
             patch = None
         if patch is not None:
-            self._offer_patch(patch)
+            # 启动自动检查（ignore=True）静默跳过，不打扰；仅手动「检查更新」时询问
+            if not ignore:
+                self._offer_patch(patch)
             return
         if success:
             # 主下载源：魔搭 version.json 的 download_url（国内直链，确认按钮直接打开）；
