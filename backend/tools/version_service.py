@@ -115,7 +115,11 @@ class VersionService:
             return 0
 
     def get_pending_patch(self):
-        """待应用补丁：id 大于本地级别、且 target 匹配当前版本的最新一项。"""
+        """待应用补丁：id 大于本地级别、且 target 匹配当前版本的最新一项。
+        仅安装版布局（有入口 stub 的 gui_main pyd）提供补丁应用钩子；
+        源码树没有该钩子、无法应用，直接返回 None 避免无效弹窗与下载。"""
+        if not os.path.isfile(os.path.join(self._app_root(), 'gui_main.cp313-win_amd64.pyd')):
+            return None
         for p in sorted(self.patches, key=lambda x: int(x.get('id', 0)), reverse=True):
             try:
                 if p.get('target') == VERSION and int(p.get('id', 0)) > self.get_local_patch_level():
