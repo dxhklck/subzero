@@ -1,24 +1,31 @@
 import cv2
 
+from .common_tools import get_readable_path
+
 
 def merge_video(video_input_path0, video_input_path1, video_output_path):
     """
     将两个视频文件安装水平方向合并
     """
-    input_video_cap0 = cv2.VideoCapture(video_input_path0)
-    input_video_cap1 = cv2.VideoCapture(video_input_path1)
+    input_video_cap0 = cv2.VideoCapture(get_readable_path(video_input_path0))
+    input_video_cap1 = cv2.VideoCapture(get_readable_path(video_input_path1))
     fps = input_video_cap1.get(cv2.CAP_PROP_FPS)
     size = (int(input_video_cap1.get(cv2.CAP_PROP_FRAME_WIDTH)), int(input_video_cap1.get(cv2.CAP_PROP_FRAME_HEIGHT)) * 2)
-    video_writer = cv2.VideoWriter(video_output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
-    while True:
-        ret0, frame0 = input_video_cap0.read()
-        ret1, frame1 = input_video_cap1.read()
-        if not ret1 and not ret0:
-            break
-        else:
+    video_writer = cv2.VideoWriter(get_readable_path(video_output_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, size)
+    try:
+        while True:
+            ret0, frame0 = input_video_cap0.read()
+            ret1, frame1 = input_video_cap1.read()
+            # 两侧都读到帧才拼接：两视频长度不同时某一侧会返回 (False, None)，
+            # 直接把 None 喂给 vconcat 会抛异常；这里对齐最短者提前收尾
+            if not ret0 or not ret1:
+                break
             show = cv2.vconcat([frame0, frame1])
             video_writer.write(show)
-    video_writer.release()
+    finally:
+        input_video_cap0.release()
+        input_video_cap1.release()
+        video_writer.release()
 
 
 if __name__ == '__main__':

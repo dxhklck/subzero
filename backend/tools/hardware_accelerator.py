@@ -47,7 +47,7 @@ class HardwareAccelerator:
         self.load_onnx_providers()
 
     def check_directml_available(self):
-        self.__dml = importlib.util.find_spec("torch_directml")
+        self.__dml = bool(importlib.util.find_spec("torch_directml"))
 
     def check_cuda_available(self):
         self.__cuda = torch.cuda.is_available()

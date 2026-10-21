@@ -25,8 +25,11 @@ from backend.tools.segmenter import Segment
 def probe_video_frames(video_path: str) -> tuple:
     """返回 (frame_count, fps)；探测失败返回 (0, 0.0)。"""
     import cv2
+    from backend.tools.common_tools import get_readable_path
 
-    cap = cv2.VideoCapture(str(video_path))
+    # 中文/特殊字符路径走短路径名：cv2 直接开长名在部分环境失败，
+    # 会让 compute_segment_frames 拿到 (0,0) 而静默退化为整片处理
+    cap = cv2.VideoCapture(get_readable_path(str(video_path)))
     try:
         if not cap.isOpened():
             return 0, 0.0

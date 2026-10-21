@@ -3,6 +3,7 @@ import gc
 from typing import Union, List
 import torch
 import numpy as np
+import cv2
 from PIL import Image
 from backend.inpaint.utils.lama_util import prepare_img_and_mask, get_image, pad_img_to_modulo
 from backend import config
@@ -19,12 +20,17 @@ class LamaInpaint:
             orig_height, orig_width = image.shape[:2]
         else:
             orig_height, orig_width = np.array(image).shape[:2]
+            image = np.array(image)
+        # big-lama.pt 为 RGB 训练：入模前 BGR→RGB（与 MiniMax/STTN 一致），
+        # 出模后 RGB→BGR 还原给写盘侧（cv2.imencode 期望 BGR）
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image, mask = prepare_img_and_mask(image, mask, self.device)
         with torch.inference_mode():
             inpainted = self.model(image, mask)
             cur_res = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
             cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
             cur_res = cur_res[:orig_height, :orig_width]
+            cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
             return cur_res
 
     def _inpaint_batch(self, images: List[np.ndarray], masks: List[np.ndarray]):
@@ -42,7 +48,7 @@ class LamaInpaint:
             batch_imgs = []
             batch_masks = []
             for i in range(start, end):
-                batch_imgs.append(get_image(images[i]))
+                batch_imgs.append(get_image(cv2.cvtColor(images[i], cv2.COLOR_BGR2RGB)))
                 batch_masks.append(get_image(masks[i]))
 
             padded_imgs = np.stack([pad_img_to_modulo(img, 8) for img in batch_imgs])
@@ -58,7 +64,7 @@ class LamaInpaint:
                 batch_results = np.clip(batch_results * 255, 0, 255).astype('uint8')
 
             for i in range(end - start):
-                results[start + i] = batch_results[i][:orig_height, :orig_width]
+                results[start + i] = cv2.cvtColor(batch_results[i][:orig_height, :orig_width], cv2.COLOR_RGB2BGR)
 
             # 批间不调 empty_cache：caching allocator 本就会复用已分配显存，
             # 主动释放只会引发重新 cudaMalloc 与显存碎片（纯浪费）；组末统一清一次

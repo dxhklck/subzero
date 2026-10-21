@@ -71,6 +71,12 @@ class MiniMaxInpaint:
         self.pipe.to(device)
         if vae_decode is not None:
             vae_decode.to(device)
+        # 非 CUDA（CPU/MPS/DirectML）：pipeline 内 mask/图像已随 self._execution_device
+        # 统一（不再硬编码 cuda:0），但 fp16 权重在非 CUDA 上可能不受支持或极慢；
+        # 给出一条明确提示，避免「能跑却极慢/半途异常」被误判为卡死而无从定位
+        if device.type != 'cuda':
+            print(f'[MiniMax] 当前设备为 {device}（非 CUDA）：fp16 权重在 CPU/MPS/DirectML 上'
+                  f'推理可能极慢或不稳定，如遇异常建议改用 STTN / LAMA')
         # cuDNN 卷积自动调优：VAE 卷积形状在任务内固定，cuDNN 试跑选最快算法。
         # 纯算法选择，数学不变、零画质影响；首块略慢（试跑），其后稳定受益
         if device.type == 'cuda':

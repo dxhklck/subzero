@@ -16,6 +16,9 @@ except Exception:  # 允许在无 qfluentwidgets 的降级环境导入
     _HAS_FW = False
 
 _HINT = 'Space play/pause · ←/→ frame · Ctrl+←/→ 1s · F fullscreen · Esc exit'
+# 实时模式（处理中）：流不可 seek，方向键/秒跳无意义；Space 由宿主路由为
+# 暂停/恢复实时预览推送
+_HINT_LIVE = 'Space 暂停/恢复实时预览 · Esc 退出全屏'
 
 
 def _fmt_time(frame_no, fps):
@@ -44,6 +47,7 @@ class AbFullscreenWindow(QtWidgets.QWidget):
         self._total = 0
         self._playing = False
         self._seeking = False
+        self._live = False  # 实时模式（处理中）：滑杆禁拖，Space=暂停/恢复推送
 
         # ── 双画面：按视频宽高比在 set_layout 里横/纵排（两套标签，各占一种布局） ──
         self._views = QtWidgets.QStackedWidget()
@@ -101,6 +105,7 @@ class AbFullscreenWindow(QtWidgets.QWidget):
         hint = QtWidgets.QLabel(_HINT)
         hint.setStyleSheet('color: rgba(255,255,255,160);')
         hint.setAlignment(Qt.AlignCenter)
+        self._hint = hint  # 实时/回放模式切换提示文案
         bar_v.addWidget(hint)
         bar.setStyleSheet(
             'background-color: rgba(0,0,0,150); border-top-left-radius: 6px; border-top-right-radius: 6px;')
@@ -137,12 +142,30 @@ class AbFullscreenWindow(QtWidgets.QWidget):
 
     # ---------- 布局与画面 ----------
 
-    def set_layout(self, landscape: bool):
-        """landscape=True 左右分屏，False 上下分屏（切换后重推最后一帧）"""
-        self._labels = self._labels_h if landscape else self._labels_v
-        self._views.setCurrentWidget(self._h_split if landscape else self._v_split)
-        if self._last_frames != (None, None):
+    def set_layout(self, side_by_side: bool):
+        """side_by_side=True 左右分屏（竖屏视频：每栏高瘦，画面最大化）；
+        False 上下分屏（横屏视频：每栏宽扁，宽屏上基本零黑边）。
+
+        分屏方向贴合视频形状：竖屏选左右、横屏选上下（用户定版）。
+        旧实现恒按 landscape 判左右，竖屏视频被缩成窄条。切换后重推最后一帧。
+        """
+        self._labels = self._labels_h if side_by_side else self._labels_v
+        self._views.setCurrentWidget(self._h_split if side_by_side else self._v_split)
+        # 有帧则按新布局重推（逐元素判 None：元组内含 numpy 帧，
+        # 不能用 != 与 (None, None) 整体比较——数组布尔求值会抛 ValueError）
+        if any(f is not None for f in self._last_frames):
             self.set_frames(*self._last_frames)
+
+    def set_live(self, live: bool):
+        """实时模式（处理中）开关。
+
+        live=True：滑杆禁拖（直播流不可 seek，仅作进度显示）、底部提示换实时
+        语义；播放键由宿主接成暂停/恢复实时预览（见 home_interface
+        _ab_fs_play_toggled 的 live 分支）。
+        """
+        self._live = bool(live)
+        self._slider.setEnabled(not self._live)
+        self._hint.setText(_HINT_LIVE if self._live else _HINT)
 
     @staticmethod
     def _frame_to_pixmap(frame, label_size):
@@ -200,6 +223,8 @@ class AbFullscreenWindow(QtWidgets.QWidget):
         self._refresh_time()
 
     def _nudge(self, delta_frames):
+        if self._live:
+            return  # 实时流不可 seek：方向键/秒跳在实时模式下禁用
         self._seeking = True
         self._slider.setValue(
             max(1, min(self._slider.maximum(), self._slider.value() + delta_frames)))

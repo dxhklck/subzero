@@ -53,10 +53,21 @@ class SubtitleRemover:
         # 视频路径
         self.video_path = vd_path
         self.video_cap = open_video_reader(get_readable_path(vd_path))
+        # 视频打不开/无可解码帧时尽早抛可读异常（带路径），避免后续 fps=0 / size=(0,0)
+        # 喂给编码器产出坏文件，报错信息与真实原因脱节。图片路径走 read_image，
+        # 视频读取器仅作占位（部分图片格式 VideoCapture 打不开也不影响图片流程）
+        if not self.is_picture:
+            if not self.video_cap.isOpened():
+                self.video_cap.release()
+                raise ValueError(f'无法打开视频文件（isOpened=False）: {vd_path}')
+            self.frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)
+            if self.frame_count <= 0:
+                self.video_cap.release()
+                raise ValueError(f'视频无可解码帧（frame_count={self.frame_count}）: {vd_path}')
+        else:
+            self.frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)
         # 通过视频路径获取视频名称
         self.vd_name = Path(self.video_path).stem
-        # 视频帧总数
-        self.frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT) + 0.5)
         # 视频帧率
         self.fps = self.video_cap.get(cv2.CAP_PROP_FPS)
         # 视频尺寸
@@ -71,7 +82,10 @@ class SubtitleRemover:
             self.video_writer = FFmpegVideoWriter(get_readable_path(self.video_temp_file.name), self.fps, self.size,
                                                   encoder_override=config.videoEncoder.value,
                                                   bitrate_kbps=int(config.outputBitrate.value or 0))
-        except Exception:
+        except Exception as e:
+            # 回退时保留原异常类型/信息，便于排查「画质/编码异常」——不再静默吞掉
+            print(f'[Encoder] FFmpeg 视频编码器初始化失败，回退 cv2.VideoWriter(mp4v): '
+                  f'{type(e).__name__}: {e}')
             self.video_writer = cv2.VideoWriter(get_readable_path(self.video_temp_file.name), cv2.VideoWriter_fourcc(*'mp4v'), self.fps, self.size)
         self.video_out_path = os.path.abspath(os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub.mp4'))
         self.ext = os.path.splitext(vd_path)[-1]
@@ -111,26 +125,6 @@ class SubtitleRemover:
         # 用于定位瓶颈（单消费者线程内累加，天然线程安全；检测在独立线程，
         # 由其自身累加自己的键，与消费键互不相交）
         self._phase_times = {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
-
-    @staticmethod
-    def is_current_frame_no_start(frame_no, continuous_frame_no_list):
-        """
-        判断给定的帧号是否为开头，是的话返回结束帧号，不是的话返回-1
-        """
-        for start_no, end_no in continuous_frame_no_list:
-            if start_no == frame_no:
-                return True
-        return False
-
-    @staticmethod
-    def find_frame_no_end(frame_no, continuous_frame_no_list):
-        """
-        判断给定的帧号是否为开头，是的话返回结束帧号，不是的话返回-1
-        """
-        for start_no, end_no in continuous_frame_no_list:
-            if start_no <= frame_no <= end_no:
-                return end_no
-        return -1
 
     def update_progress(self, tbar, increment):
         tbar.update(increment)
@@ -353,68 +347,6 @@ class SubtitleRemover:
         """字幕检测与去除的调度入口：全片检测完成后按区间修复（整片路径）。"""
         return self._video_inpaint_whole(tbar, model, batch_size)
 
-    def _plan_intervals(self, detector, sub_list, frame_start, range_start, range_end, tbar=None):
-        """检测结果 → 「区间起点 -> 区间终点」映射（连续同掩膜 → 时间线外扩 → 短区间合并）。
-
-        边界钳制（分块正确性关键）：
-        - 起点钳到 max(range_start, frame_start+1)：区间跨块时必须在**本块首帧**重新
-          起键，否则键落在块之前，本块帧匹配不到 → 字幕原样写出（漏除）；
-        - 终点钳到 range_end：读帧必须严格按块计数，不得跨块读走下一块的帧
-          （否则后续块逐帧错位，整片撕裂）。
-        """
-        if not sub_list:
-            return {}
-        ranges = detector.find_continuous_ranges_with_same_mask(sub_list)
-        if tbar is not None:
-            tbar.write(f'Subtitle detected: {ranges}')
-        ranges = expand_frame_ranges(ranges, config.subtitleTimelineBackwardFrameCount.value,
-                                     config.subtitleTimelineForwardFrameCount.value)
-        ranges = detector.filter_and_merge_intervals(ranges, config.sttnReferenceLength.value)
-        # 相邻区间同行合并（组内同行合并的跨区间补刀）：
-        # 同一条字幕线的检测框逐帧波动（部分帧只检出中段/漏检其中一行）会被
-        # find_continuous_ranges_with_same_mask 按掩膜变化切成多个区间；窄区间的
-        # 静态掩膜盖不住宽帧的两端/另一行（B 框字幕两端残留的根因之一——
-        # _group_interval_masks 的组内同行合并只在区间内部生效，跨区间无效）。
-        # 垂直重叠 >=50%（占较小者高度）且间隔 <=7 帧（±5 外扩后本就相邻）的
-        # 相邻区间合并为一个区间；合并后 _group_interval_masks 的组内同行合并
-        # 会把全区间统一为一张完整行掩膜。
-        # 代价：同位置先后两条字幕间的空档帧会被多修一点背景（数量受 7 帧间隔约束）。
-        def _band(a, b):
-            y0 = y1 = None
-            for f in range(a, b + 1):
-                for bx in sub_list.get(f, []):
-                    y0 = bx[2] if y0 is None else min(y0, bx[2])
-                    y1 = bx[3] if y1 is None else max(y1, bx[3])
-            return (y0, y1) if y0 is not None else None
-
-        i = 0
-        while i < len(ranges) - 1:
-            cur, nxt = ranges[i], ranges[i + 1]
-            if nxt[0] - cur[1] <= 7:
-                b1, b2 = _band(cur[0], cur[1]), _band(nxt[0], nxt[1])
-                if b1 and b2:
-                    ov = min(b1[1], b2[1]) - max(b1[0], b2[0])
-                    h1, h2 = b1[1] - b1[0], b2[1] - b2[0]
-                    if ov > 0 and min(h1, h2) > 0 and ov / min(h1, h2) >= 0.5:
-                        ranges[i] = (cur[0], max(cur[1], nxt[1]))
-                        del ranges[i + 1]
-                        continue  # 合并后与新邻居继续比较
-            i += 1
-        if tbar is not None:
-            tbar.write(f'Subtitle same-line intervals merged: {ranges}')
-        # 选框时间边界切分：保证每个子区间内「活跃选框集」恒定——
-        # 选区兜底按组起点过滤才精确（组不跨时间边界）
-        ranges = split_ranges_at_area_bounds(ranges, self.sub_areas)
-        lo = max(range_start, frame_start + 1)
-        out = {}
-        for start, end in ranges:
-            key = max(start, lo)
-            val = min(end, range_end)
-            if val < key:
-                continue
-            out[key] = val
-        return out
-
     def _process_range(self, reader, range_start, range_end, start_end_map, sub_list, tbar,
                        model=None, batch_size=None,
                        write_start=None):
@@ -448,6 +380,11 @@ class SubtitleRemover:
             ret, frame = timed_read()
             # 如果读取视频帧失败（视频读到最后一帧）
             if not ret:
+                # EOF 早于预期区间结尾：元数据帧数大于实际可解码帧数（VFR/损坏容器），
+                # 不再静默截断——明确告警尾部被跳过，便于定位音画不同步
+                tbar.write(f'[Warning] 元数据帧数 {self.frame_count} 与实际可解码帧数不符：'
+                           f'读到帧 {current_frame_index} 即 EOF（预期处理到 {range_end}），'
+                           f'尾部 {range_end - current_frame_index} 帧被跳过')
                 return
             current_frame_index += 1
             # 判断当前帧号是不是字幕区间开始, 如果不是，则直接写
@@ -470,6 +407,11 @@ class SubtitleRemover:
                 while current_frame_index < end_frame_index:
                     ret, frame = timed_read()
                     if not ret:
+                        # 区间内 EOF：本区间剩余帧读不满，后续按实际读到的帧数修复写回，
+                        # 但明确告警（元数据帧数偏大时尾部 K 帧被跳过，不再静默截断）
+                        tbar.write(f'[Warning] 元数据帧数 {self.frame_count} 与实际可解码帧数不符：'
+                                   f'区间 {start_frame_index}-{end_frame_index} 读到 {current_frame_index} 即 EOF，'
+                                   f'尾部 {end_frame_index - current_frame_index} 帧被跳过')
                         break
                     current_frame_index += 1
                     frames_need_inpaint.append(frame)
@@ -554,7 +496,7 @@ class SubtitleRemover:
         tbar.write(f"Subtitle timeline expand ({config.subtitleTimelineBackwardFrameCount.value} <- -> {config.subtitleTimelineForwardFrameCount.value}): {continuous_frame_no_list}")
         continuous_frame_no_list = sub_detector.filter_and_merge_intervals(continuous_frame_no_list, config.sttnReferenceLength.value)
         tbar.write(f'Subtitle filter_and_merge_intervals: {continuous_frame_no_list}')
-        # 选框时间边界切分（与 _plan_intervals 同理：组不跨时间边界）
+        # 选框时间边界切分（组不跨时间边界，见 _group_interval_masks 的按组起点过滤）
         continuous_frame_no_list = split_ranges_at_area_bounds(continuous_frame_no_list, self.sub_areas)
         self.__dict__.setdefault(
             '_phase_times', {'decode': 0.0, 'detect': 0.0, 'repair': 0.0, 'encode': 0.0}
@@ -860,6 +802,11 @@ class SubtitleRemover:
                 self.video_temp_file.name, self.sub_areas,
                 det_params={'thresh': 0.2, 'box_thresh': 0.3, 'unclip_ratio': 2.0},
                 crop_rect=self._first_pass_crop_rect())
+            # 严格扫描：逐帧采样 + 禁用重复帧跳过。默认步长 3 的采样会漏掉
+            # 1~2 帧的短残留（正好落在采样间隙），静态画面+静态残留又极易被
+            # 重复帧跳过吞掉——兜底扫描必须宁可慢不可漏（用户实测残影漏检）
+            detector.SAMPLE_STEP = 1
+            detector.strict_scan = True
             sub_list = detector.find_subtitle_frame_no()
         finally:
             config.subtitleDetectProcessSize.value = old_size

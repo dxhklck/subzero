@@ -442,3 +442,6 @@ generated-videos/
 /功能可行性与实现报告_*.md
 /模型候选评估*.md
 /config/
+
+# 代码小队审查产物（工作产物不入库）
+/.agent-runs/

@@ -133,17 +133,13 @@ class SubtitleExtractorGUI(FluentWindow):
         self.addSubInterface(self.homeInterface, FluentIcon.HOME, "首页")
         self.addSubInterface(self.settingsInterface, FluentIcon.SETTING, "设置")
 
-    def on_navigation_item_changed(self, key):
-        """导航项变更时的处理函数"""
-        if key == 'main':
-            self.stackWidget.setCurrentIndex(0)
-        elif key == 'advanced':
-            self.stackWidget.setCurrentIndex(1)
-
     def closeEvent(self, event):
         """程序关闭时保存窗口位置并清理资源"""
         self.save_window_position()
-        ProcessManager.instance().terminate_all()
+        # HomeInterface 是 FluentWindow 内的子 widget，其 closeEvent 不会被 Qt
+        # 投递，须在此显式触发统一退出清理（停 GPU 采样线程、终止子进程、
+        # join worker、释放视频源）。进程终止已由 shutdown() 内部完成。
+        self.homeInterface.shutdown()
         super().closeEvent(event)
 
     def _onThemeChangedFinished(self):
@@ -156,20 +152,6 @@ class SubtitleExtractorGUI(FluentWindow):
         config.set(config.windowY, self.y())
         config.set(config.windowW, self.width())
         config.set(config.windowH, self.height())
-
-    def update_progress(self):
-        # 定时器轮询更新进度（现在更新到视频滑块上）
-        if self.se is not None:
-            try:
-                pos = min(self.frame_count - 1, int(self.se.progress_total / 100 * self.frame_count))
-                if pos != self.video_slider.value():
-                    self.video_slider.setValue(pos)
-                # 检查是否完成
-                if self.se.isFinished:
-                    self.processing_finished()
-            except Exception as e:
-                # 捕获任何异常，防止崩溃
-                print(f"更新进度时出错: {str(e)}")
 
     def load_window_position(self):
         # 尝试读取窗口位置

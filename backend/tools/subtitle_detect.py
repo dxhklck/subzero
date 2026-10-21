@@ -10,8 +10,6 @@ from .hardware_accelerator import HardwareAccelerator
 from .common_tools import get_readable_path
 from .ocr import get_coordinates
 from backend.config import config, tr
-from backend.scenedetect import scene_detect
-from backend.scenedetect.detectors import ContentDetector
 from backend.tools.inpaint_tools import is_frame_number_in_ab_sections, area_active_at
 from backend.tools.video_io import open_video_reader
 
@@ -69,6 +67,10 @@ class SubtitleDetect:
         self._crop_resolved = False
         # 上一次 find_subtitle_frame_no 中重复帧跳过的次数（日志/测试用）
         self.detect_dup_skipped = 0
+        # 严格扫描模式（残留二遍兜底用）：逐帧采样 + 禁用重复帧跳过。
+        # 1~2 帧的短残留会落在采样间隙（步长3）里，且静态场景+静态残留极易
+        # 被重复帧跳过吞掉——兜底扫描宁可慢不可漏
+        self.strict_scan = False
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
         # 供重复帧跳过判定用，不影响检测结果
         self.frame_diff_scores = {}
@@ -260,7 +262,13 @@ class SubtitleDetect:
         帧号体系：窗口为 1-based 的 (frame_start, frame_end]。
         """
         video_cap = open_video_reader(get_readable_path(self.video_path))
+        if not video_cap.isOpened():
+            video_cap.release()
+            raise ValueError(f'无法打开视频文件（isOpened=False）: {self.video_path}')
         frame_count = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        if frame_count <= 0:
+            video_cap.release()
+            raise ValueError(f'视频无可解码帧（frame_count={frame_count}）: {self.video_path}')
         # 分段帧范围（与 SubtitleRemover.frame_start/frame_end 对齐）：
         # 检测只在段范围内进行，帧号保持全局绝对值（掩膜/路由按全局帧号一致）
         if frame_start is None:
@@ -331,7 +339,7 @@ class SubtitleDetect:
                 # 处理完则直接复用其检出。相同像素 → 相同检测，零画质影响
                 diff = self.frame_diff_scores.get(current_frame_no)
                 dup_handled = False
-                if diff is not None and diff < DETECT_DUP_THRESHOLD and \
+                if not self.strict_scan and diff is not None and diff < DETECT_DUP_THRESHOLD and \
                         (prev_list is not None or pending):
                     src = pending[-1][0] if pending else None
                     if src is not None:
@@ -387,44 +395,6 @@ class SubtitleDetect:
         return new_subtitle_frame_no_box_dict
 
     @staticmethod
-    def split_range_by_scene(intervals, points):
-        # 确保离散值列表是有序的
-        points.sort()
-        # 用于存储结果区间的列表
-        result_intervals = []
-        # 遍历区间
-        for start, end in intervals:
-            # 在当前区间内的点
-            current_points = [p for p in points if start <= p <= end]
-
-            # 遍历当前区间内的离散点
-            for p in current_points:
-                # 如果当前离散点不是区间的起始点，添加从区间开始到离散点前一个数字的区间
-                if start < p:
-                    result_intervals.append((start, p - 1))
-                # 更新区间开始为当前离散点
-                start = p
-            # 添加从最后一个离散点或区间开始到区间结束的区间
-            result_intervals.append((start, end))
-        # 输出结果
-        return result_intervals
-
-    @staticmethod
-    def get_scene_div_frame_no(v_path):
-        """
-        获取发生场景切换的帧号
-        """
-        scene_div_frame_no_list = []
-        scene_list = scene_detect(v_path, ContentDetector())
-        for scene in scene_list:
-            start, end = scene
-            if start.frame_num == 0:
-                pass
-            else:
-                scene_div_frame_no_list.append(start.frame_num + 1)
-        return scene_div_frame_no_list
-
-    @staticmethod
     def are_similar(region1, region2):
         """判断两个区域是否相似。"""
         xmin1, xmax1, ymin1, ymax1 = region1
@@ -470,28 +440,10 @@ class SubtitleDetect:
             return raw_regions
 
     @staticmethod
-    def find_continuous_ranges(subtitle_frame_no_box_dict):
-        """
-        获取字幕出现的起始帧号与结束帧号
-        """
-        numbers = sorted(list(subtitle_frame_no_box_dict.keys()))
-        ranges = []
-        start = numbers[0]  # 初始区间开始值
-
-        for i in range(1, len(numbers)):
-            # 如果当前数字与前一个数字间隔超过1，
-            # 则上一个区间结束，记录当前区间的开始与结束
-            if numbers[i] - numbers[i - 1] != 1:
-                end = numbers[i - 1]  # 则该数字是当前连续区间的终点
-                ranges.append((start, end))
-                start = numbers[i]  # 开始下一个连续区间
-        # 添加最后一个区间
-        ranges.append((start, numbers[-1]))
-        return ranges
-
-    @staticmethod
     def find_continuous_ranges_with_same_mask(subtitle_frame_no_box_dict):
         numbers = sorted(list(subtitle_frame_no_box_dict.keys()))
+        if not numbers:
+            return []
         ranges = []
         start = numbers[0]  # 初始区间开始值
         for i in range(1, len(numbers)):

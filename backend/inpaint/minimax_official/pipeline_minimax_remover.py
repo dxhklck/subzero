@@ -153,10 +153,10 @@ class Minimax_Remover_Pipeline(DiffusionPipeline):
         )
 
         masks = self.expand_masks(masks, iterations)
-        masks = self.resize(masks, height, width).to("cuda:0").half()
+        masks = self.resize(masks, height, width).to(device).half()
         masks[masks>0] = 1
         images = rearrange(images, "f h w c -> c f h w")
-        images = self.resize(images[None,...], height, width).to("cuda:0").half()
+        images = self.resize(images[None,...], height, width).to(device).half()
 
         masked_images = images * (1-masks)
 

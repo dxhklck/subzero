@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QTabWidget,
                                QPlainTextEdit, QMenu, QFrame, QApplication)
-from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer
+from PySide6.QtCore import Slot, QRect, Signal, Qt, QTimer, QThread
 from PySide6.QtGui import QTextCursor, QAction
 from PySide6 import QtWidgets
 from datetime import datetime
@@ -144,6 +144,11 @@ class HomeInterface(QWidget):
     task_done_signal = Signal(str, bool)  # (task_name, success) 任务完成/失败提醒（worker 线程经信号回 GUI）
     clear_console_signal = Signal(str)  # 新任务开始清空监控（参数=任务名，worker 线程经信号触发）
     seed_b_signal = Signal()  # worker 载入任务视频后用 A 框首帧预填 B 框（GUI 线程执行）
+    # worker 线程切 A/B 同框布局：Qt 布局操作跨线程是未定义行为，
+    # 一律发此信号排队到 GUI 线程执行（load_video/_close_compare_output 用）
+    compare_mode_signal = Signal(bool)
+    # worker 线程的加载失败提示：只发信号，InfoBar/监控写入在 GUI 线程做
+    video_load_failed_signal = Signal(str)
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("HomeInterface")
@@ -177,6 +182,23 @@ class HomeInterface(QWidget):
         self._ab_fs_win = None
         # B 框实时修复帧是否已到达（到达后源帧预填不再回填，避免把结果帧冲掉）
         self._b_live_arrived = False
+        # 实时 A/B 模式（处理中）：worker 实时帧接管 B 框，预览恒 A/B 同框；
+        # 播放/全屏按钮切换为「暂停/恢复实时预览 + 全屏看实时处理」
+        # （三态模型见 _sync_play_button：LIVE / PLAYBACK / 禁用）
+        self._ab_live = False
+        self._live_paused = False
+        # 用户正在拖动滑块（sliderPressed→sliderReleased）：update_progress
+        # 不抢滑块——处理中也允许拖动预览 A 源帧，不被进度回抢
+        self._slider_scrubbing = False
+        # Worker 存活看门狗：worker 线程意外死亡（收尾没跑完）时，把残留的
+        # 「处理中」任务补救为失败并恢复按钮——杜绝「任务卡在处理中计时走着、
+        # 没有任何完成信号」（用户报障：二检之后不完成）。_worker_dead_since
+        # 记录死亡时刻，宽限 3 秒给队列里的收尾信号落地，避免误判
+        self._worker_dead_since = None
+        self._worker_watchdog = QTimer(self)
+        self._worker_watchdog.setInterval(1000)
+        self._worker_watchdog.timeout.connect(self._check_worker_alive)
+        self._worker_watchdog.start()
         self._compare_timer = QTimer(self)
         self._compare_timer.timeout.connect(self._compare_tick)
 
@@ -195,6 +217,8 @@ class HomeInterface(QWidget):
         self.clear_console_signal.connect(self._on_new_task_console)
         self.update_preview_with_comp_signal.connect(self.update_preview_with_comp)
         self.seed_b_signal.connect(self._on_seed_b)
+        self.compare_mode_signal.connect(self.video_display_component.set_compare_mode)
+        self.video_load_failed_signal.connect(self._show_video_load_failed)
         self.task_done_signal.connect(self._on_task_done)
         self.task_error_signal.connect(self.on_task_error)
         self.toggle_buttons_signal.connect(self._toggle_buttons)
@@ -241,6 +265,9 @@ class HomeInterface(QWidget):
         self.video_display = self.video_display_component.video_display
         self.video_slider = self.video_display_component.video_slider
         self.video_slider.valueChanged.connect(self.slider_changed)
+        # 拖动起止：update_progress 在用户拖动期间不抢滑块（处理中可拖动看 A 源帧）
+        self.video_slider.sliderPressed.connect(self._on_slider_pressed)
+        self.video_slider.sliderReleased.connect(self._on_slider_released)
         # A/B 同步播放按钮
         self.video_display_component.play_button.clicked.connect(self._toggle_compare_play)
         # 全屏 A/B 同步播放入口
@@ -485,11 +512,11 @@ class HomeInterface(QWidget):
 
     
     def slider_changed(self, value):
-        """拖滑杆：A 框取源帧 + B 框同步结果帧。
+        """拖滑杆：定位 A 框源帧（不碰 B 框）。
 
-        A/B 源为 FFmpegFrameReader（set 即精确帧，重开解码管道约几十 ms）。
+        源为 FFmpegFrameReader（set 即精确帧，重开解码管道约几十 ms）。
         快速拖动会触发密集 valueChanged——用单发定时器合并、只处理最新值，
-        避免管道风暴卡顿。"""
+        避免管道风暴卡钝。"""
         self._slider_seek_pending = int(value)
         if getattr(self, '_slider_seek_timer', None) is None:
             timer = QTimer(self)
@@ -502,33 +529,34 @@ class HomeInterface(QWidget):
     def _do_slider_seek(self):
         frame_no = self._slider_seek_pending
         frame = None
+        temp_cap = None
         with self._video_cap_lock:
             cap = self.video_cap
+            if (cap is None or not cap.isOpened()) and self._ab_live \
+                    and self.video_path and not is_image_file(self.video_path):
+                # 处理中 A 路源已被 worker 收尾释放：临时开一条只读 reader 供
+                # 拖动预览（不赋值 self.video_cap——避免与 worker 的释放/重开
+                # 争抢；读完即释放）。B 框内容不动：处理中 B 由实时流接管。
+                try:
+                    temp_cap = FFmpegFrameReader(get_readable_path(self.video_path))
+                    cap = temp_cap if temp_cap.isOpened() else None
+                except Exception:
+                    cap = None
             if cap is not None and cap.isOpened():
                 if cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no):
                     ret, frame = cap.read()
                 else:
                     ret, frame = False, None
+        if temp_cap is not None:
+            temp_cap.release()
         if frame is not None:
-            # 更新预览图像
+            # 更新预览图像（拖动只定位 A 源帧，不碰 B 框：处理中 B 框是实时
+            # 结果流，A/B 同步对比只在点 ▶ 同步播放时双路 seek 呈现）
             self.update_preview(frame)
-        # B 框同步：有结果源时按同一帧号取结果帧（拖动滑块 = A/B 同步逐帧对比）
-        self._sync_b_to_slider()
 
     # ------------------------------------------------------------------ #
     # A/B 同步对比：B 框结果源管理 + 同步播放
     # ------------------------------------------------------------------ #
-
-    def _sync_b_to_slider(self):
-        """按滑块当前帧号同步 B 框（无结果源时不动 B 框内容）"""
-        if self.b_video_cap is None or not self.b_video_cap.isOpened():
-            return
-        frame_no = self.video_slider.value()
-        if self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no):
-            ret, frame = self.b_video_cap.read()
-        else:
-            ret, frame = False, None
-        self.video_display_component.set_b_frame(frame if ret else None)
 
     def _reopen_source_cap(self):
         """按当前视频重开 A 路源（worker 收尾会释放 video_cap）。
@@ -549,11 +577,43 @@ class HomeInterface(QWidget):
                     self.video_cap = None
         return self.video_cap is not None and self.video_cap.isOpened()
 
+    def _set_compare_mode_threadsafe(self, enabled):
+        """切 A/B 同框布局：GUI 线程直接切（保持调用方时序，如
+        _open_compare_output 之后不能再被排队的 False 打回单框）；
+        worker 线程发 compare_mode_signal 排队到 GUI 线程执行——
+        Qt 布局操作跨线程是未定义行为（曾致任务卡「处理中」不完成）。"""
+        if QThread.currentThread() is self.thread():
+            self.video_display_component.set_compare_mode(enabled)
+        else:
+            self.compare_mode_signal.emit(enabled)
+
     def _sync_play_button(self):
-        """按 A/B 两路源的实时可用性同步播放/全屏按钮启用态（消除「亮着却点不了」）"""
-        ready = (self.video_cap is not None and self.video_cap.isOpened()
-                 and self.b_video_cap is not None and self.b_video_cap.isOpened())
-        self.video_display_component.set_ab_controls_enabled(ready)
+        """播放/全屏按钮可用状态（三态模型，替代旧「仅双 cap 就绪才可用」）：
+
+        - LIVE（_ab_live，处理中）：worker 实时帧流 → 恒可用。播放键语义变为
+          「暂停/恢复实时预览」（只丢画面不丢处理），全屏键 = 全屏看实时处理；
+        - PLAYBACK（A/B 双路源就绪）：任务完成/选中已完成任务 → 同步播放/全屏；
+        - 其余（无 B 内容）：禁用。
+
+        工具提示随状态切换，消除「亮着却不知道点什么/点不了」。
+        """
+        vdc = self.video_display_component
+        gui = tr['SubtitleExtractorGUI']
+        if self._ab_live:
+            vdc.set_ab_controls_enabled(True)
+            vdc.play_button.setIcon(FluentIcon.PLAY if self._live_paused else FluentIcon.PAUSE)
+            vdc.play_button.setToolTip(
+                gui['CompareLiveResumeTip' if self._live_paused else 'CompareLivePauseTip'])
+            vdc.fullscreen_button.setToolTip(gui['CompareLiveFsTip'])
+            return True
+        with self._video_cap_lock:
+            cap = self.video_cap
+            cap_b = self.b_video_cap
+        ready = (cap is not None and cap.isOpened()
+                 and cap_b is not None and cap_b.isOpened())
+        vdc.set_ab_controls_enabled(ready)
+        vdc.play_button.setToolTip(gui['ComparePlayTip'])
+        vdc.fullscreen_button.setToolTip(gui['CompareFullscreenTip'])
         return ready
 
     def _ensure_compare_sources(self):
@@ -561,21 +621,61 @@ class HomeInterface(QWidget):
         self._reopen_source_cap()
         return self._sync_play_button()
 
+    def _seek_compare_pair(self, frame_no):
+        """A/B 双路 seek 到同一帧并推画面：全屏窗开着推全屏，否则推主预览；
+        主滑块同步（blockSignals，避免触发 slider_changed 再 seek 一次）。
+        任一路读取失败时该路不更新，返回 False。"""
+        frame_no = max(1, int(frame_no))
+        ok_a = ok_b = False
+        frame_a = frame_b = None
+        with self._video_cap_lock:
+            cap = self.video_cap
+            if cap is not None and cap.isOpened() \
+                    and cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1):
+                ok_a, frame_a = cap.read()
+        cap_b = self.b_video_cap
+        if cap_b is not None and cap_b.isOpened() \
+                and cap_b.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1):
+            ok_b, frame_b = cap_b.read()
+        fs = self._ab_fs_win
+        if fs is not None:
+            fs.set_frames(frame_a if ok_a else None, frame_b if ok_b else None)
+            fs.set_progress(frame_no, self.frame_count or 0)
+        else:
+            if ok_a and frame_a is not None:
+                self.update_preview(frame_a)
+            if ok_b and frame_b is not None:
+                self.video_display_component.set_b_frame(frame_b)
+        self.video_slider.blockSignals(True)
+        self.video_slider.setValue(max(1, min(self.video_slider.maximum(), frame_no)))
+        self.video_slider.blockSignals(False)
+        return ok_a and ok_b
+
     def _open_compare_output(self, output_path):
         """打开结果视频作为 B 框同步源（当前任务已完成输出）。
 
         三种结局均有用户可见反馈（不再静默）：
-        - 成功 → 切 A/B 对比布局 + 就绪提示（每次新开结果源提示一次）；
+        - 成功 → 切 A/B 对比布局 + 双路回卷首帧（完成即回看：定格片头对比，
+          ▶ 从头同步播放）+ 就绪提示（每次新开结果源提示一次）；
         - 输出文件不存在 / 打不开 → 警告并退回占位。
         """
         self._stop_compare_play()
-        was_open = self.b_video_cap is not None
-        if self.b_video_cap is not None:
-            self.b_video_cap.release()
+        # 本任务成片就绪：退出实时模式，B 框改由成片同步源接管
+        # （队列还有后续任务时，下个任务的 load_video(keep_compare=True)
+        #  会把 _ab_live 重新置回 True）
+        self._ab_live = False
+        if self._ab_fs_win is not None:
+            # 任务在实时全屏观看中完成：全屏窗切回放模式（滑杆恢复可拖、
+            # 提示语还原），帧由下方 _seek_compare_pair 推入，Space 可重播
+            self._ab_fs_win.set_live(False)
+        cap_b = self.b_video_cap
+        was_open = cap_b is not None
+        if cap_b is not None:
+            cap_b.release()
             self.b_video_cap = None
         if not output_path or not os.path.isfile(output_path):
             self.video_display_component.set_b_frame(None)
-            self.video_display_component.play_button.setEnabled(False)
+            self._sync_play_button()
             if output_path:
                 InfoBar.warning(
                     title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
@@ -591,18 +691,19 @@ class HomeInterface(QWidget):
             cap = None
         if cap is None or not cap.isOpened():
             self.video_display_component.set_b_frame(None)
-            self.video_display_component.play_button.setEnabled(False)
+            self._sync_play_button()
             InfoBar.warning(
                 title=tr['SubtitleExtractorGUI']['ComparePlayTip'],
                 content=tr['SubtitleExtractorGUI']['CompareOutputMissing'].format(output_path),
                 parent=self.window(), duration=5000)
             return
         self.b_video_cap = cap
-        ret, frame = cap.read()
-        self.video_display_component.set_b_frame(frame if ret else None)
-        # 有结果源 → 切到 A/B 对比布局（双框同步对比/播放）
+        # A/B 同框 + 双路回卷首帧（A 路可能已被 worker 收尾释放，先自愈重开）：
+        # 任务完成即定格片头对比，▶ 从头同步播放
         self.video_display_component.set_compare_mode(True)
-        # A 路源就绪才开放同步播放（按钮常驻可见，启用态按两路实时同步）
+        self._reopen_source_cap()
+        self._seek_compare_pair(1)
+        # A 路源就绪才开放同步播放（按钮常驻可见，启用态按三态实时同步）
         self._sync_play_button()
         # 就绪提示（仅从「无结果源」新开时提示，避免重复刷屏）
         if not was_open:
@@ -612,24 +713,41 @@ class HomeInterface(QWidget):
                 parent=self.window(), duration=5000)
 
     def _close_compare_output(self):
-        """释放 B 框结果源并复位按钮/占位"""
+        """释放 B 框结果源并复位按钮/占位。
+
+        B 框无内容 → 回单框 A（实时模式下由后续同框断言/seed_b 恢复双框）。
+        按钮态走 _sync_play_button 三态判定：实时中（_ab_live）保持可用，
+        不再一律硬禁用。"""
         self._stop_compare_play()
         self._close_ab_fullscreen()
-        if self.b_video_cap is not None:
-            self.b_video_cap.release()
+        cap_b = self.b_video_cap
+        if cap_b is not None:
+            cap_b.release()
             self.b_video_cap = None
-        self.video_display_component.set_ab_controls_enabled(False)
         self.video_display_component.set_b_frame(None)
+        # B 框无内容 → 回单框 A（线程安全切换：worker 线程走到这里时
+        # 经信号排队，不跨线程直接动布局）
+        self._set_compare_mode_threadsafe(False)
         self._b_live_arrived = False
+        self._sync_play_button()
 
     # ---------- 全屏 A/B 同步播放 ----------
 
     def _open_ab_fullscreen(self):
-        """打开全屏 A/B 同步播放窗（复用 compare 引擎：同一组 cap + 定时器）"""
+        """打开全屏 A/B 窗（两种模式，同一按钮入口）：
+
+        - 实时模式（处理中，_ab_live）：帧由 worker 实时推送，无需可 seek
+          双路源；打开即续看当前处理画面，Space=暂停/恢复实时预览；
+        - 播放模式（结果源就绪）：复用 compare 引擎（双 cap + 定时器），
+          从当前位置起同步播放。
+        """
         if self._ab_fs_win is not None:
             self._ab_fs_win.showFullScreen()
             self._ab_fs_win.raise_()
             self._ab_fs_win.activateWindow()
+            return
+        if self._ab_live:
+            self._create_ab_fs_window(live=True)
             return
         if not self._ensure_compare_sources():
             InfoBar.warning(
@@ -637,25 +755,39 @@ class HomeInterface(QWidget):
                 content=tr['SubtitleExtractorGUI']['CompareNotReady'],
                 parent=self.window(), duration=3000)
             return
+        self._create_ab_fs_window(live=False)
+
+    def _create_ab_fs_window(self, live):
+        """创建全屏 A/B 窗并完成公共接线（布局方向/帧率/总长/信号/起播）"""
         win = AbFullscreenWindow()
-        # 宽高比决定左右/上下分屏（取源视频尺寸）
-        try:
-            w = self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
-            h = self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
-            win.set_layout(landscape=(w >= h))
-        except Exception:
-            win.set_layout(landscape=True)
+        # 分屏方向贴合视频形状：竖屏→左右（每栏高瘦，画面最大化）；
+        # 横屏→上下（每栏宽扁，宽屏上基本零黑边）。取帧尺寸而非 cap 属性——
+        # 实时模式下 A 路 cap 已被 worker 释放，只有 frame_width/height 可靠
+        f_w = self.frame_width or 16
+        f_h = self.frame_height or 9
+        win.set_layout(side_by_side=(f_h >= f_w))
         win.set_fps(self.fps or 30)
         win.set_total(self.frame_count or 0)
+        win.set_live(live)
         win.play_toggled.connect(self._ab_fs_play_toggled)
         win.seek_requested.connect(self._ab_fs_seek)
         win.closed.connect(self._on_ab_fs_closed)
         self._ab_fs_win = win
         win.showFullScreen()
-        # 先显示当前帧，再从当前位置起播
-        self._ab_fs_seek(self.video_slider.value())
-        if not self._compare_playing:
-            self._toggle_compare_play()
+        if live:
+            # 实时模式：主预览同步驻 A/B 同框（关全屏后还原有意义），
+            # 推当前 A/B 帧续看；不自动起播——实时流本就在流动
+            self.video_display_component.set_compare_mode(True)
+            win.set_playing(not self._live_paused)
+            vdc = self.video_display_component
+            win.set_frames(getattr(vdc, '_current_frame', None),
+                           getattr(vdc, '_current_b_frame', None))
+            win.set_progress(self.video_slider.value(), self.frame_count or 0)
+        else:
+            # 先显示当前帧，再从当前位置起播
+            self._ab_fs_seek(self.video_slider.value())
+            if not self._compare_playing:
+                self._toggle_compare_play()
 
     def _close_ab_fullscreen(self):
         win = getattr(self, '_ab_fs_win', None)
@@ -670,39 +802,56 @@ class HomeInterface(QWidget):
         win.deleteLater()
 
     def _on_ab_fs_closed(self):
-        """用户关闭全屏窗：停播，回到普通预览"""
+        """用户关闭全屏窗（Esc/✕）：分离窗口但不停播——
+
+        主预览恢复 A/B 同框并从中断处继续（实时模式同样恢复同框续看）。
+        旧实现在此 _stop_compare_play 把预览打回单框，A/B 同框丢失。
+        """
         self._ab_fs_win = None
-        self._stop_compare_play()
+        self.video_display_component.set_compare_mode(True)
+        if self._ab_live:
+            return
+        if self._compare_playing:
+            # 续播：立即推一帧，避免主预览停留在进全屏前的旧画面
+            self._compare_tick()
+        else:
+            # 暂停态关闭：双路 seek 回当前滑块位置，主预览与进度一致
+            self._seek_compare_pair(self.video_slider.value())
 
     def _ab_fs_play_toggled(self, want_play: bool):
+        if self._ab_live:
+            # 实时模式：Space/播放键 = 暂停/恢复实时预览推送（后台处理不停）
+            self._set_live_paused(not want_play)
+            return
         if want_play and not self._compare_playing:
             self._toggle_compare_play()
         elif not want_play and self._compare_playing:
             self._stop_compare_play()
 
     def _ab_fs_seek(self, frame_no):
-        """全屏窗跳转：A/B 双路 seek 到同一帧并立即推画面"""
-        frame_no = max(1, int(frame_no))
-        if self.video_cap is None or not self.video_cap.isOpened():
-            return
-        if self.b_video_cap is None or not self.b_video_cap.isOpened():
-            return
-        with self._video_cap_lock:
-            if not self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1):
-                return
-            ret_a, frame_a = self.video_cap.read()
-        self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1)
-        ret_b, frame_b = self.b_video_cap.read()
+        """全屏窗跳转：A/B 双路 seek 到同一帧并立即推画面（委托 _seek_compare_pair）"""
+        self._seek_compare_pair(frame_no)
+
+    def _set_live_paused(self, paused):
+        """暂停/恢复实时预览推送：图标与工具提示在主按钮/全屏窗间保持同步。
+        暂停只丢画面不丢处理——worker 不受影响，恢复后显示最新帧。"""
+        self._live_paused = bool(paused)
+        vdc = self.video_display_component
+        vdc.play_button.setIcon(FluentIcon.PLAY if self._live_paused else FluentIcon.PAUSE)
+        vdc.play_button.setToolTip(tr['SubtitleExtractorGUI'][
+            'CompareLiveResumeTip' if self._live_paused else 'CompareLivePauseTip'])
         if self._ab_fs_win is not None:
-            self._ab_fs_win.set_frames(frame_a if ret_a else None, frame_b if ret_b else None)
-            self._ab_fs_win.set_progress(frame_no, self.frame_count or 0)
-        # 主窗口滑块同步（blockSignals：避免跳转触发 slider_changed 再 seek 一次）
-        self.video_slider.blockSignals(True)
-        self.video_slider.setValue(max(1, min(self.video_slider.maximum(), frame_no)))
-        self.video_slider.blockSignals(False)
+            self._ab_fs_win.set_playing(not self._live_paused)
 
     def _toggle_compare_play(self):
-        """A/B 同步播放/暂停：从滑块当前位置起，两路源逐帧同步推进"""
+        """播放/暂停（三态模型的用户侧入口）：
+
+        - 实时模式（处理中）：暂停/恢复实时预览（后台继续处理，帧丢弃/续推）；
+        - 播放模式：A/B 双路源从滑块当前位置起逐帧同步推进。
+        """
+        if self._ab_live:
+            self._set_live_paused(not self._live_paused)
+            return
         if self._compare_playing:
             self._stop_compare_play()
             return
@@ -715,8 +864,13 @@ class HomeInterface(QWidget):
             return
         frame_no = self.video_slider.value()
         with self._video_cap_lock:
-            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
-        self.b_video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+            if self.video_cap is not None:
+                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1)
+        cap_b = self.b_video_cap
+        if cap_b is not None:
+            cap_b.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1)
+        # 点播放才切 A/B 双画面
+        self.video_display_component.set_compare_mode(True)
         # 先置播放态：起播 tick 若立即到结尾，_stop_compare_play 会复位为 False
         self._compare_playing = True
         # 起播前先显示当前位置的 A/B 帧（seek 后立即出画面，不闪占位）
@@ -730,7 +884,11 @@ class HomeInterface(QWidget):
             self._ab_fs_win.set_playing(True)
 
     def _stop_compare_play(self):
-        """停止 A/B 同步播放（复位为可播放状态）"""
+        """停止 A/B 同步播放（复位为可播放状态）。
+
+        不再强制回单框：A/B 同框是对比视图的常态（暂停定格、全屏关闭续看
+        都依赖它驻留）；回单框由调用方按语义决定（换视频/停止处理/B 框无
+        内容，见 _close_compare_output / stop_button_clicked）。"""
         if self._compare_timer.isActive():
             self._compare_timer.stop()
         self._compare_playing = False
@@ -746,10 +904,11 @@ class HomeInterface(QWidget):
                 return
             ret_a, frame_a = self.video_cap.read()
             pos = int(self.video_cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-        if self.b_video_cap is None or not self.b_video_cap.isOpened():
+        cap_b = self.b_video_cap
+        if cap_b is None or not cap_b.isOpened():
             self._stop_compare_play()
             return
-        ret_b, frame_b = self.b_video_cap.read()
+        ret_b, frame_b = cap_b.read()
         if not ret_a or not ret_b or frame_a is None or frame_b is None:
             # 播完：停在最后一帧并复位按钮
             self._stop_compare_play()
@@ -761,17 +920,19 @@ class HomeInterface(QWidget):
                 if frame_b is not None:
                     self.video_display_component.set_b_frame(frame_b)
             return
+        # pos 为 0-based 当前帧序号；滑块/全屏进度均为 1-based，统一 +1
+        slider_value = max(1, min(self.frame_count or 1, pos + 1))
         if self._ab_fs_win is not None:
             # 全屏播放中：只推全屏窗（主窗口在背后，跳过其渲染省 CPU）
             self._ab_fs_win.set_frames(frame_a, frame_b)
-            self._ab_fs_win.set_progress(max(1, pos), self.frame_count or 0)
+            self._ab_fs_win.set_progress(slider_value, self.frame_count or 0)
         else:
             self.update_preview(frame_a)
             self.video_display_component.set_b_frame(frame_b)
         # 进度条跟随（不发 slider_changed，避免播放中被 seek 打断）
-        if self.frame_count and pos != self.video_slider.value():
+        if self.frame_count and slider_value != self.video_slider.value():
             self.video_slider.blockSignals(True)
-            self.video_slider.setValue(max(1, min(self.frame_count, pos)))
+            self.video_slider.setValue(slider_value)
             self.video_slider.blockSignals(False)
 
     def ab_sections_changed(self, ab_sections):
@@ -793,14 +954,13 @@ class HomeInterface(QWidget):
             index: 任务索引
             file_path: 文件路径
         """
-        # 处理链路中（worker 存活）→ 保留 A/B 对比布局；用户点选待处理任务 → 单框
-        worker = getattr(self, '_worker_thread', None)
-        processing_active = bool(worker and worker.is_alive())
-        # 加载选中的视频进行预览（load_video 内会复位 B 框与同步播放；
-        # 处理中 keep_compare 保留对比模式，避免 select_task 信号把布局打回单框）
-        self.load_video(file_path, keep_compare=processing_active)
-        if processing_active:
-            self.video_display_component.set_compare_mode(True)
+        # 换任务/换视频默认回单框 A；例外：选中的正是处理中任务（worker 每轮
+        # 自动选中）时保持实时 A/B 同框——否则任务开始的 select_task 会把
+        # 同框打回单框，检测阶段（尚无修复帧）用户看不到双框
+        is_processing_now = (index == self.current_processing_task_index)
+        self.load_video(file_path, keep_compare=is_processing_now)
+        if not is_processing_now:
+            self.video_display_component.set_compare_mode(False)
         ab_sections = self.task_list_component.get_task_option(index, TaskOptions.AB_SECTIONS, [])
         # 类型守卫：快照/任务选项理论上恒为 list，异常态（脏数据）下降级为空，
         # 不让 len()/迭代把 GUI 线程的异常冒到事件循环（表现为无 traceback 的卡死/报错）
@@ -841,8 +1001,9 @@ class HomeInterface(QWidget):
         
         task = self.task_list_component.get_task(0)
         if task:
-            # 如果还有任务，选中第一个
-            self.task_list_component.select_task(0)
+            # 如果还有任务，选中第一个源文件存在的（无条件选 0 时，
+            # 首条文件已被移动/删除 → 预览空白无提示）
+            self.task_list_component.select_first_openable_task()
 
     def update_preview(self, frame):
         self._last_frame = frame  # 缓存原始帧，供窗口缩放后自适应重渲染
@@ -873,15 +1034,65 @@ class HomeInterface(QWidget):
             self.running_process = None
             self.run_button.setVisible(True)
             self.stop_button.setVisible(False)
-            # 停止后回到单框模式（画面最大化），恢复字幕框选便于重新调整
+            # 停止后回到单框模式（画面最大化），恢复字幕框选便于重新调整；
+            # 同步退出实时模式（按钮态由 _sync_play_button 按三态重判）
+            self._ab_live = False
+            self._live_paused = False
             self.video_display_component.set_compare_mode(False)
             self.video_display_component.set_dragger_enabled(True)
+            self._sync_play_button()
 
     @Slot(bool)
     def _toggle_buttons(self, show_run):
         """线程安全地切换按钮可见性"""
         self.run_button.setVisible(show_run)
         self.stop_button.setVisible(not show_run)
+        if show_run:
+            # 队列结束（worker finally）：退出实时模式，播放/全屏按钮态
+            # 改按「结果源就绪」判定（B 框交由已完成任务的成片接管）
+            self._ab_live = False
+            self._live_paused = False
+            self._sync_play_button()
+
+    def _check_worker_alive(self):
+        """Worker 存活看门狗（每秒）：worker 线程已退出、但还有任务停在
+        「处理中」→ 收尾没跑完（异常路径漏发信号/竞态），补救为失败并恢复
+        按钮。宽限 3 秒给队列里排队的收尾信号落地，避免误判正常完成。"""
+        wt = getattr(self, '_worker_thread', None)
+        if wt is None or wt.is_alive():
+            self._worker_dead_since = None
+            return
+        now = time.time()
+        if self._worker_dead_since is None:
+            self._worker_dead_since = now
+            return  # 首帧只记录死亡时刻
+        if now - self._worker_dead_since < 3.0:
+            return
+        idx = self.current_processing_task_index
+        tasks = self.task_list_component.get_all_tasks()
+        if 0 <= idx < len(tasks) and tasks[idx].status == TaskStatus.PROCESSING:
+            name = tasks[idx].name
+            self.append_output(
+                f'[Worker] 检测到工作线程已退出但任务「{name}」仍处于处理中，'
+                f'已标记为失败；请右键「运行此任务」重跑')
+            self.task_list_component.update_task_status(idx, TaskStatus.FAILED)
+        self.current_processing_task_index = -1
+        self._ab_live = False
+        self._live_paused = False
+        # 恢复按钮态（worker 的 finally 理论上会做，此处双保险）
+        self.run_button.setVisible(True)
+        self.stop_button.setVisible(False)
+        self._sync_play_button()
+        self._worker_dead_since = None
+
+    def _on_slider_pressed(self):
+        """用户开始拖动滑块：update_progress 暂停抢占滑块——
+        处理中也允许拖动预览 A 源帧，不被进度回抢。"""
+        self._slider_scrubbing = True
+
+    def _on_slider_released(self):
+        """拖动结束：恢复 update_progress 的滑块跟随。"""
+        self._slider_scrubbing = False
 
     @Slot(int, str)
     def on_task_output_path(self, index, output_path):
@@ -987,11 +1198,13 @@ class HomeInterface(QWidget):
             self.toggle_buttons_signal.emit(False)
             # 处理开始：关闭旧结果源（B 框改由 worker 实时结果帧接管）
             self._close_compare_output()
-            # 切到 A/B 对比布局（处理中实时预览双框显示）
+            # 处理中即切入 A/B 同框：A=源帧（带选区矩形），B=实时结果帧——
+            # 查找字幕/去字幕全过程同步可见（旧实现处理中恒单框，B 内容不可见）。
+            # 进入实时模式：播放键=暂停/恢复实时预览，全屏键=全屏看实时处理
+            self._ab_live = True
+            self._live_paused = False
             self.video_display_component.set_compare_mode(True)
-            # B 框预填当前画面：检测阶段（无修复帧）B 框显示与 A 框相同的画面
-            # 而非黑底占位；修复帧到达后由 worker 实时结果自然接管
-            self.video_display_component.seed_b_from_a()
+            self._sync_play_button()
             # 重置监控：速度 EMA 与显存峰值
             self._speed_last = None
             self._speed_ema = 0.0
@@ -1013,8 +1226,12 @@ class HomeInterface(QWidget):
                             if not pending_tasks:
                                 break
                             pending_task = pending_tasks[0]
-                            # 更新当前处理的任务索引
+                            # 更新当前处理的任务索引（并快照到局部变量：收尾终态信号
+                            # 一律用 idx 发射，避免 progress(100,True) → processing_finished
+                            # 在 GUI 线程把 current_processing_task_index 置 -1 后，
+                            # 末任务丢失 output_path/COMPLETED）
                             self.current_processing_task_index, task_item = pending_task
+                            idx = self.current_processing_task_index
                             if not self.load_video(task_item.path, keep_compare=True):
                                 self.append_log_signal.emit([tr['SubtitleExtractorGUI']['OpenVideoFailed'].format(task_item.path)])
                                 self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
@@ -1074,17 +1291,44 @@ class HomeInterface(QWidget):
                             # 仅当状态已同步为 PROCESSING 才判失败：GUI 线程繁忙时
                             # PROCESSING 信号可能尚未落地，exitcode!=0 + PENDING 的组合
                             # 若直接标 FAILED 会覆盖停止操作设置的 PENDING（状态竞态）
-                            task_obj = self.task_list_component.get_task(self.current_processing_task_index)
+                            task_obj = self.task_list_component.get_task(idx)
                             if process.exitcode == 0 and not self._stop_event.is_set() \
                                     and task_obj and task_obj.status == TaskStatus.PROCESSING:
                                 self.progress_signal.emit(100, True)
                                 # 任务完成, 更新输出路径为只读（经信号在 GUI 线程落库+持久化）
-                                self.task_output_path_signal.emit(self.current_processing_task_index, output_path)
-                                self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.COMPLETED)
+                                self.task_output_path_signal.emit(idx, output_path)
+                                self.task_status_signal.emit(idx, TaskStatus.COMPLETED)
                                 self.task_done_signal.emit(task_item.name, True)
                             elif task_obj and task_obj.status == TaskStatus.PROCESSING:
-                                self.task_status_signal.emit(self.current_processing_task_index, TaskStatus.FAILED)
+                                self.task_status_signal.emit(idx, TaskStatus.FAILED)
                                 self.task_done_signal.emit(task_item.name, False)
+                            else:
+                                # 兜底：以上条件都不满足（任务被并发删除/状态被并发
+                                # 改动/索引失效）——旧实现两个分支都不发信号，任务卡
+                                # 永远停在「处理中」计时走着，没有任何完成信号
+                                # （用户报障「二检之后不完成」即此）。按状态补发
+                                # 终态，绝不让任务无声卡在中间态。
+                                if task_obj is not None and task_obj.status == TaskStatus.FAILED:
+                                    # 后端已通过 on_task_error 报过错（如未检测到
+                                    # 字幕）：尊重失败态——退出码 0 不代表有输出，
+                                    # 不用它覆盖；只补发完成/失败提醒
+                                    self.append_log_signal.emit([
+                                        f'[Worker] 任务「{task_item.name}」后端已标记失败，保留失败态'])
+                                    self.task_done_signal.emit(task_item.name, False)
+                                else:
+                                    final = TaskStatus.COMPLETED if process.exitcode == 0 else TaskStatus.FAILED
+                                    why = ('任务不存在（索引失效，可能被删除）' if task_obj is None
+                                           else f'状态已被并发改为 {task_obj.status.value}')
+                                    self.append_log_signal.emit([
+                                        f'[Worker] 任务「{task_item.name}」收尾条件异常（{why}），'
+                                        f'按退出码 {process.exitcode} 置为 {final.value}'])
+                                    n_tasks = len(self.task_list_component.get_all_tasks())
+                                    if 0 <= idx < n_tasks:
+                                        self.task_status_signal.emit(idx, final)
+                                        if process.exitcode == 0:
+                                            self.progress_signal.emit(100, True)
+                                            self.task_output_path_signal.emit(idx, output_path)
+                                    self.task_done_signal.emit(task_item.name, process.exitcode == 0)
 
                         except Exception as e:
                             # 完整 traceback 进监控/日志：仅 print(e) 会丢掉调用栈，
@@ -1399,7 +1643,9 @@ class HomeInterface(QWidget):
         # 对 concat+mux 后的成片重跑一次 --residue-only 子进程，成功后原子替换
         self._residue_second_pass_on_output(output_path, options)
         self._segment_log('[分段] 成片输出：', output_path)
-        self.progress_signal.emit(100, True)
+        # 终态 progress(100, True) 统一由 worker 主循环发：此处先发会与主循环
+        # 重复，且会提前触发 processing_finished 把 current_processing_task_index
+        # 置 -1，导致末任务丢失 output_path/COMPLETED（竞态）
         return _SegmentResult(exitcode=0)
 
     def _residue_second_pass_on_output(self, output_path, options):
@@ -1534,8 +1780,12 @@ class HomeInterface(QWidget):
         self.run_button.setVisible(True)
         self.stop_button.setVisible(False)
         self.se = None
-        # 重置视频滑块
+        # 重置视频滑块（blockSignals：避免触发 seek 把 A 帧单提走与 B 框
+        # 最后结果帧错位；随后 on_task_output_path → _open_compare_output
+        # 会双路回卷首帧，A/B 一致定格片头）
+        self.video_slider.blockSignals(True)
         self.video_slider.setValue(1)
+        self.video_slider.blockSignals(False)
         # 重置当前处理任务索引
         self.current_processing_task_index = -1
         # worker 收尾已释放 A 路视频源：重开，否则处理后拖动滑块/同步播放全部失效
@@ -1546,7 +1796,9 @@ class HomeInterface(QWidget):
     def update_progress(self, progress_total, isFinished):
         try:
             pos = min(self.frame_count - 1, int(progress_total / 100 * self.frame_count))
-            if pos != self.video_slider.value():
+            # 用户正在拖动滑块时不抢滑块：处理中也允许拖动预览 A 源帧，
+            # 不被进度回抢（松手后下一帧进度即恢复跟随）
+            if pos != self.video_slider.value() and not self._slider_scrubbing:
                 self.video_slider.blockSignals(True)
                 self.video_slider.setValue(pos)
                 self.video_slider.blockSignals(False)
@@ -1614,8 +1866,20 @@ class HomeInterface(QWidget):
     def update_preview_with_comp(self, args):
         """处理中实时预览：A 框=源帧（叠加字幕区域矩形），B 框=去字幕结果帧"""
         frame_ori, frame_comp = args
+        # 预览已切到其他任务：实时帧不写进别人画面（后台处理继续，
+        # 切回处理中任务即恢复）
+        if (self.current_processing_task_index >= 0
+                and self.task_list_component.get_current_task_index()
+                != self.current_processing_task_index):
+            return
         # 修复帧已接管 B 框：后续 seed_b_signal 预填直接跳过（_on_seed_b 守卫）
         self._b_live_arrived = True
+        # 实时预览恒驻 A/B 同框：查找字幕/去字幕全过程同步可见
+        # （停播/全屏关闭/任务选中切换等路径可能复位过布局，在此按处理态
+        # 重新断言——set_compare_mode 内部幂等，无变化时零开销）
+        self.video_display_component.set_compare_mode(True)
+        if self._live_paused:
+            return  # 暂停实时预览：丢帧定格供查看（后台处理不暂停）
         if self.current_processing_task_index >= 0:
             subtitle_areas = self.task_list_component.get_task_option(self.current_processing_task_index, TaskOptions.SUB_AREAS, [])
             if isinstance(subtitle_areas, (list, tuple)) and len(subtitle_areas) > 0:
@@ -1632,14 +1896,22 @@ class HomeInterface(QWidget):
         # contain 适配 + 黑边由显示组件完成（A 框不画选区：矩形已直接画在帧上）
         self.video_display_component.update_video_display(frame_ori, draw_selection=False)
         self.video_display_component.set_dragger_enabled(False)
+        # 全屏实时窗同步推送（帧 + 当前处理位置，滑杆在主窗由 update_progress 驱动）
+        if self._ab_fs_win is not None:
+            self._ab_fs_win.set_frames(frame_ori, frame_comp)
+            self._ab_fs_win.set_progress(self.video_slider.value(), self.frame_count or 0)
 
     @Slot()
     def _on_seed_b(self):
         """worker 载入当前任务视频后：用 A 框首帧预填 B 框（GUI 线程执行）。
-        修复帧已到达（_b_live_arrived）则跳过，避免把结果帧冲掉。"""
+        修复帧已到达（_b_live_arrived）则跳过，避免把结果帧冲掉。
+        实时模式下预填后即切 A/B 同框——检测阶段（尚无修复帧）用户也能
+        看到双框，B 先显示源帧，修复帧到达后自然接管。"""
         if self._b_live_arrived:
             return
         self.video_display_component.seed_b_from_a()
+        if self._ab_live:
+            self.video_display_component.set_compare_mode(True)
 
     @Slot(str, bool)
     def _on_task_done(self, name, success):
@@ -1677,13 +1949,26 @@ class HomeInterface(QWidget):
 
         keep_compare=False（用户主动换视频/选中待处理任务）→ 回单框模式
         （画面按最长边撑满窗口）；keep_compare=True（worker 处理链路加载
-        当前任务）→ 保留当前模式，不打断开始处理时切入的 A/B 对比布局。
+        当前任务）→ 进入/保持实时 A/B 同框：_ab_live 置真（播放/全屏按钮
+        切实时语义），B 框先由 seed_b 预填源帧、修复帧到达后接管。
         """
+        # 空路径防御：快照脏数据/异常调用下不进解码链路。旧实现会把 ''
+        # 传进 FFmpegFrameReader → cv2.VideoCapture('') 踩 !_filename.empty()
+        # 断言，再静默失败——预览空白且无任何提示（用户报障即此）
+        if not video_path:
+            self._warn_video_unopenable(video_path)
+            return False
         self.video_path = video_path
+        if keep_compare:
+            # worker 链路加载当前任务（含队列中上一任务完成后的新一轮）：
+            # 先置实时模式再关旧结果源——_close_compare_output 内的
+            # _sync_play_button 据此把按钮切到实时语义（而非一律禁用）
+            self._ab_live = True
+            self._live_paused = False
         # 换视频：停止 A/B 同步播放并释放旧结果源
         self._close_compare_output()
-        if not keep_compare:
-            self.video_display_component.set_compare_mode(False)
+        # 布局切换（GUI 线程直接切；worker 线程经信号排队）
+        self._set_compare_mode_threadsafe(bool(keep_compare))
         with self._video_cap_lock:
             if self.video_cap:
                 self.video_cap.release()
@@ -1693,20 +1978,28 @@ class HomeInterface(QWidget):
             return self.load_as_picture(video_path)
         with self._video_cap_lock:
             # FFmpegFrameReader 对坏文件在构造时抛异常（cv2 是 isOpened=False），
-            # 统一转成「按图片路径兜底」的既有行为
+            # 统一转成「按图片路径兜底」的既有行为；兜底也失败（文件被移动/
+            # 删除/损坏）→ 人话提示，不再静默留空白预览
             try:
                 self.video_cap = FFmpegFrameReader(get_readable_path(self.video_path))
             except Exception:
                 self.video_cap = None
-                return self.load_as_picture(video_path)
-            if not self.video_cap.isOpened():
+            if self.video_cap is None or not self.video_cap.isOpened():
+                if self.video_cap is not None:
+                    self.video_cap.release()
                 self.video_cap = None
-                return self.load_as_picture(video_path)
+                if self.load_as_picture(video_path):
+                    return True
+                self._warn_video_unopenable(video_path)
+                return False
             ret, frame = self.video_cap.read()
             if not ret:
                 self.video_cap.release()
                 self.video_cap = None
-                return self.load_as_picture(video_path)
+                if self.load_as_picture(video_path):
+                    return True
+                self._warn_video_unopenable(video_path)
+                return False
             self.frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.frame_height = int(self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.frame_width = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1721,6 +2014,26 @@ class HomeInterface(QWidget):
         # 视频模式下恢复用户原始的 inpaint 模式选择
         self._unlock_inpaint_mode()
         return True
+
+    def _warn_video_unopenable(self, video_path):
+        """（可在 worker 线程调用）视频/图片加载失败提示。
+
+        只发信号——由 GUI 线程的 _show_video_load_failed 弹 InfoBar 并写
+        监控；跨线程直接操作 Qt 控件是未定义行为。旧实现静默返回 False，
+        预览窗口空白、用户看不到任何原因（「预览窗口中没有视频」报障即此）。
+        """
+        self.video_load_failed_signal.emit(video_path or '')
+
+    @Slot(str)
+    def _show_video_load_failed(self, video_path):
+        """GUI 线程：预览加载失败的 InfoBar + 监控双提示。"""
+        gui = tr['SubtitleExtractorGUI']
+        path_text = video_path or '（空路径）'
+        InfoBar.warning(
+            title=gui['VideoLoadFailedTitle'],
+            content=gui['VideoLoadFailed'].format(path_text),
+            parent=self.window(), duration=6000)
+        self.append_output(gui['VideoLoadFailed'].format(path_text))
 
     def _show_video_info_overlay(self, video_path):
         """采集并在预览区显示视频基本信息（用户需求：任务条点击视频时可见）。
@@ -1746,6 +2059,8 @@ class HomeInterface(QWidget):
         self.video_cap = None
         frame = read_image(get_readable_path(path))
         if frame is None:
+            # 图片缺失/无权限/损坏：与视频路径兜底对齐，向用户提示而非静默留白
+            self._warn_video_unopenable(path)
             return False
         self.frame_count = 1
         self.frame_height = frame.shape[0]
@@ -1807,8 +2122,16 @@ class HomeInterface(QWidget):
                 index = max(0, self.task_list_component.find_task_index_by_path(path))
                 self.task_list_component.select_task(index)
 
-    def closeEvent(self, event):
-        """窗口关闭时断开信号连接并清理资源"""
+    def shutdown(self):
+        """收敛的退出清理（顶层窗口 closeEvent 显式调用）。
+
+        HomeInterface 是 FluentWindow 内 QStackedWidget 的子 widget，Qt 不会
+        向其投递 closeEvent，旧清理逻辑一行都不执行；故收敛为公开方法，
+        由 gui.py 顶层 closeEvent 触发。幂等：重复调用安全。
+        """
+        if getattr(self, '_shutdown_done', False):
+            return
+        self._shutdown_done = True
         try:
             # 通知 worker 线程停止
             self._stop_event.set()
@@ -1822,32 +2145,39 @@ class HomeInterface(QWidget):
             # 快照模式下不自动落盘；此处仅刷新分段续跑信息与状态行
             self.task_list_component.save_tasks()
 
-            # 断开信号连接
-            self.progress_signal.disconnect(self.update_progress)
-            self.append_log_signal.disconnect(self.append_log)
-            self.update_preview_with_comp_signal.disconnect(self.update_preview_with_comp)
-            self.task_error_signal.disconnect(self.on_task_error)
-            self.toggle_buttons_signal.disconnect(self._toggle_buttons)
-            self.video_display_component.video_slider.valueChanged.disconnect(self.slider_changed)
-            self.video_display_component.ab_sections_changed.disconnect(self.ab_sections_changed)
-            self.video_display_component.selections_changed.disconnect(self.selections_changed)
-            # 其余信号一并断开（部分连接目标是 lambda，用无参 disconnect）
-            for _sig in (self.console_signal, self.task_status_signal,
+            # 断开信号连接（部分连接目标是 lambda，无参 disconnect 全量断开）
+            for _sig in (self.progress_signal, self.append_log_signal,
+                         self.update_preview_with_comp_signal,
+                         self.task_error_signal, self.toggle_buttons_signal,
+                         self.console_signal, self.task_status_signal,
                          self.task_output_path_signal, self.select_task_signal,
                          self.task_progress_signal, self.task_option_signal):
                 try:
                     _sig.disconnect()
                 except (TypeError, RuntimeError):
                     pass
+            for _sig in (self.video_display_component.video_slider.valueChanged,
+                         self.video_display_component.ab_sections_changed,
+                         self.video_display_component.selections_changed):
+                try:
+                    _sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+
             # 释放视频资源
             with self._video_cap_lock:
                 if self.video_cap:
                     self.video_cap.release()
                     self.video_cap = None
-            if self.b_video_cap is not None:
-                self.b_video_cap.release()
+            cap_b = self.b_video_cap
+            if cap_b is not None:
+                cap_b.release()
                 self.b_video_cap = None
         except Exception as e:
             print("Error during close window:", e)
+
+    def closeEvent(self, event):
+        """兼容任何可能的手动触发：统一走 shutdown() 清理"""
+        self.shutdown()
         super().closeEvent(event)
     

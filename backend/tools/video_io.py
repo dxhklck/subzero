@@ -23,9 +23,15 @@ class FFmpegFrameReader:
       下一帧即 0-based 第 n 帧；n 等于当前位置时为 no-op；
     - 元数据（帧数/尺寸/帧率）用 cv2 只解析容器头获得，不启动解码管道。
     提前 EOF（解码中途死掉）时打 stderr 摘要，避免静默截断输出。
+    硬解不可用（非 NVIDIA）时首帧失败自动回退软解管道（-ss 仍在 -i 前，帧精确 seek 语义不变）。
     """
 
     def __init__(self, path):
+        if not path:
+            # 空路径防御：cv2.VideoCapture('') 会踩 cap_images.cpp 的
+            # !_filename.empty() 断言（报错信息与真正原因毫无关系），
+            # 这里直接抛可读异常，由调用方按「打不开」处理
+            raise ValueError(f'FFmpegFrameReader: empty path: {path!r}')
         self.path = path
         self.ffmpeg = FFmpegCLI.instance().ffmpeg_path
         meta_cap = cv2.VideoCapture(path)
@@ -44,11 +50,20 @@ class FFmpegFrameReader:
         self._proc = None
         self._stderr = b''
         self._pos = 0
+        # 硬解优先：首次打开走 -hwaccel cuda；若首帧即 EOF（非 NVIDIA 机器上
+        # ffmpeg 初始化失败立即退出），read() 会重建软解管道回退，保持帧精确 seek
+        self._hwaccel = True
+        # 当前管道已成功解码的帧数：用于区分「硬解启动失败」与「真实视频截断」
+        self._frames_decoded = 0
         self._open(0)
 
-    def _open(self, start_frame):
+    def _open(self, start_frame, hwaccel=None):
+        if hwaccel is not None:
+            self._hwaccel = hwaccel
         self._stop()
-        cmd = [self.ffmpeg, '-hide_banner', '-loglevel', 'error', '-hwaccel', 'cuda']
+        cmd = [self.ffmpeg, '-hide_banner', '-loglevel', 'error']
+        if self._hwaccel:
+            cmd += ['-hwaccel', 'cuda']
         if start_frame > 0:
             # -ss 在 -i 前：定位关键帧后解码丢弃至目标时间戳，输出精确从该帧开始
             cmd += ['-ss', f'{start_frame / self._fps:.6f}']
@@ -56,6 +71,7 @@ class FFmpegFrameReader:
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       creationflags=SUBPROCESS_CREATION_FLAGS)
         self._pos = start_frame
+        self._frames_decoded = 0
 
     def _stop(self):
         if self._proc is not None:
@@ -90,9 +106,17 @@ class FFmpegFrameReader:
             return False, None
         frame = self._frame_bytes()
         if frame is None:
+            # 硬解管道首帧即失败（非 NVIDIA 机器上 -hwaccel cuda 初始化即退）：
+            # 回退软解重开，而非把 (False, None) 交给上层跳过区间。
+            # 软解同样 -ss 在 -i 前，帧精确 seek 语义不变，只是更慢
+            if self._hwaccel and self._frames_decoded == 0:
+                print(f'[Decoder] NVDEC 硬解首帧失败，回退 CPU 软解: {self.path}')
+                self._open(self._pos, hwaccel=False)
+                return self.read()
             self._warn_truncated()
             self._stop()
             return False, None
+        self._frames_decoded += 1
         self._pos += 1
         return True, frame.copy()  # frombuffer 只读，调用方可能就地修改
 
@@ -101,9 +125,14 @@ class FFmpegFrameReader:
             return False
         frame = self._frame_bytes()
         if frame is None:
+            if self._hwaccel and self._frames_decoded == 0:
+                print(f'[Decoder] NVDEC 硬解首帧失败，回退 CPU 软解: {self.path}')
+                self._open(self._pos, hwaccel=False)
+                return self.grab()
             self._warn_truncated()
             self._stop()
             return False
+        self._frames_decoded += 1
         self._pos += 1
         return True
 

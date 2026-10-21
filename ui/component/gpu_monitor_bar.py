@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """系统状态行（嵌入处理模型卡）：显存/内存 两行，图示 + 名称 | 细进度条 | 动态数值"""
+import shutil
 import subprocess
 
 import psutil
@@ -40,7 +41,9 @@ class GpuSamplerThread(QThread):
 
     def stop(self):
         self._running = False
-        self.wait(2000)
+        # 采样中的 subprocess.run(timeout=5) 最长 5s：等满再返回，避免退出时
+        # QThread 仍在运行（"QThread: Destroyed while thread is still running"）
+        self.wait(6000)
 
     @staticmethod
     def _sample():
@@ -125,9 +128,15 @@ class GpuMonitorBar(QWidget):
         self._apply_theme()
         qconfig.themeChanged.connect(self._apply_theme)
 
-        self._thread = GpuSamplerThread(self)
-        self._thread.stats_ready.connect(self.update_stats)
-        self._thread.start()
+        self._thread = None
+        if shutil.which('nvidia-smi'):
+            self._thread = GpuSamplerThread(self)
+            self._thread.stats_ready.connect(self.update_stats)
+            self._thread.start()
+        else:
+            # 无 nvidia-smi 的机器：不启动采样线程（否则每秒起一个失败子进程），
+            # 显存行无意义，隐藏后仅保留内存监控
+            self.vram_row.setVisible(False)
 
     def _apply_theme(self):
         c = _theme_colors()
@@ -161,4 +170,5 @@ class GpuMonitorBar(QWidget):
         pass  # 精简版无峰值显示，保留接口兼容
 
     def stop(self):
-        self._thread.stop()
+        if self._thread is not None:
+            self._thread.stop()

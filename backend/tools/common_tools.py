@@ -53,14 +53,23 @@ def get_readable_path(path):
     if sys.platform != 'win32':
         return path
     buf = ctypes.create_unicode_buffer(4096)
-    ctypes.windll.kernel32.GetShortPathNameW(path, buf, 4096)
-    return buf.value
+    n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 4096)
+    short = buf.value if n > 0 else ''
+    # 失败（文件不存在/8.3 短名不可用/路径非法）时回退原路径。
+    # 旧实现无视返回值直接 buf.value——失败时缓冲区为空，返回 '' 喂给
+    # cv2.VideoCapture('') 踩 !_filename.empty() 断言，调用方 except 后
+    # 静默失败（快照里源文件被移动的任务 → 选中即预览空白无提示）。
+    return short if short else path
 
 def read_image(path):
-    if os.path.getsize(path) > 100*1024*1024: # 100MB
-        print(f"Image {path} is too large, skip")
+    try:
+        if os.path.getsize(path) > 100*1024*1024: # 100MB
+            print(f"Image {path} is too large, skip")
+            return None
+        img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), -1)
+        if img is not None and img.shape[-1] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return img
+    except (OSError, ValueError, cv2.error):
+        # 文件缺失/无权限/损坏：返回 None，由调用方按「打不开」兜底
         return None
-    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), -1)
-    if img is not None and img.shape[-1] == 4:
-        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-    return img

@@ -34,7 +34,16 @@ class SubtitleRemoverRemoteCall:
             self.running = False
 
     def stop(self):
+        if not self.running:
+            return
         self.running = False
+        # 唤醒阻塞在 queue.get(block=True) 的消费线程：停止/强杀路径下子进程
+        # 不会执行 finally 里的 FINISH，若不加哨兵，daemon 线程会永久卡在
+        # get() 上——每轮「运行→停止」泄漏一条线程 + 一个 Queue + 对 GUI 的引用
+        try:
+            self.queue.put((Command.FINISH, (None,)))
+        except Exception:
+            pass
 
     def register_update_progress_callback(self, callback):
         self.callbacks[Command.PROGRESS] = callback

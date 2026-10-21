@@ -366,7 +366,7 @@ class TaskProgressCell(QWidget):
         self.bar.setFixedHeight(5)
         # 底部总耗时行：任务完成/失败后浮现定格（处理中/待处理隐藏）
         self.total_label = QLabel("")
-        self.total_label.setStyleSheet("font-size:11px; font-family:'Consolas';")
+        self.total_label.setStyleSheet("font-size:16px; font-family:'Consolas';")
         self.total_label.hide()
         lay.addWidget(self.total_label)
         self._status_color = "#A9A8A0"
@@ -388,7 +388,7 @@ class TaskProgressCell(QWidget):
         self.time_label.setStyleSheet(
             f"font-size:11px; color:{time_color}; font-family:'Consolas';")
         self.total_label.setStyleSheet(
-            f"font-size:11px; color:{time_color}; font-family:'Consolas';")
+            f"font-size:16px; color:{time_color}; font-family:'Consolas';")
         self._render_status()
 
     def _render_status(self):
@@ -633,7 +633,10 @@ class Task:
             return None
         try:
             import cv2
-            cap = cv2.VideoCapture(self.path)
+            from backend.tools.common_tools import get_readable_path
+            # 中文路径走短路径名（cv2 直接开长名在部分环境失败 → ETA 静默失效）；
+            # 文件不存在时 get_readable_path 回退原路径，cv2 打不开返回 None
+            cap = cv2.VideoCapture(get_readable_path(self.path))
             try:
                 n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             finally:
@@ -1082,15 +1085,18 @@ class TaskListComponent(QWidget):
         Returns:
             list: 待处理任务列表，每项为 (索引, 任务) 元组
         """
-        return [(i, task) for i, task in enumerate(self.tasks) if task.status == TaskStatus.PENDING]
+        # 先快照：worker 线程遍历期间 GUI 线程可能增删任务，直接迭代
+        # self.tasks 会抛 RuntimeError（list changed size during iteration）
+        tasks = list(self.tasks)
+        return [(i, task) for i, task in enumerate(tasks) if task.status == TaskStatus.PENDING]
     
     def get_all_tasks(self):
         """获取所有任务
         
         Returns:
-            list: 所有任务列表
+            list: 所有任务列表（快照拷贝，避免遍历中并发增删）
         """
-        return self.tasks
+        return list(self.tasks)
 
     def get_task(self, index):
         """获取指定索引的任务
@@ -1415,6 +1421,20 @@ class TaskListComponent(QWidget):
         if 0 <= index < len(self.tasks):
             self.task_selected.emit(index, self.tasks[index].path)
 
+    def select_first_openable_task(self):
+        """选中第一个源文件存在的任务；都不存在则回落第 0 条。
+
+        快照恢复/删除任务后的自动选中用：旧实现无条件选 0，队列首条
+        文件已被移动/删除时预览空白（用户报障「预览窗口中没有视频」，
+        根因是该任务路径走进 get_readable_path 拿到空短名踩 cv2 断言）。
+        全不存在时仍选 0——由 load_video 的失败提示向用户说明原因。
+        """
+        if not self.tasks:
+            return
+        idx = next((i for i, t in enumerate(self.tasks)
+                    if t.path and os.path.isfile(t.path)), 0)
+        self.select_task(idx)
+
     def open_file_location(self, path):
         """打开文件所在位置
         
@@ -1467,6 +1487,7 @@ class TaskListComponent(QWidget):
         """
         if 0 <= index < len(self.tasks):
             return self.tasks[index].options.get(task_option.value, default)
+        return default
 
     # ------------------------------------------------------------------ #
     # 任务队列持久化（config/tasks.json）
@@ -1514,11 +1535,11 @@ class TaskListComponent(QWidget):
     # ------------------------------------------------------------------ #
 
     def _apply_total_bar_theme(self):
-        """悬浮条配色随主题：半透明胶囊底 + 22px 品牌绿加粗（醒目）"""
+        """悬浮条配色随主题：半透明胶囊底 + 16px 品牌绿加粗（醒目）"""
         color = '#2BBF8E' if isDarkTheme() else '#1D9E75'
         self.total_bar.setStyleSheet(
             f"QLabel {{ background: rgba(128,128,128,0.15); color:{color};"
-            f" font-size:22px; font-weight:600; border-radius:14px;"
+            f" font-size:16px; font-weight:600; border-radius:14px;"
             f" padding:5px 22px; }}")
 
     def _reposition_total_bar(self):
@@ -1646,7 +1667,9 @@ class TaskListComponent(QWidget):
         for w in warnings:
             self.snapshot_log.emit(f'[快照加载] {w}')
         if restored:
-            self.select_task(0)
+            # 选中第一个源文件存在的任务：无条件选 0 时，队列首条文件
+            # 已被移动/删除 → 预览空白（用户报障「预览窗口中没有视频」）
+            self.select_first_openable_task()
         InfoBar.success(title=tl['SnapshotLoad'],
                         content=tl['SnapshotLoaded'].format(restored),
                         parent=self.get_root_parent(), duration=4000)
@@ -1774,9 +1797,10 @@ class TaskListComponent(QWidget):
             total_text = tl['TimeTotal'].format(self._fmt_duration(task.elapsed))
         cell.set_time(text)
         cell.set_total_time(total_text)
-        # 行高随底部总耗时行显隐伸缩（46=标准两行，62=多一行总耗时）
+        # 行高随底部总耗时行显隐伸缩（46=标准两行，66=多一行总耗时；
+        # 总耗行字号 16px 后 62 会挤压文字，加 4px 行距）
         if 0 <= index < self.table.rowCount():
-            self.table.setRowHeight(index, 62 if total_text else 46)
+            self.table.setRowHeight(index, 66 if total_text else 46)
 
     def _refresh_pending_estimates(self):
         """速度模型变化后刷新所有待处理行的预估"""
