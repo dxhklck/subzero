@@ -21,6 +21,8 @@ SubZero removes hard-burned subtitles from videos: OCR locates the subtitle regi
 
 **New in 1.3.0**:
 
+- **Live A/B comparison preview**: while a task is running the preview switches to a two-pane A/B view — A is the source frame (with the subtitle selection overlaid), B is the live inpainted result, so detection and erasing are visible frame by frame; the play button changes meaning with state (running = pause/resume the live preview, finished = synchronised A/B playback), fullscreen comparison picks side-by-side (portrait) or stacked (landscape) layout automatically, and closing fullscreen keeps playback going with the main preview back in the same A/B view
+- **Strict residue second pass**: the fallback pass now samples every frame and disables duplicate-frame skipping, so 1–2 frame ghosting no longer slips between sampling steps (slower but nothing missed); it also reads the result with a frame-accurate reader instead of keyframe-snapping seeks
 - **Optional SageAttention acceleration**: MiniMax self-attention can be routed through SageAttention (INT8-quantized K) — roughly 40% faster end-to-end in benchmarks with no change in peak VRAM; falls back automatically when SageAttention is missing or fails, off by default
 - **Attention backend tuning**: the fallback path now pins the cuDNN SDPA backend (~14% faster, mathematically exact), and inference uses `inference_mode` + cuDNN benchmark
 - **Feathered strip compositing**: inpainted pixels are blended back with a feathered mask alpha, eliminating faint rectangular edges around restored regions

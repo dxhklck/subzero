@@ -106,6 +106,19 @@ Main window: task queue, video preview (letterbox, native aspect ratio with blac
 - **Per-box time range**: with a selection box selected (clicked), press `Alt+[` to set the current frame as its time start, `Alt+]` as its end, `Alt+\` to clear (unset = active for the whole video). The range bar above the playbar shows **both the global AB sections and the current box's colored local band** at once; matching bands also appear at the bottom of the preview. Different boxes can have different start/end positions; a box's region is not repainted outside its own time window.
 - **Frame-by-frame preview**: Left/Right arrows move by the "Preview frame step" (default 1 frame, configurable 1–300 in Settings) for precise subtitle-frame positioning; `Ctrl+Left/Right` = ±1 s, `Shift+Left/Right` = ±5 s for fast coarse seeking.
 
+#### A/B comparison preview
+
+The preview is normally a single pane (source A); during and after processing you can switch to a two-pane A/B view, no external player needed.
+
+- **Automatic A/B while processing**: pressing Start switches the preview to two panes — **pane A is the source frame** (with the green subtitle selection overlaid, tracking detected boxes) and **pane B is the live inpainted result**, so detection and erasing are visible frame by frame instead of waiting for the final file.
+- **Three-state play button**:
+  - running → **pause/resume the live preview** (freezes the picture only; processing keeps going in the background and resumes at the current frame);
+  - finished / an already-finished task selected → **synchronised A/B playback** from the current slider position; when the result becomes available both panes rewind to the first frame for a still comparison;
+  - nothing to compare → greyed out.
+- **Fullscreen comparison**: the fullscreen button opens a large A/B view; the split direction follows the video aspect — **side-by-side for portrait, stacked for landscape**, so both panes use the available space. Inside fullscreen: `Space` play/pause, `←/→` frame step, `Ctrl+←/→` ±1 s, `F` toggle fullscreen, `Esc` exit.
+- **Closing fullscreen does not stop playback**: the main preview returns to the A/B view and keeps playing (or stays where it was paused).
+- **Seeking while processing**: the slider stays usable during processing — it only moves the preview, never interrupts the running task, and the progress updates will not yank the slider back while you are dragging.
+
 #### Subtitles at different positions in different time segments
 
 For "subtitle position changes over time" (e.g. a corner bug in the intro plus dialogue at the bottom), the recommended way is **per-box time range**: draw the area for the corner bug → click to select it → mark its appearance window with `Alt+[` / `Alt+]` — one task does it all.
@@ -150,7 +163,7 @@ Cost: two full encodes (crf 20 tier; the second-generation loss is visually invi
 | Area deviation pixels | 20 | Expand detected boxes outward to fully cover subtitles |
 | Detection sample step | 0 = smart | OCR every N frames; 0 adapts by frame difference |
 | Detection process size | 720 | Resolution cap for the detection stage (0–960); larger = more accurate, slower |
-| Residue second pass | On | After the first pass, re-detect leftovers and repair them automatically. The second pass automatically uses more sensitive detection parameters (box threshold 0.6→0.3, box expansion 1.5→2.0, at 960px resolution for an independent catch), so fragment leftovers of outlined/stylized subtitles (common in anime) are detected too; false positives are constrained by requiring overlap with first-pass regions |
+| Residue second pass | On | After the first pass, re-detect leftovers and repair them automatically. The second pass automatically uses more sensitive detection parameters (box threshold 0.6→0.3, box expansion 1.5→2.0, at 960px resolution for an independent catch), so fragment leftovers of outlined/stylized subtitles (common in anime) are detected too; false positives are constrained by requiring overlap with first-pass regions. **The fallback scan is per-frame by default** (duplicate-frame skipping disabled) so 1–2 frame ghosts cannot slip between sampling steps — slower but nothing missed; the result is read with a frame-accurate seek, unaffected by long-GOP keyframe snapping |
 
 **MiniMax-Remover**
 
