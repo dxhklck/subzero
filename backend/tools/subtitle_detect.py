@@ -74,7 +74,11 @@ class SubtitleDetect:
         # 帧差分数：采样帧号 -> 与上一采样帧的平均灰度差（0-255标度）。
         # 供重复帧跳过判定用，不影响检测结果
         self.frame_diff_scores = {}
+        # 关注带（选框并集）内的帧差：判重必须整帧与带内同时低于阈值，
+        # 否则静态录屏里整句字幕的出现会被整帧均值稀释成「重复帧」而漏检
+        self.frame_band_diff_scores = {}
         self._prev_gray_small = None
+        self._prev_band_small = None
         self._init_sample_step()
 
     def _init_sample_step(self):
@@ -176,16 +180,61 @@ class SubtitleDetect:
             proc_h, proc_w = limit, max(1, int(round(w / scale)))
         return cv2.resize(img, (proc_w, proc_h), interpolation=cv2.INTER_AREA), scale
 
+    def _focus_rect(self, h, w):
+        """检测关注区域（选框并集，原图像素 (x0,y0,x1,y1)）；无选框返回 None=整帧。
+
+        字幕只可能出现在选框内，所以「关注带」的帧差才是判重的正确尺度：
+        整帧帧差在静态录屏里被大片不动的桌面稀释，字幕整句出现/消失也远低于
+        阈值（实测 1920x1080 录屏：字幕带占 7.8%，整帧均值差 < 1.0）——
+        这正是「首次修复字幕不干净」的根因（见 frame_band_diff_scores 注释）。
+        """
+        rects = [a for a in (self.sub_areas or []) if len(a) >= 4]
+        if not rects:
+            return None
+        y0 = min(int(r[0]) for r in rects)
+        y1 = max(int(r[1]) for r in rects)
+        x0 = min(int(r[2]) for r in rects)
+        x1 = max(int(r[3]) for r in rects)
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(w, x1), min(h, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        return x0, y0, x1, y1
+
     def _update_frame_diff(self, frame_no, frame):
-        """计算本采样帧与上一采样帧的平均灰度差（AUTO路由用，缩到160px长边，成本<0.5ms）"""
+        """计算本采样帧与上一采样帧的平均灰度差（整帧 + 关注带，成本<1ms）。
+
+        两套尺度并存：
+        - frame_diff_scores：整帧 160px 长边灰度均值差（原判据，保留兼容）；
+        - frame_band_diff_scores：选框并集带内的均值差。判重必须**同时**满足
+          两者低于阈值——只看整帧时，静态录屏里新出现的一条字幕对整帧均值的
+          贡献不足 1.0，会被误判成重复帧而复用上一帧（无字幕）的检出，导致
+          该段字幕从未送 OCR、从未进掩膜，成片原样保留（用户报障「首次修复
+          字幕不干净」）。带内尺度下同一字幕的像素变化是几十级，绝不会漏。
+        """
         h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         scale = 160.0 / max(h, w)
-        small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
-                           (max(1, int(w * scale)), max(1, int(h * scale))),
+        small = cv2.resize(gray, (max(1, int(w * scale)), max(1, int(h * scale))),
                            interpolation=cv2.INTER_AREA)
         if self._prev_gray_small is not None and self._prev_gray_small.shape == small.shape:
             self.frame_diff_scores[frame_no] = float(np.mean(cv2.absdiff(self._prev_gray_small, small)))
         self._prev_gray_small = small
+
+        rect = self._focus_rect(h, w)
+        if rect is None:
+            self._prev_band_small = None
+            return
+        x0, y0, x1, y1 = rect
+        band = gray[y0:y1, x0:x1]
+        bscale = 160.0 / max(band.shape)
+        bsmall = cv2.resize(band, (max(1, int(band.shape[1] * bscale)),
+                                   max(1, int(band.shape[0] * bscale))),
+                            interpolation=cv2.INTER_AREA)
+        if self._prev_band_small is not None and self._prev_band_small.shape == bsmall.shape:
+            self.frame_band_diff_scores[frame_no] = float(
+                np.mean(cv2.absdiff(self._prev_band_small, bsmall)))
+        self._prev_band_small = bsmall
 
     def detect_subtitle(self, img, frame_no=None):
         return self.detect_subtitle_batch([(img, frame_no)])[0]
@@ -337,10 +386,15 @@ class SubtitleDetect:
                 # 约等于压缩噪声上限）时 OCR 结果必然相同——上一采样帧若已在
                 # 批内，则登记复用链（dup -> 源帧），批检出后回填；上一帧已
                 # 处理完则直接复用其检出。相同像素 → 相同检测，零画质影响
+                # ⚠ 必须同时满足「关注带（选框并集）内」也几乎相同：静态录屏里
+                # 整句字幕的出现对整帧均值的贡献不足 1.0，只看整帧会把带字幕的
+                # 帧误判成重复帧、复用无字幕的检出 → 该句从未进掩膜（质量事故）。
                 diff = self.frame_diff_scores.get(current_frame_no)
+                band_diff = self.frame_band_diff_scores.get(current_frame_no)
+                is_dup = (diff is not None and diff < DETECT_DUP_THRESHOLD
+                          and (band_diff is None or band_diff < DETECT_DUP_THRESHOLD))
                 dup_handled = False
-                if not self.strict_scan and diff is not None and diff < DETECT_DUP_THRESHOLD and \
-                        (prev_list is not None or pending):
+                if not self.strict_scan and is_dup and (prev_list is not None or pending):
                     src = pending[-1][0] if pending else None
                     if src is not None:
                         # 源帧在批内：等它检出后回填（源帧自身也可能是 dup，链式取根）

@@ -4,7 +4,7 @@ import time
 import shutil
 from pathlib import Path
 from enum import Enum, unique
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from datetime import datetime
 
@@ -19,7 +19,7 @@ from PySide6.QtGui import (QAction, QColor, QBrush, QDragEnterEvent, QDropEvent,
 from showinfm import show_in_file_manager
 
 from backend.config import config, tr
-from backend.tools.common_tools import is_image_file
+from backend.tools.common_tools import is_image_file, json_safe
 from backend.tools.constant import InpaintMode
 
 
@@ -154,10 +154,14 @@ _RESTORE_STATUS_MAP = {
 
 
 def _options_to_json(options):
-    """options 转 JSON 安全类型（range -> [start, stop]，tuple -> list）。
+    """options 转 JSON 安全类型（统一走 common_tools.json_safe）。
 
     ab_sections 的元素是 range 对象（视频显示组件按 .start 调整区间），
     必须转成 [start, stop] 数对才能 json.dump；非法项跳过不阻断保存。
+
+    其余键递归规范化（tuple/set/range/Path/numpy → JSON 原生）——旧实现对
+    非 ab_sections 的列表只做浅转换，元素若是 range 会原样留下、在
+    json.dump 时抛 TypeError，与分段 checkpoint 那次崩溃同一根因。
     """
     out = {}
     if not isinstance(options, dict):
@@ -172,10 +176,8 @@ def _options_to_json(options):
                     elif isinstance(r, (list, tuple)) and len(r) >= 2:
                         sections.append([int(r[0]), int(r[1])])
                 out[key] = sections
-            elif isinstance(value, (list, tuple)):
-                out[key] = [list(v) if isinstance(v, (list, tuple)) else v for v in value]
             else:
-                out[key] = value
+                out[key] = json_safe(value)
         except (TypeError, ValueError):
             continue  # 无法序列化的选项项跳过，不影响其余选项落盘
     return out
@@ -252,17 +254,23 @@ def collect_segment_info(task):
             'hash_match': info.hash_match,
             'can_resume': info.can_resume,
             'chip_text': info.chip_text,
+            # 帧级进度：快照恢复时按盘上 checkpoint 还原完成度（段数会骗人）
+            'done_frames': info.done_frames,
+            'total_frames': info.total_frames,
+            'progress_pct': round(info.progress_pct, 1),
         }
     except Exception:
         return None
 
 
 def _sum_elapsed_seconds(tasks):
-    """全部任务累计用时（秒）：完成/失败取定格 elapsed，处理中按起点实算。"""
+    """全部任务累计用时（秒）：完成/失败取定格 elapsed，处理中按「基线 + 起点实算」。"""
     total = 0.0
     for t in tasks:
         if (getattr(t, 'status', None) == TaskStatus.PROCESSING
                 and getattr(t, 'started_at', None) is not None):
+            # 续跑任务的基线用时不能丢（elapsed 为之前若干次运行的累计）
+            total += max(0.0, float(getattr(t, 'elapsed', 0.0) or 0.0))
             total += max(0.0, time.time() - t.started_at)
         else:
             total += max(0.0, float(getattr(t, 'elapsed', 0.0) or 0.0))
@@ -417,13 +425,13 @@ class TaskProgressCell(QWidget):
         self.resume_label.setStyleSheet(
             f"font-size:11px; color:{'#D98E04' if text else '#A9A8A0'};")
 
-    def set_time(self, text):
+    def set_time(self, text, tooltip=None):
         """时间标签（空串清除）：预计 ~mm:ss / 运行 mm:ss/预计 mm:ss / 用时 mm:ss"""
         text = text or ""
         if text != self._time_text:
             self._time_text = text
             self.time_label.setText(text)
-            self.time_label.setToolTip(text)
+            self.time_label.setToolTip(tooltip or text)
             self.content_changed.emit()
 
     def set_total_time(self, text):
@@ -622,9 +630,14 @@ class Task:
     # 分段续跑信息快照（checkpoint 目录/段进度，保存时刷新；非分段任务为 None）
     segment_info: dict = None
     # 计时：started_at=本次开始处理时刻（epoch 秒，进入 PROCESSING 时记录）；
-    # elapsed=最终用时（完成/失败时定格并持久化；重置任务时清零）
+    # elapsed=已累计用时（完成/失败时定格；跨续跑累加；重置任务时清零）；
+    # last_started_at=上次开始处理时刻（epoch 秒，仅用于快照恢复后展示「上次开始」）
     started_at: float = None
     elapsed: float = 0.0
+    last_started_at: float = None
+    # 本次运行是否已收到过进度：False 时首个进度值无条件接受（作为起点，
+    # 分段续跑可能从 checkpoint 帧进度起算），之后单调不回退。不持久化
+    _progress_started: bool = field(default=False, repr=False, compare=False)
 
     @cached_property
     def frame_count(self):
@@ -666,6 +679,17 @@ class Task:
         """判断是否是图片文件"""
         return is_image_file(self.path)
 
+    def accrued_elapsed(self):
+        """已用时长（秒）：累计基线 + 本次运行至今。
+
+        快照必须在**处理中**也写对：旧实现只存完成时定格的 elapsed，处理中的
+        任务 elapsed 恒为 0，快照里「处理时间」整段丢失（长视频分段跑到一半
+        保存 → 恢复后用时归零）。"""
+        total = max(0.0, float(self.elapsed or 0.0))
+        if self.started_at is not None:
+            total += max(0.0, time.time() - self.started_at)
+        return total
+
     def to_dict(self):
         """序列化为 JSON 安全字典（状态用枚举名，跨语言稳定）"""
         return {
@@ -676,7 +700,11 @@ class Task:
             'options': _options_to_json(self.options),
             'output_path': self._output_path,
             'segment_info': self.segment_info,
-            'elapsed': round(float(self.elapsed), 1) if self.elapsed else 0.0,
+            # 用时取「累计 + 本次运行至今」；started_at 落盘为上次开始时刻，
+            # 恢复时进 last_started_at（不当作「正在运行」，避免误计时）
+            'elapsed': round(self.accrued_elapsed(), 1),
+            'started_at': (self.started_at if self.started_at is not None
+                           else self.last_started_at),
         }
 
     @classmethod
@@ -709,10 +737,14 @@ class Task:
             elapsed = float(data.get('elapsed', 0.0))
         except (TypeError, ValueError):
             elapsed = 0.0
+        try:
+            last_started_at = float(data.get('started_at'))
+        except (TypeError, ValueError):
+            last_started_at = None
         return cls(path=path, name=name, progress=progress, status=status,
                    options=_options_from_json(data.get('options')),
                    _output_path=output_path, segment_info=segment_info,
-                   elapsed=max(0.0, elapsed))
+                   elapsed=max(0.0, elapsed), last_started_at=last_started_at)
 
 class TaskListComponent(QWidget):
     """任务列表组件"""
@@ -933,8 +965,8 @@ class TaskListComponent(QWidget):
             # 显示「参数已变」角标引导一键清理（右键菜单）
             cell.set_resume(tr['TaskList']['QueueParamChangedChip'],
                             info.get('chip_text', ''))
-        # 时间标签：历史用时（完成/失败）或预估总时长（待处理，有速度模型时）
-        self._refresh_time_label(len(self.tasks) - 1)
+        # 时间标签：历史用时（完成/失败/快照恢复）或预估总时长（待处理，有速度模型时）
+        self._refresh_time_label(row)
 
     def _refresh_model_tag(self, row, task):
         """刷新名称列的任务级模型标注。
@@ -1013,14 +1045,27 @@ class TaskListComponent(QWidget):
         Args:
             index: 任务索引
             progress: 进度值(0-100)
+
+        处理中进度**单调不回退**：分段续跑的起点取自 checkpoint 已完成帧
+        （例如 14%），而段内子进程的首个回调按「已完成帧 + 本段已处理帧」
+        重算，取整后可能低 1~2 个百分点；检测阶段更是完全不发进度。
+        不拦回退的话，进度条会从 14% 跳回 1% 再爬，观感等同于「从头重跑」。
+        本次运行的**首个**进度值始终接受（起点可能高于旧值），由
+        `_progress_started` 标记控制；重置/重新开始由 update_task_status 清标记。
         """
         if 0 <= index < len(self.tasks):
-            self.tasks[index].progress = progress
+            task = self.tasks[index]
+            value = max(0, min(100, int(progress)))
+            if (task.status == TaskStatus.PROCESSING and task._progress_started
+                    and value < task.progress):
+                return
+            task._progress_started = True
+            task.progress = value
 
             # 更新进度单元格
             cell = self.table.cellWidget(index, 1)
             if cell:
-                cell.set_progress(progress)
+                cell.set_progress(value)
 
             # 如果是当前处理的任务，滚动到可见区域
             if index == self.current_task_index:
@@ -1038,14 +1083,17 @@ class TaskListComponent(QWidget):
             task.status = status
             # 任务状态流转后，快照带来的总耗时存档作废，改回实时累计
             self._loaded_total_elapsed = None
-            # 计时：进入 PROCESSING 记起点；完成/失败定格用时；
-            # 回到 PENDING（重置/停止）清零重计
+            # 计时：进入 PROCESSING 记起点（elapsed 作为续跑基线保留，跨续跑累加）；
+            # 完成/失败把本次运行时长并入 elapsed 定格；回到 PENDING（重置/停止）清零重计
             if status == TaskStatus.PROCESSING:
                 task.started_at = time.time()
-                task.elapsed = 0.0
+                task.last_started_at = task.started_at
+                # 新一次运行：首个进度值无条件接受（分段续跑起点=已完成帧占比）
+                task._progress_started = False
             elif status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
                 if task.started_at is not None:
-                    task.elapsed = max(0.0, time.time() - task.started_at)
+                    task.elapsed = (max(0.0, float(task.elapsed or 0.0))
+                                    + max(0.0, time.time() - task.started_at))
                     task.started_at = None
                 # 速度模型回填：完成任务按 秒/帧 更新 EMA，并刷新待处理任务预估
                 if status == TaskStatus.COMPLETED:
@@ -1053,6 +1101,8 @@ class TaskListComponent(QWidget):
             else:  # PENDING
                 task.started_at = None
                 task.elapsed = 0.0
+                task.last_started_at = None
+                task._progress_started = False
             cell = self.table.cellWidget(index, 1)
             if cell:
                 cell.set_status(status)
@@ -1696,11 +1746,27 @@ class TaskListComponent(QWidget):
         resumable = 0
         for task in tasks:
             task.status = _RESTORE_STATUS_MAP.get(task.status, task.status)
-            task.progress = 100 if task.status == TaskStatus.COMPLETED else 0
             # 分段续跑信息：以盘上 checkpoint 为准刷新（段进度/可续跑性）
             info = collect_segment_info(task)
             if info is not None:
                 task.segment_info = info
+            # 完成度还原：完成态恒 100%；分段任务按 checkpoint 的**帧**进度
+            # （快照保存后可能又跑完了几段，段数/帧数都以盘上为准）；
+            # 无 checkpoint 的未完成任务归 0——快照里的 progress 只是上次运行
+            # 中途的瞬时值，没有任何可续跑产物，点运行必然从头开始；保留它
+            # 会造成「显示 37% → 一运行跳回 1%」的假进度。
+            # （旧实现无条件 `100 if COMPLETED else 0` → 长视频分段跑到一半
+            #   保存快照，恢复后完成度、进度条全归零，另一头的错）
+            stale_progress = 0
+            if task.status == TaskStatus.COMPLETED:
+                task.progress = 100
+            elif info is not None and info.get('total_frames'):
+                # int() 截断而非 round：与 run_task_with_segments 里段内进度
+                # 合成（int(overall)）同一口径，恢复值与运行首个回调不差 1%
+                task.progress = max(0, min(100, int(info.get('progress_pct') or 0)))
+            else:
+                stale_progress = max(0, min(100, int(task.progress or 0)))
+                task.progress = 0
             if not os.path.isfile(task.path):
                 self.snapshot_log.emit(f'[快照加载] {task.name} → {task.status.value}'
                                        f'（源文件不存在，可能已被移动或删除）')
@@ -1710,6 +1776,9 @@ class TaskListComponent(QWidget):
                     msg += f' · {info["chip_text"]}'
                     if info.get('can_resume'):
                         resumable += 1
+                elif stale_progress > 0:
+                    # 明确交代：没有可续跑产物，进度不保留（免得用户以为丢了进度）
+                    msg += f' · 无断点记录，将从头开始（上次进度 {stale_progress}%）'
                 self.snapshot_log.emit(msg)
             self.tasks.append(task)
             self._add_task_row(task)
@@ -1776,8 +1845,9 @@ class TaskListComponent(QWidget):
         tl = tr['TaskList']
         text = ''
         total_text = ''
+        tip = ''
         if task.status == TaskStatus.PROCESSING and task.started_at is not None:
-            elapsed = time.time() - task.started_at
+            elapsed = task.accrued_elapsed()
             # 总预估：进度 ≥3% 用本任务实测外推（最准）；
             # 早期外推不稳则退回历史速度 EMA；均不可得用 -- 占位保持格式可见
             total = None
@@ -1789,13 +1859,20 @@ class TaskListComponent(QWidget):
                 self._fmt_duration(elapsed),
                 self._fmt_duration(total) if total else '--')
         elif task.status == TaskStatus.PENDING:
-            est = self._estimate_seconds(task)
-            if est:
-                text = tl['TimeEst'].format(self._fmt_duration(est))
+            if task.elapsed > 0:
+                # 快照恢复：上次已跑的用时（elapsed 落盘）+ 上次开始时刻，不显示为 0
+                text = tl['TimeUsed'].format(self._fmt_duration(task.elapsed))
+                if task.last_started_at:
+                    tip = tl['LastStartTip'].format(
+                        datetime.fromtimestamp(task.last_started_at).strftime('%m-%d %H:%M'))
+            else:
+                est = self._estimate_seconds(task)
+                if est:
+                    text = tl['TimeEst'].format(self._fmt_duration(est))
         elif task.elapsed > 0:
             # 完成/失败：总耗时从顶行移到底部浮现（进度条下方，定格显示）
             total_text = tl['TimeTotal'].format(self._fmt_duration(task.elapsed))
-        cell.set_time(text)
+        cell.set_time(text, tip)
         cell.set_total_time(total_text)
         # 行高随底部总耗时行显隐伸缩（46=标准两行，66=多一行总耗时；
         # 总耗行字号 16px 后 62 会挤压文字，加 4px 行距）

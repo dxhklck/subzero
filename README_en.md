@@ -10,7 +10,7 @@
 ![License](https://img.shields.io/badge/License-Apache%202-red.svg)
 ![python version](https://img.shields.io/badge/Python-3.13-blue.svg)
 ![support os](https://img.shields.io/badge/OS-Windows-green.svg)
-![version](https://img.shields.io/badge/version-1.3.0-1D9E75.svg)
+![version](https://img.shields.io/badge/version-1.3.1-1D9E75.svg)
 </div>
 
 ---
@@ -18,6 +18,13 @@
 ## Introduction
 
 SubZero removes hard-burned subtitles from videos: OCR locates the subtitle region and an AI inpainting model fills it in, preserving the original resolution. Available as a GUI app and a CLI, with automatic segmentation for long videos, checkpoint resuming, and a locally persisted task queue.
+
+**Fixes and improvements in 1.3.1**:
+
+- **Missed subtitles on static footage**: duplicate-frame skipping now checks two scales — the whole frame *and* the subtitle band. On screen recordings, slide-based lessons and fixed-camera footage a single subtitle line covers only 0.4% of the frame, so the old whole-frame mean-difference test marked it as "identical to the previous frame" and reused a subtitle-free detection, leaving the entire line untouched in the output (31% of subtitle frames missed in testing, up to 201 consecutive frames). Misses are now down to 2.7%, and what remains are 1–3 frame fade in/out boundaries covered by the timeline expansion
+- **Complete snapshot restore**: running tasks now persist live elapsed time and start timestamp, accumulated across resumes; on restore the completion percentage comes from the checkpoint's **frame** progress (not the segment count), and pending rows show the last duration and start time
+- **Resuming no longer restarts at 1%**: the run starts from the completed-frame ratio, and progress never moves backwards while processing; tasks without a checkpoint are explicitly reported as "starting from scratch"
+- **Residue second pass is on by default**: the fallback pass now ships enabled (quality first); when nothing is left it only costs one extra detection, with no re-encode
 
 **New in 1.3.0**:
 

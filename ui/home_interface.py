@@ -20,7 +20,7 @@ from qfluentwidgets import (PushButton, PrimaryPushButton, CardWidget, TextEdit,
 from ui.component.video_display_component import VideoDisplayComponent
 from ui.component.ab_fullscreen import AbFullscreenWindow
 from ui.component.task_list_component import (TaskListComponent, TaskStatus, TaskOptions,
-                                              resolve_output_path)
+                                              resolve_output_path, collect_segment_info)
 from ui.component.gpu_monitor_bar import GpuMonitorBar
 from ui.component.compact_rows import CompactComboRow, set_row_tooltip, _make_icon
 from ui.icon.my_fluent_icon import MyFluentIcon
@@ -1250,8 +1250,24 @@ class HomeInterface(QWidget):
 
                             self.video_display_component.save_selections_to_config()
 
+                            # 起始进度：分段任务若盘上 checkpoint 已有完成段，直接以
+                            # 已完成**帧**占比作为起点（与 _make_segment_progress_cb
+                            # 的合成口径一致：同样 int() 截断，避免起点比段内首个回调
+                            # 高 1% 造成跳变）。旧实现恒发 1% → 快照恢复显示 14% 的
+                            # 任务一点运行就退回 1%，且续跑第一段的检测阶段没有进度
+                            # 回调，观感等同于「从头重跑」。不可续跑的任务仍从 1% 起
+                            start_progress = 1
+                            try:
+                                seg_info = collect_segment_info(task_item)
+                                if seg_info and seg_info.get('can_resume'):
+                                    pct = int(float(seg_info.get('progress_pct') or 0.0))
+                                    if pct > 0:
+                                        start_progress = max(1, min(99, pct))
+                            except Exception:
+                                pass
                             # 更新任务状态为运行中（worker 线程不得直接触碰 Qt 控件，一律经信号）
-                            self.task_progress_signal.emit(self.current_processing_task_index, 1)
+                            self.task_progress_signal.emit(self.current_processing_task_index,
+                                                           start_progress)
 
                             # 选中当前任务
                             self.select_task_signal.emit(self.current_processing_task_index)

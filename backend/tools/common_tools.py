@@ -73,3 +73,42 @@ def read_image(path):
     except (OSError, ValueError, cv2.error):
         # 文件缺失/无权限/损坏：返回 None，由调用方按「打不开」兜底
         return None
+
+
+def json_safe(value):
+    """把任意运行时值递归规范化为 JSON 安全类型（持久化边界统一入口）。
+
+    UI 内存态里有两类「非 JSON 原生」值：``ab_sections`` 是 ``range``
+    （视频显示组件按 .start/.stop 就地调整区间）、``sub_areas`` 是 tuple。
+    它们一旦流入 json.dump（任务队列 tasks.json、分段 checkpoint.json）就会抛
+    ``TypeError: Object of type range is not JSON serializable``——分段任务在
+    建 checkpoint 时直接崩掉，整片无法开始处理（历史事故）。
+
+    规则：range -> [start, stop]；list/tuple -> list；set -> 排序后的 list
+    （保证哈希稳定）；dict -> 键转 str 后递归；Path -> str；numpy 标量 -> 原生
+    值；其余未知类型 -> str 兜底（宁可信息退化，也不让持久化失败）。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, range):
+        return [int(value.start), int(value.stop)]
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode('utf-8', 'replace')
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        try:
+            value = sorted(value)
+        except TypeError:
+            value = list(value)
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    item = getattr(value, 'item', None)  # numpy 标量
+    if callable(item):
+        try:
+            return json_safe(item())
+        except (TypeError, ValueError):
+            pass
+    return str(value)

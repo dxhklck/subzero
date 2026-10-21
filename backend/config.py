@@ -7,7 +7,7 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode, EncoderMode,
 import configparser
 
 # 项目版本号
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 # 净影 (SubZero) —— 自维护版本，仓库地址待创建后填入
 PROJECT_HOME_URL = "https://github.com/dxhklck/subzero"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
@@ -120,7 +120,10 @@ class Config(QConfig):
     # 二遍残留兜底：第一遍修复完成后对输出重跑检测，检出与原修复区域重叠的残留字幕并二修。
     # 漏检从「永久残留」变成「可救」；无残留时仅多花一次检测时间。误检防护：只修与第一遍
     # 修复区域重叠的检出，画面里天然像文字的纹理（波纹/栅栏/立面）不会被误修
-    residueCheck = ConfigItem("Main", "ResidueCheck", False, BoolValidator())
+    # 默认开启（质量优先）：第一遍检测受采样步长与重复帧跳过约束，静态画面里的短字幕
+    # 天然存在漏检概率，二遍是唯一兜底；二遍扫描本身逐帧且禁用判重，不继承第一遍的漏检。
+    # 代价 = 成片多一遍检测（无残留时只检测不重编码）；求速度可在设置里手动关闭
+    residueCheck = ConfigItem("Main", "ResidueCheck", True, BoolValidator())
     # 检测输入裁剪：把待检测帧裁到「字幕带 + margin」再送 OCR，检出框映射回原分辨率。
     # ⚠ 实证（test2.mp4 真实帧）：检出框级不等价（模型输出依赖输入尺寸，裁剪后有
     # ±2~18px 位移、偶发同行重组），但掩膜级差异由 create_mask 自适应外扩

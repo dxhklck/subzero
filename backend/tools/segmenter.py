@@ -118,6 +118,34 @@ def _canonicalize(v: Any) -> Any:
     return v
 
 
+def _json_default(o: Any) -> Any:
+    """json.dumps 的兜底序列化（checkpoint 落盘与参数哈希共用）。
+
+    历史上 range 对象（GUI 的 ab_sections）流入 params，save() 直接抛
+    ``TypeError: Object of type range is not JSON serializable`` 让整个分段任务
+    在建 checkpoint 时崩掉。这里做最后一道保险：任何未知类型都转成可序列化
+    形式，绝不让序列化问题中断任务（哈希退化为字符串也可接受）。
+    """
+    if isinstance(o, range):
+        return [int(o.start), int(o.stop)]
+    if isinstance(o, (set, frozenset)):
+        try:
+            return sorted(o)
+        except TypeError:
+            return list(o)
+    if isinstance(o, Path):
+        return str(o)
+    if isinstance(o, bytes):
+        return o.decode("utf-8", "replace")
+    item = getattr(o, "item", None)  # numpy 标量
+    if callable(item):
+        try:
+            return item()
+        except (TypeError, ValueError):
+            pass
+    return str(o)
+
+
 def params_hash(params: Dict[str, Any]) -> str:
     """对所有影响输出像素的任务参数做稳定 SHA-256。
 
@@ -129,7 +157,8 @@ def params_hash(params: Dict[str, Any]) -> str:
         for k in sorted(params)
         if k not in ("video_path", "output_path", "task_dir")
     }
-    blob = json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str)
+    blob = json.dumps(relevant, ensure_ascii=False, sort_keys=True,
+                      default=_json_default)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -143,6 +172,18 @@ class ResumeInfo:
     done_count: int = 0
     first_pending_index: int = -1     # 第一个未完成段的 0-based 序号
     hash_match: bool = True
+    done_frames: int = 0              # 已完成段覆盖的帧数（进度还原用）
+    total_frames: int = 0             # 计划总帧数
+
+    @property
+    def progress_pct(self) -> float:
+        """按帧计算的完成度（0~100）；无计划帧数时返回 0。
+
+        段数进度会骗人：末段通常短于整段，按段数算 21/22 段显示 95%，
+        实际帧进度可能已 99%。快照恢复的进度以帧为准。"""
+        if self.total_frames <= 0:
+            return 0.0
+        return max(0.0, min(100.0, 100.0 * self.done_frames / self.total_frames))
 
     @property
     def can_resume(self) -> bool:
@@ -230,6 +271,14 @@ def derive_resume_info(ckpt_path: Union[str, Path],
             break
     info.done_count = sum(1 for it in segments
                           if str(it.get("status", "")) == STATUS_DONE)
+    # 帧级进度（快照/断点恢复用）：已完成段的 cap 之和 ÷ 计划总帧数
+    try:
+        info.done_frames = sum(int(it.get("cap", 0) or 0) for it in segments
+                               if str(it.get("status", "")) == STATUS_DONE)
+        info.total_frames = int(data.get("total_frames")
+                                or sum(int(it.get("cap", 0) or 0) for it in segments))
+    except (TypeError, ValueError):
+        info.done_frames = info.total_frames = 0
     info.first_pending_index = first_pending
     info.hash_match = (expected_hash is None
                        or str(data.get("param_hash")) == str(expected_hash))
@@ -298,10 +347,17 @@ class Checkpoint:
     # -- 持久化 --------------------------------------------------------------
 
     def save(self) -> None:
-        """原子写盘（tmp + replace）。"""
+        """原子写盘（tmp + replace）。
+
+        default=_json_default 兜底：params 里若混入 range/Path/numpy 标量等
+        非 JSON 类型，旧实现直接抛 TypeError 把整个任务打断（分段任务在建
+        checkpoint 时必崩），这里改为尽力序列化。
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(self.data, ensure_ascii=False, indent=2, default=_json_default),
+            encoding="utf-8")
         tmp.replace(self.path)
 
     # -- 状态变更 ------------------------------------------------------------

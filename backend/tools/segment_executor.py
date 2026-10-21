@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS
+from backend.tools.common_tools import SUBPROCESS_CREATION_FLAGS, json_safe
 from backend.tools.ffmpeg_cli import FFmpegCLI
 from backend.tools.segmenter import Segment
 
@@ -56,12 +56,15 @@ def build_task_params(options: Dict[str, Any], inpaint_mode: Any) -> Dict[str, A
 
     段位置字段（frame_start/frame_end/frame_write_start/is_segment）不参与哈希；
     段间重叠帧数由调用方作为 segmentOverlapFrames 放入（改重叠值=拒绝续跑/重建）。
+
+    返回值的所有值均已规范化为 JSON 安全类型（见 json_safe）——它会被原样写入
+    checkpoint.json，任何非 JSON 类型都会让分段任务在建 checkpoint 时崩溃。
     """
     params: Dict[str, Any] = {"inpaint_mode": str(inpaint_mode)}
     for key, value in options.items():
         if key in ("frame_start", "frame_end", "frame_write_start", "is_segment"):
             continue  # 段位置字段，不属于内容参数
-        params[key] = value
+        params[key] = json_safe(value)
     return params
 
 
